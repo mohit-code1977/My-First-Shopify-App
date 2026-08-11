@@ -9,6 +9,7 @@ use App\Http\Controllers\ShopifyProductController;
 use App\Http\Controllers\ZohoAuthController;
 use App\Http\Controllers\ZohoSyncController;
 use Illuminate\Http\Request;
+use App\Http\Controllers\ShopifyWebhookController;
 
 
 
@@ -61,3 +62,6 @@ Route::get('/zoho/settings', [ZohoSyncController::class, 'settings'])
 
 Route::post('/zoho/settings/disconnect', [ZohoSyncController::class, 'disconnect'])
     ->name('zoho.settings.disconnect');
+
+Route::post('/webhooks/products', [ShopifyWebhookController::class, 'productsUpdate'])
+    ->name('shopify.webhooks.products');

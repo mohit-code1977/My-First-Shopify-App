@@ -6,9 +6,15 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use App\Models\Shop;
+use App\Services\ShopifyService;
+use Illuminate\Support\Facades\Log;
 
 class ShopifyAuthController extends Controller
 {
+    public function __construct(
+        private ShopifyService $shopifyService
+    ) {}
+
     public function install(Request $request)
     {
         $shop = $request->query('shop');
@@ -154,7 +160,7 @@ class ShopifyAuthController extends Controller
 
 
         /*------------- Insert/Update values in DB ----------*/
-        Shop::updateOrCreate(
+        $shopModel = Shop::updateOrCreate(
             [
                 'shop_domain' => $shop,
             ],
@@ -167,6 +173,16 @@ class ShopifyAuthController extends Controller
                     : null,
             ]
         );
+
+        // Register Shopify product update webhook
+        try {
+            $this->shopifyService->registerProductUpdateWebhook($shopModel);
+        } catch (\Throwable $e) {
+            Log::error('Shopify webhook registration failed', [
+                'shop' => $shop,
+                'error' => $e->getMessage(),
+            ]);
+        }
 
 
         // Clear OAuth session data

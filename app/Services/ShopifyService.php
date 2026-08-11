@@ -43,13 +43,166 @@ class ShopifyService
 
         $shop->update([
             'access_token' => $data['access_token'],
-            'refresh_token' => $data['refresh_token'],
+            'refresh_token' => $data['refresh_token'] ?? $shop->refresh_token,
             'scope' => $data['scope'] ?? $shop->scope,
-            'access_token_expires_at' => now()->addSeconds(
-                $data['expires_in']
-            ),
+            'access_token_expires_at' => isset($data['expires_in'])
+                ? now()->addSeconds($data['expires_in'])
+                : null,
         ]);
 
         return $data['access_token'];
+    }
+
+    /**
+     * Register the products/update webhook for a Shopify shop.
+     */
+    public function registerProductUpdateWebhook(Shop $shop): array
+    {
+        $accessToken = $this->getValidAccessToken($shop);
+
+        $webhookUrl = rtrim(env('SHOPIFY_APP_URL'), '/')
+            . '/webhooks/products';
+
+        /*
+         * First check whether our webhook already exists.
+         * This prevents duplicate subscriptions every time
+         * the app is installed/re-authorized.
+         */
+        $query = <<<'GRAPHQL'
+query {
+    webhookSubscriptions(first: 50) {
+        nodes {
+            id
+            topic
+            uri
+        }
+    }
+}
+GRAPHQL;
+
+        $checkResponse = Http::withHeaders([
+            'X-Shopify-Access-Token' => $accessToken,
+            'Content-Type' => 'application/json',
+        ])->post(
+            "https://{$shop->shop_domain}/admin/api/2026-07/graphql.json",
+            [
+                'query' => $query,
+            ]
+        );
+
+        if (!$checkResponse->successful()) {
+            throw new \Exception(
+                'Failed to check Shopify webhooks: ' .
+                $checkResponse->body()
+            );
+        }
+
+        $checkData = $checkResponse->json();
+
+        if (!empty($checkData['errors'])) {
+            throw new \Exception(
+                'Shopify webhook query failed: ' .
+                json_encode($checkData['errors'])
+            );
+        }
+
+        $existingWebhooks =
+            $checkData['data']['webhookSubscriptions']['nodes'] ?? [];
+
+        foreach ($existingWebhooks as $webhook) {
+            if (
+                $webhook['topic'] === 'PRODUCTS_UPDATE' &&
+                $webhook['uri'] === $webhookUrl
+            ) {
+                return [
+                    'success' => true,
+                    'created' => false,
+                    'message' => 'Product update webhook already exists.',
+                    'webhook_id' => $webhook['id'],
+                    'uri' => $webhook['uri'],
+                ];
+            }
+        }
+
+        /*
+         * Create the webhook.
+         */
+        $mutation = <<<'GRAPHQL'
+mutation webhookSubscriptionCreate(
+    $topic: WebhookSubscriptionTopic!,
+    $webhookSubscription: WebhookSubscriptionInput!
+) {
+    webhookSubscriptionCreate(
+        topic: $topic,
+        webhookSubscription: $webhookSubscription
+    ) {
+        webhookSubscription {
+            id
+            topic
+            uri
+        }
+        userErrors {
+            field
+            message
+        }
+    }
+}
+GRAPHQL;
+
+        $response = Http::withHeaders([
+            'X-Shopify-Access-Token' => $accessToken,
+            'Content-Type' => 'application/json',
+        ])->post(
+            "https://{$shop->shop_domain}/admin/api/2026-07/graphql.json",
+            [
+                'query' => $mutation,
+                'variables' => [
+                    'topic' => 'PRODUCTS_UPDATE',
+                    'webhookSubscription' => [
+                        'uri' => $webhookUrl,
+                    ],
+                ],
+            ]
+        );
+
+        if (!$response->successful()) {
+            throw new \Exception(
+                'Failed to create Shopify webhook: ' .
+                $response->body()
+            );
+        }
+
+        $data = $response->json();
+
+        if (!empty($data['errors'])) {
+            throw new \Exception(
+                'Shopify webhook creation failed: ' .
+                json_encode($data['errors'])
+            );
+        }
+
+        $result =
+            $data['data']['webhookSubscriptionCreate'] ?? null;
+
+        if (!$result) {
+            throw new \Exception(
+                'Invalid Shopify webhook creation response.'
+            );
+        }
+
+        if (!empty($result['userErrors'])) {
+            throw new \Exception(
+                'Shopify webhook user errors: ' .
+                json_encode($result['userErrors'])
+            );
+        }
+
+        return [
+            'success' => true,
+            'created' => true,
+            'message' => 'Product update webhook created successfully.',
+            'webhook_id' => $result['webhookSubscription']['id'] ?? null,
+            'uri' => $result['webhookSubscription']['uri'] ?? $webhookUrl,
+        ];
     }
 }
