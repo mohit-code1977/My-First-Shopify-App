@@ -12,7 +12,10 @@ api_version = "2026-07"
 [access_scopes]
 scopes = "read_products,write_products"
 optional_scopes = []
-use_legacy_install_flow = true
+
+[access.admin]
+embedded_app_direct_api_access = true
+direct_api_mode = "offline"
 
 [auth]
 redirect_urls = [

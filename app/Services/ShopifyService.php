@@ -10,17 +10,104 @@ class ShopifyService
     public function getValidAccessToken(Shop $shop): string
     {
         if (
+            $shop->access_token &&
             $shop->access_token_expires_at &&
             now()->lt($shop->access_token_expires_at)
         ) {
             return $shop->access_token;
         }
 
-        return $this->refreshAccessToken($shop);
+        if ($shop->refresh_token) {
+            return $this->refreshAccessToken($shop);
+        }
+
+        throw new \Exception(
+            'Shopify access token is missing. Token exchange is required.'
+        );
     }
 
+    /**
+     * Exchange Shopify App Bridge ID token for
+     * an offline Admin API access token.
+     */
+    public function exchangeToken(
+        string $shopDomain,
+        string $idToken
+    ): Shop {
+        $response = Http::asForm()
+            ->acceptJson()
+            ->post(
+                "https://{$shopDomain}/admin/oauth/access_token",
+                [
+                    'client_id' => env('SHOPIFY_API_KEY'),
+                    'client_secret' => env('SHOPIFY_API_SECRET'),
+
+                    'grant_type' =>
+                        'urn:ietf:params:oauth:grant-type:token-exchange',
+
+                    'subject_token' => $idToken,
+
+                    'subject_token_type' =>
+                        'urn:shopify:params:oauth:token-type:id_token',
+
+                    'requested_token_type' =>
+                        'urn:shopify:params:oauth:token-type:offline-access-token',
+                ]
+            );
+
+        if (!$response->successful()) {
+            throw new \Exception(
+                'Shopify token exchange failed: ' .
+                $response->body()
+            );
+        }
+
+        $data = $response->json();
+
+        if (empty($data['access_token'])) {
+            throw new \Exception(
+                'Shopify did not return an access token.'
+            );
+        }
+
+        $shop = Shop::updateOrCreate(
+            [
+                'shop_domain' => $shopDomain,
+            ],
+            [
+                'access_token' => $data['access_token'],
+
+                /*
+                 * Token exchange does not use the old
+                 * authorization-code refresh token flow.
+                 */
+                'refresh_token' => null,
+
+                'scope' => $data['scope'] ?? null,
+
+                'access_token_expires_at' =>
+                    isset($data['expires_in'])
+                        ? now()->addSeconds($data['expires_in'])
+                        : null,
+            ]
+        );
+
+        return $shop;
+    }
+
+    /**
+     * Refresh an expiring token from the old OAuth flow.
+     *
+     * Kept temporarily for existing installations.
+     */
     private function refreshAccessToken(Shop $shop): string
     {
+        if (!$shop->refresh_token) {
+            throw new \Exception(
+                'Shopify refresh token is missing.'
+            );
+        }
+
         $response = Http::asForm()
             ->acceptJson()
             ->post(
@@ -35,39 +122,50 @@ class ShopifyService
 
         if (!$response->successful()) {
             throw new \Exception(
-                'Shopify token refresh failed: ' . $response->body()
+                'Shopify token refresh failed: ' .
+                $response->body()
             );
         }
 
         $data = $response->json();
 
+        if (empty($data['access_token'])) {
+            throw new \Exception(
+                'Shopify refresh did not return an access token.'
+            );
+        }
+
         $shop->update([
             'access_token' => $data['access_token'],
-            'refresh_token' => $data['refresh_token'] ?? $shop->refresh_token,
-            'scope' => $data['scope'] ?? $shop->scope,
-            'access_token_expires_at' => isset($data['expires_in'])
-                ? now()->addSeconds($data['expires_in'])
-                : null,
+
+            'refresh_token' =>
+                $data['refresh_token'] ?? $shop->refresh_token,
+
+            'scope' =>
+                $data['scope'] ?? $shop->scope,
+
+            'access_token_expires_at' =>
+                isset($data['expires_in'])
+                    ? now()->addSeconds($data['expires_in'])
+                    : null,
         ]);
 
         return $data['access_token'];
     }
 
     /**
-     * Register the products/update webhook for a Shopify shop.
+     * Register products/update webhook.
      */
-    public function registerProductUpdateWebhook(Shop $shop): array
-    {
-        $accessToken = $this->getValidAccessToken($shop);
+    public function registerProductUpdateWebhook(
+        Shop $shop
+    ): array {
+        $accessToken =
+            $this->getValidAccessToken($shop);
 
-        $webhookUrl = rtrim(env('SHOPIFY_APP_URL'), '/')
-            . '/webhooks/products';
+        $webhookUrl =
+            rtrim(env('SHOPIFY_APP_URL'), '/') .
+            '/webhooks/products';
 
-        /*
-         * First check whether our webhook already exists.
-         * This prevents duplicate subscriptions every time
-         * the app is installed/re-authorized.
-         */
         $query = <<<'GRAPHQL'
 query {
     webhookSubscriptions(first: 50) {
@@ -117,16 +215,14 @@ GRAPHQL;
                 return [
                     'success' => true,
                     'created' => false,
-                    'message' => 'Product update webhook already exists.',
+                    'message' =>
+                        'Product update webhook already exists.',
                     'webhook_id' => $webhook['id'],
                     'uri' => $webhook['uri'],
                 ];
             }
         }
 
-        /*
-         * Create the webhook.
-         */
         $mutation = <<<'GRAPHQL'
 mutation webhookSubscriptionCreate(
     $topic: WebhookSubscriptionTopic!,
@@ -141,6 +237,7 @@ mutation webhookSubscriptionCreate(
             topic
             uri
         }
+
         userErrors {
             field
             message
@@ -156,8 +253,10 @@ GRAPHQL;
             "https://{$shop->shop_domain}/admin/api/2026-07/graphql.json",
             [
                 'query' => $mutation,
+
                 'variables' => [
                     'topic' => 'PRODUCTS_UPDATE',
+
                     'webhookSubscription' => [
                         'uri' => $webhookUrl,
                     ],
@@ -200,9 +299,13 @@ GRAPHQL;
         return [
             'success' => true,
             'created' => true,
-            'message' => 'Product update webhook created successfully.',
-            'webhook_id' => $result['webhookSubscription']['id'] ?? null,
-            'uri' => $result['webhookSubscription']['uri'] ?? $webhookUrl,
+            'message' =>
+                'Product update webhook created successfully.',
+            'webhook_id' =>
+                $result['webhookSubscription']['id'] ?? null,
+            'uri' =>
+                $result['webhookSubscription']['uri']
+                ?? $webhookUrl,
         ];
     }
 }

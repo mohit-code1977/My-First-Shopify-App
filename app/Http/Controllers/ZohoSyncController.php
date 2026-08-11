@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use Inertia\Inertia;
 use App\Models\ProductVariant;
 use App\Models\Shop;
 use App\Models\SyncHistory;
@@ -10,12 +11,14 @@ use Illuminate\Http\JsonResponse;
 use App\Services\ShopifyService;
 use Illuminate\Support\Facades\Http;
 
-class ZohoSyncController extends Controller {
+class ZohoSyncController extends Controller
+{
     public function __construct(
-    private ShopifyService $shopifyService
-) {}
+        private ShopifyService $shopifyService
+    ) {}
 
-    public function index() {
+    public function index()
+    {
         $shop = Shop::first();
 
         if (!$shop) {
@@ -26,33 +29,37 @@ class ZohoSyncController extends Controller {
             ->orderBy('id')
             ->get();
 
-        return view('zoho.sync', [
-            'shop' => $shop,
+        return Inertia::render('Zoho/Sync', [
+            'shop' => [
+                'id' => $shop->id,
+                'shop_domain' => $shop->shop_domain,
+            ],
             'variants' => $variants,
         ]);
     }
 
-   public function syncVariant(ProductVariant $variant): JsonResponse {
-    $shop = Shop::first();
+    public function syncVariant(ProductVariant $variant): JsonResponse
+    {
+        $shop = Shop::first();
 
-    if (!$shop) {
-        return response()->json([
-            'success' => false,
-            'message' => 'No Shopify shop installed.',
-        ], 404);
-    }
+        if (!$shop) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No Shopify shop installed.',
+            ], 404);
+        }
 
-    try {
+        try {
 
-        /*
+            /*
         |--------------------------------------------------------------------------
         | 1. Get fresh Shopify data
         |--------------------------------------------------------------------------
         */
 
-        $accessToken = $this->shopifyService->getValidAccessToken($shop);
+            $accessToken = $this->shopifyService->getValidAccessToken($shop);
 
-        $query = <<<'GRAPHQL'
+            $query = <<<'GRAPHQL'
 query GetVariant($id: ID!) {
     productVariant(id: $id) {
         id
@@ -64,97 +71,97 @@ query GetVariant($id: ID!) {
 }
 GRAPHQL;
 
-        $response = Http::withHeaders([
-            'X-Shopify-Access-Token' => $accessToken,
-            'Content-Type' => 'application/json',
-        ])->post(
-            "https://{$shop->shop_domain}/admin/api/2026-07/graphql.json",
-            [
-                'query' => $query,
-                'variables' => [
-                    'id' => $variant->shopify_variant_id,
-                ],
-            ]
-        );
-
-        if (!$response->successful()) {
-            throw new \Exception(
-                'Shopify API request failed: ' . $response->body()
+            $response = Http::withHeaders([
+                'X-Shopify-Access-Token' => $accessToken,
+                'Content-Type' => 'application/json',
+            ])->post(
+                "https://{$shop->shop_domain}/admin/api/2026-07/graphql.json",
+                [
+                    'query' => $query,
+                    'variables' => [
+                        'id' => $variant->shopify_variant_id,
+                    ],
+                ]
             );
-        }
 
-        $responseData = $response->json();
+            if (!$response->successful()) {
+                throw new \Exception(
+                    'Shopify API request failed: ' . $response->body()
+                );
+            }
 
-        if (!empty($responseData['errors'])) {
-            throw new \Exception(
-                'Shopify GraphQL request failed: ' .
-                json_encode($responseData['errors'])
-            );
-        }
+            $responseData = $response->json();
 
-        $shopifyVariant =
-            $responseData['data']['productVariant'] ?? null;
+            if (!empty($responseData['errors'])) {
+                throw new \Exception(
+                    'Shopify GraphQL request failed: ' .
+                        json_encode($responseData['errors'])
+                );
+            }
 
-        if (!$shopifyVariant) {
-            throw new \Exception(
-                'Shopify variant not found.'
-            );
-        }
+            $shopifyVariant =
+                $responseData['data']['productVariant'] ?? null;
+
+            if (!$shopifyVariant) {
+                throw new \Exception(
+                    'Shopify variant not found.'
+                );
+            }
 
 
-        /*
+            /*
         |--------------------------------------------------------------------------
         | 2. Update local variant with latest Shopify data
         |--------------------------------------------------------------------------
         */
 
-        $variant->update([
-            'title' => $shopifyVariant['title'],
-            'sku' => $shopifyVariant['sku'],
-            'price' => $shopifyVariant['price'],
-            'inventory_quantity' =>
+            $variant->update([
+                'title' => $shopifyVariant['title'],
+                'sku' => $shopifyVariant['sku'],
+                'price' => $shopifyVariant['price'],
+                'inventory_quantity' =>
                 $shopifyVariant['inventoryQuantity'],
-        ]);
+            ]);
 
-        // Refresh model so ZohoService receives latest DB values
-        $variant->refresh();
+            // Refresh model so ZohoService receives latest DB values
+            $variant->refresh();
 
 
-        /*
+            /*
         |--------------------------------------------------------------------------
         | 3. Sync latest Shopify data to Zoho
         |--------------------------------------------------------------------------
         */
 
-        $zohoService = new ZohoService($shop);
+            $zohoService = new ZohoService($shop);
 
-        $result = $zohoService->syncItem($variant);
+            $result = $zohoService->syncItem($variant);
 
 
-        return response()->json([
-            'success' => true,
-            'message' => $result['message']
-                ?? 'Synchronization completed.',
-            'data' => $result,
-        ]);
+            return response()->json([
+                'success' => true,
+                'message' => $result['message']
+                    ?? 'Synchronization completed.',
+                'data' => $result,
+            ]);
+        } catch (\Throwable $e) {
 
-    } catch (\Throwable $e) {
+            $status = str_contains(
+                $e->getMessage(),
+                'Zoho is not connected'
+            )
+                ? 409
+                : 500;
 
-        $status = str_contains(
-            $e->getMessage(),
-            'Zoho is not connected'
-        )
-            ? 409
-            : 500;
-
-        return response()->json([
-            'success' => false,
-            'message' => $e->getMessage(),
-        ], $status);
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+            ], $status);
+        }
     }
-}
 
-    public function syncAll(): JsonResponse {
+    public function syncAll(): JsonResponse
+    {
         $shop = Shop::first();
 
         if (!$shop) {
@@ -182,7 +189,8 @@ GRAPHQL;
         }
     }
 
-    public function history() {
+    public function history()
+    {
         $shop = Shop::first();
 
         if (!$shop) {
@@ -196,8 +204,11 @@ GRAPHQL;
             ->latest('id')
             ->paginate(20);
 
-        return view('zoho.history', [
-            'shop' => $shop,
+        return Inertia::render('Zoho/History', [
+            'shop' => [
+                'id' => $shop->id,
+                'shop_domain' => $shop->shop_domain,
+            ],
             'histories' => $histories,
         ]);
     }
@@ -205,7 +216,8 @@ GRAPHQL;
 
 
 
-    public function settings() {
+    public function settings()
+    {
         $shop = Shop::first();
 
         if (!$shop) {
@@ -214,13 +226,17 @@ GRAPHQL;
 
         $zohoConnection = $shop->zohoConnection;
 
-        return view('zoho.settings', [
-            'shop' => $shop,
+        return Inertia::render('Zoho/Settings', [
+            'shop' => [
+                'id' => $shop->id,
+                'shop_domain' => $shop->shop_domain,
+            ],
             'zohoConnection' => $zohoConnection,
         ]);
     }
 
-    public function disconnect() {
+    public function disconnect()
+    {
         $shop = Shop::first();
 
         if (!$shop) {
