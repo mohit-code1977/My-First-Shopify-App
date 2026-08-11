@@ -4,7 +4,6 @@
  * =========================================================
  */
 
-
 document.addEventListener('DOMContentLoaded', () => {
 
     /*
@@ -34,6 +33,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
     /*
      * -------------------------------------------------------
+     * CSRF TOKEN
+     * -------------------------------------------------------
+     */
+
+    const csrfToken =
+        document.querySelector('meta[name="csrf-token"]')?.content;
+
+
+    /*
+     * -------------------------------------------------------
      * SEARCH + STATUS FILTER
      * -------------------------------------------------------
      */
@@ -52,7 +61,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 ? statusFilter.value
                 : 'all';
 
-
         let visibleRows = 0;
 
 
@@ -67,7 +75,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const matchesSearch =
                 rowText.includes(search);
-
 
             const matchesStatus =
                 status === 'all' ||
@@ -92,10 +99,6 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
 
-        /*
-         * Show "no results" message
-         */
-
         if (noResults) {
 
             noResults.hidden =
@@ -107,7 +110,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
 
     /*
-     * Search listener
+     * -------------------------------------------------------
+     * SEARCH LISTENER
+     * -------------------------------------------------------
      */
 
     if (searchInput) {
@@ -121,7 +126,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
 
     /*
-     * Status listener
+     * -------------------------------------------------------
+     * STATUS FILTER LISTENER
+     * -------------------------------------------------------
      */
 
     if (statusFilter) {
@@ -136,10 +143,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     /*
      * -------------------------------------------------------
-     * INDIVIDUAL SYNC BUTTON
+     * INDIVIDUAL SYNC
      * -------------------------------------------------------
-     *
-     * Backend endpoint will be connected here.
      */
 
     syncButtons.forEach(button => {
@@ -148,15 +153,18 @@ document.addEventListener('DOMContentLoaded', () => {
             'click',
             async () => {
 
-                const productId =
-                    button.dataset.productId;
-
                 const variantId =
                     button.dataset.variantId;
 
 
-                if (!productId) {
+                if (!variantId) {
+
+                    console.error(
+                        'Variant ID is missing.'
+                    );
+
                     return;
+
                 }
 
 
@@ -177,45 +185,40 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 try {
 
-                    /*
-                     * ------------------------------------------------
-                     * IMPORTANT
-                     * ------------------------------------------------
-                     *
-                     * We will connect your Laravel sync endpoint here.
-                     *
-                     * Example:
-                     *
-                     * fetch(`/zoho/sync/${productId}`, {
-                     *     method: 'POST',
-                     *     headers: {
-                     *         'X-CSRF-TOKEN': csrfToken,
-                     *         'Accept': 'application/json'
-                     *     }
-                     * });
-                     *
-                     * ------------------------------------------------
-                     */
+                    const response =
+                        await fetch(
+                            `/zoho/sync/${variantId}`,
+                            {
+                                method: 'POST',
+
+                                headers: {
+                                    'X-CSRF-TOKEN':
+                                        csrfToken,
+
+                                    'Accept':
+                                        'application/json'
+                                }
+                            }
+                        );
+
+
+                    const data =
+                        await response.json();
+
+
+                    if (!response.ok || !data.success) {
+
+                        throw new Error(
+                            data.message ||
+                            'Synchronization failed.'
+                        );
+
+                    }
 
 
                     console.log(
-                        'Sync requested:',
-                        {
-                            productId,
-                            variantId
-                        }
-                    );
-
-
-                    /*
-                     * Temporary delay so UI behavior can be tested.
-                     *
-                     * REMOVE this when backend endpoint is connected.
-                     */
-
-                    await new Promise(
-                        resolve =>
-                            setTimeout(resolve, 700)
+                        'Sync successful:',
+                        data
                     );
 
 
@@ -245,7 +248,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         button.innerText =
                             originalText;
 
-                    }, 1200);
+                    }, 1500);
 
                 }
 
@@ -281,40 +284,49 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 try {
 
-                    /*
-                     * Backend endpoint will be connected here.
-                     *
-                     * Example:
-                     *
-                     * await fetch('/zoho/sync-all', {
-                     *     method: 'POST',
-                     *     headers: {
-                     *         'X-CSRF-TOKEN': csrfToken,
-                     *         'Accept': 'application/json'
-                     *     }
-                     * });
-                     */
+                    const response =
+                        await fetch(
+                            '/zoho/sync-all',
+                            {
+                                method: 'POST',
+
+                                headers: {
+                                    'X-CSRF-TOKEN':
+                                        csrfToken,
+
+                                    'Accept':
+                                        'application/json'
+                                }
+                            }
+                        );
+
+
+                    const data =
+                        await response.json();
+
+
+                    if (!response.ok || !data.success) {
+
+                        throw new Error(
+                            data.message ||
+                            'Synchronization failed.'
+                        );
+
+                    }
 
 
                     console.log(
-                        'Sync all products requested'
+                        'Sync all successful:',
+                        data
                     );
 
 
-                    /*
-                     * Temporary UI test.
-                     *
-                     * REMOVE after backend integration.
-                     */
-
-                    await new Promise(
-                        resolve =>
-                            setTimeout(resolve, 1000)
-                    );
+                    const summary =
+                        data.data;
 
 
                     syncAllButton.innerText =
-                        'Sync Complete';
+                        `Done: ${summary.created} created, ${summary.updated} updated`;
 
 
                 } catch (error) {
@@ -328,7 +340,6 @@ document.addEventListener('DOMContentLoaded', () => {
                     syncAllButton.innerText =
                         'Sync Failed';
 
-
                 } finally {
 
                     setTimeout(() => {
@@ -339,7 +350,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         syncAllButton.innerText =
                             originalText;
 
-                    }, 1500);
+                    }, 2500);
 
                 }
 

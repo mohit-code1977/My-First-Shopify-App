@@ -5,7 +5,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-    {{-- Shopify App Bridge --}}
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+
     <meta
         name="shopify-api-key"
         content="{{ env('SHOPIFY_API_KEY') }}">
@@ -502,11 +503,8 @@
                                         <button
                                             type="button"
                                             class="action-btn sync-button"
-                                            data-product-id="{{ $variant->id }}"
-                                            data-variant-id="{{ $variant->shopify_variant_id }}">
-
+                                            data-variant-id="{{ $variant->id }}">
                                             {{ $isSynced ? 'Sync' : 'Sync Now' }}
-
                                         </button>
 
                                     </td>

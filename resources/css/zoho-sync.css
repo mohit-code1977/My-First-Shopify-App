@@ -8,7 +8,6 @@
     box-sizing: border-box;
 }
 
-
 /* =========================================================
    ROOT
 ========================================================= */
@@ -37,7 +36,6 @@
     --radius: 10px;
 }
 
-
 /* =========================================================
    BODY
 ========================================================= */
@@ -58,7 +56,6 @@ body {
     min-height: 100vh;
 }
 
-
 /* =========================================================
    APP
 ========================================================= */
@@ -68,7 +65,6 @@ body {
     min-height: 100vh;
 }
 
-
 /* =========================================================
    MAIN
 ========================================================= */
@@ -77,7 +73,6 @@ body {
     width: 100%;
     min-height: 100vh;
 }
-
 
 /* =========================================================
    TOP BAR
@@ -97,20 +92,17 @@ body {
     padding: 16px 32px;
 }
 
-
 .page-title {
     font-size: 20px;
     font-weight: 700;
     line-height: 1.3;
 }
 
-
 .page-subtitle {
     font-size: 13px;
     color: var(--text-secondary);
     margin-top: 3px;
 }
-
 
 /* =========================================================
    CONNECTION STATUS
@@ -135,7 +127,6 @@ body {
     font-weight: 600;
 }
 
-
 .connection-dot {
     width: 8px;
     height: 8px;
@@ -145,7 +136,6 @@ body {
     border-radius: 50%;
 }
 
-
 /* =========================================================
    CONTENT
 ========================================================= */
@@ -153,7 +143,6 @@ body {
 .content {
     padding: 30px 32px;
 }
-
 
 /* =========================================================
    PAGE HEADING
@@ -170,14 +159,12 @@ body {
     margin-bottom: 25px;
 }
 
-
 .heading h1 {
     font-size: 28px;
     font-weight: 750;
 
     letter-spacing: -0.5px;
 }
-
 
 .heading p {
     color: var(--text-secondary);
@@ -186,7 +173,6 @@ body {
 
     margin-top: 6px;
 }
-
 
 /* =========================================================
    PRIMARY BUTTON
@@ -215,13 +201,11 @@ body {
     white-space: nowrap;
 }
 
-
 .primary-btn:hover {
     background: var(--primary-hover);
 
     transform: translateY(-1px);
 }
-
 
 .primary-btn:disabled {
     opacity: 0.6;
@@ -230,11 +214,9 @@ body {
     transform: none;
 }
 
-
 .button-icon {
     margin-right: 5px;
 }
-
 
 /* =========================================================
    STATISTICS
@@ -243,14 +225,12 @@ body {
 .stats {
     display: grid;
 
-    grid-template-columns:
-        repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
 
     gap: 18px;
 
     margin-bottom: 26px;
 }
-
 
 .stat-card {
     background: var(--surface);
@@ -262,14 +242,12 @@ body {
     padding: 20px;
 }
 
-
 .stat-top {
     display: flex;
 
     align-items: center;
     justify-content: space-between;
 }
-
 
 .stat-label {
     font-size: 13px;
@@ -278,7 +256,6 @@ body {
 
     font-weight: 500;
 }
-
 
 .stat-icon {
     width: 34px;
@@ -295,7 +272,6 @@ body {
     font-size: 16px;
 }
 
-
 .stat-value {
     font-size: 27px;
 
@@ -304,7 +280,6 @@ body {
     margin-top: 12px;
 }
 
-
 .stat-description {
     font-size: 12px;
 
@@ -312,7 +287,6 @@ body {
 
     margin-top: 4px;
 }
-
 
 /* =========================================================
    TABLE CARD
@@ -327,7 +301,6 @@ body {
 
     overflow: hidden;
 }
-
 
 /* =========================================================
    TABLE TOOLBAR
@@ -346,20 +319,17 @@ body {
     gap: 15px;
 }
 
-
 .toolbar-title {
     font-size: 15px;
 
     font-weight: 700;
 }
 
-
 .toolbar-actions {
     display: flex;
 
     gap: 10px;
 }
-
 
 /* =========================================================
    SEARCH
@@ -382,11 +352,9 @@ body {
     background: white;
 }
 
-
 .search-box:focus {
     border-color: var(--primary);
 }
-
 
 /* =========================================================
    FILTER
@@ -410,11 +378,9 @@ body {
     cursor: pointer;
 }
 
-
 .filter-select:focus {
     border-color: var(--primary);
 }
-
 
 /* =========================================================
    TABLE
@@ -424,7 +390,6 @@ body {
     overflow-x: auto;
 }
 
-
 table {
     width: 100%;
 
@@ -432,7 +397,6 @@ table {
 
     min-width: 900px;
 }
-
 
 th {
     text-align: left;
@@ -454,7 +418,6 @@ th {
     border-bottom: 1px solid var(--border);
 }
 
-
 td {
     padding: 16px 20px;
 
@@ -465,23 +428,19 @@ td {
     vertical-align: middle;
 }
 
-
 tbody tr {
     transition: background 0.15s ease;
 }
 
-
 tbody tr:hover {
     background: #fafafa;
 }
-
 
 .product-id {
     color: var(--text-secondary);
 
     font-size: 12px;
 }
-
 
 /* =========================================================
    PRODUCT
@@ -493,7 +452,6 @@ tbody tr:hover {
     color: var(--text-primary);
 }
 
-
 .variant-name {
     color: var(--text-secondary);
 
@@ -501,7 +459,6 @@ tbody tr:hover {
 
     font-size: 12px;
 }
-
 
 /* =========================================================
    SKU
@@ -515,7 +472,6 @@ tbody tr:hover {
     font-size: 12px;
 }
 
-
 /* =========================================================
    PRICE
 ========================================================= */
@@ -523,7 +479,6 @@ tbody tr:hover {
 .price {
     font-weight: 600;
 }
-
 
 /* =========================================================
    ZOHO ID
@@ -537,11 +492,9 @@ tbody tr:hover {
     color: var(--text-secondary);
 }
 
-
 .empty-id {
     color: var(--text-muted);
 }
-
 
 /* =========================================================
    STATUS
@@ -563,20 +516,17 @@ tbody tr:hover {
     font-weight: 700;
 }
 
-
 .status.synced {
     background: var(--success-bg);
 
     color: var(--success);
 }
 
-
 .status.pending {
     background: var(--warning-bg);
 
     color: var(--warning);
 }
-
 
 .status-dot {
     width: 6px;
@@ -586,7 +536,6 @@ tbody tr:hover {
 
     background: currentColor;
 }
-
 
 /* =========================================================
    ACTION BUTTON
@@ -612,20 +561,17 @@ tbody tr:hover {
         border-color 0.15s ease;
 }
 
-
 .action-btn:hover {
     background: #f3f4f6;
 
     border-color: #9ca3af;
 }
 
-
 .action-btn:disabled {
     opacity: 0.6;
 
     cursor: not-allowed;
 }
-
 
 /* =========================================================
    EMPTY STATE
@@ -639,13 +585,11 @@ tbody tr:hover {
     color: var(--text-secondary);
 }
 
-
 .empty-icon {
     font-size: 30px;
 
     margin-bottom: 12px;
 }
-
 
 .empty strong {
     display: block;
@@ -655,13 +599,11 @@ tbody tr:hover {
     font-size: 14px;
 }
 
-
 .empty p {
     margin-top: 5px;
 
     font-size: 12px;
 }
-
 
 /* =========================================================
    SEARCH EMPTY STATE
@@ -677,32 +619,24 @@ tbody tr:hover {
     font-size: 13px;
 }
 
-
 /* =========================================================
    RESPONSIVE
 ========================================================= */
 
 @media (max-width: 1100px) {
-
     .stats {
-        grid-template-columns:
-            repeat(2, minmax(0, 1fr));
+        grid-template-columns: repeat(2, minmax(0, 1fr));
     }
-
 }
 
-
 @media (max-width: 800px) {
-
     .content {
         padding: 20px;
     }
 
-
     .topbar {
         padding: 16px 20px;
     }
-
 
     .heading-row {
         flex-direction: column;
@@ -710,11 +644,9 @@ tbody tr:hover {
         align-items: stretch;
     }
 
-
     .primary-btn {
         width: 100%;
     }
-
 
     .table-toolbar {
         flex-direction: column;
@@ -722,33 +654,196 @@ tbody tr:hover {
         align-items: stretch;
     }
 
-
     .toolbar-actions {
         width: 100%;
     }
 
-
     .search-box {
         width: 100%;
     }
-
 }
 
-
 @media (max-width: 600px) {
-
     .stats {
         grid-template-columns: 1fr;
     }
-
 
     .topbar {
         padding: 16px 18px;
     }
 
-
     .connection {
         display: none;
     }
+}
 
+/* =========================================================
+   SYNC HISTORY
+========================================================= */
+
+.history-action {
+    display: inline-flex;
+    align-items: center;
+    padding: 5px 9px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.history-action.create {
+    background: #eff6ff;
+    color: #2563eb;
+}
+
+.history-action.update {
+    background: #f5f3ff;
+    color: #7c3aed;
+}
+
+.history-action.delete {
+    background: #fef2f2;
+    color: #dc2626;
+}
+
+.history-message {
+    display: block;
+    max-width: 260px;
+    color: #6b7280;
+    font-size: 12px;
+    line-height: 1.4;
+}
+
+.history-date {
+    font-size: 12px;
+    font-weight: 600;
+    color: #374151;
+}
+
+.history-time {
+    margin-top: 3px;
+    font-size: 11px;
+    color: #9ca3af;
+}
+
+/* =========================================================
+   PAGINATION
+========================================================= */
+
+.pagination {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 14px;
+    padding: 16px 20px;
+    border-top: 1px solid #e5e7eb;
+}
+
+.pagination-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 78px;
+    height: 34px;
+    padding: 0 12px;
+    border: 1px solid #d1d5db;
+    border-radius: 7px;
+    background: white;
+    color: #111827;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.pagination-button:hover {
+    background: #f3f4f6;
+}
+
+.pagination-button.disabled {
+    color: #9ca3af;
+    background: #f9fafb;
+    cursor: not-allowed;
+}
+
+.pagination-info {
+    color: #6b7280;
+    font-size: 12px;
+}
+
+
+
+
+
+
+
+
+
+
+
+.settings-grid {
+    display: grid;
+    gap: 20px;
+}
+
+.settings-body {
+    padding: 0 20px;
+}
+
+.settings-description,
+.setting-description {
+    color: #6b7280;
+    font-size: 13px;
+    margin-top: 5px;
+}
+
+.setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    padding: 18px 0;
+    border-bottom: 1px solid #f0f0f0;
+}
+
+.setting-row:last-child {
+    border-bottom: none;
+}
+
+.setting-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: #111827;
+}
+
+.setting-value {
+    margin-top: 5px;
+    font-size: 13px;
+    color: #6b7280;
+}
+
+.masked-value {
+    letter-spacing: 2px;
+}
+
+.danger-card {
+    border-color: #fecaca;
+}
+
+.danger-btn {
+    border: 1px solid #fca5a5;
+    background: white;
+    color: #dc2626;
+    padding: 8px 14px;
+    border-radius: 7px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.danger-btn:hover {
+    background: #fef2f2;
+}
+
+.danger-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
 }

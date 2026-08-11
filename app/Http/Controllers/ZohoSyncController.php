@@ -50,10 +50,14 @@ class ZohoSyncController extends Controller
                 'data' => $result,
             ]);
         } catch (\Throwable $e) {
+            $status = str_contains($e->getMessage(), 'Zoho is not connected')
+                ? 409
+                : 500;
+
             return response()->json([
                 'success' => false,
                 'message' => $e->getMessage(),
-            ], 500);
+            ], $status);
         }
     }
 
@@ -104,6 +108,53 @@ class ZohoSyncController extends Controller
         return view('zoho.history', [
             'shop' => $shop,
             'histories' => $histories,
+        ]);
+    }
+
+
+
+
+    public function settings()
+    {
+        $shop = Shop::first();
+
+        if (!$shop) {
+            abort(404, 'No Shopify shop installed.');
+        }
+
+        $zohoConnection = $shop->zohoConnection;
+
+        return view('zoho.settings', [
+            'shop' => $shop,
+            'zohoConnection' => $zohoConnection,
+        ]);
+    }
+
+    public function disconnect()
+    {
+        $shop = Shop::first();
+
+        if (!$shop) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No Shopify shop installed.',
+            ], 404);
+        }
+
+        $connection = $shop->zohoConnection;
+
+        if (!$connection) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Zoho is not connected.',
+            ], 404);
+        }
+
+        $connection->delete();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Zoho disconnected successfully.',
         ]);
     }
 }
