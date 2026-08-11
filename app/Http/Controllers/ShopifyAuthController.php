@@ -57,9 +57,10 @@ class ShopifyAuthController extends Controller
         $hmac = $request->query('hmac');
         $state = $request->query('state');
         $timestamp = $request->query('timestamp');
+        $host = $request->query('host');
 
         // Required parameters
-        if (!$shop || !$code || !$hmac || !$state || !$timestamp) {
+        if (!$shop || !$code || !$hmac || !$state || !$timestamp || !$host) {
             return response()->json([
                 'error' => 'Missing required OAuth parameters'
             ], 400);
@@ -176,13 +177,9 @@ class ShopifyAuthController extends Controller
 
         // Temporary testing response.
         // DO NOT expose the actual access token.
-        return response()->json([
-            'message' => 'Shopify app installed successfully',
+        return redirect()->route('zoho.sync', [
             'shop' => $shop,
-            'scope' => $scope,
-            'token_received' => true,
-            'expires_in' => $tokenData['expires_in'] ?? null,
-            'refresh_token_received' => isset($tokenData['refresh_token']),
+            'host' => $host,
         ]);
     }
 }

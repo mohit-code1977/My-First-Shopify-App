@@ -8,10 +8,8 @@ use App\Models\SyncHistory;
 use App\Services\ZohoService;
 use Illuminate\Http\JsonResponse;
 
-class ZohoSyncController extends Controller
-{
-    public function index()
-    {
+class ZohoSyncController extends Controller {
+    public function index() {
         $shop = Shop::first();
 
         if (!$shop) {
@@ -28,8 +26,7 @@ class ZohoSyncController extends Controller
         ]);
     }
 
-    public function syncVariant(ProductVariant $variant): JsonResponse
-    {
+    public function syncVariant(ProductVariant $variant): JsonResponse {
         $shop = Shop::first();
 
         if (!$shop) {
@@ -61,8 +58,7 @@ class ZohoSyncController extends Controller
         }
     }
 
-    public function syncAll(): JsonResponse
-    {
+    public function syncAll(): JsonResponse {
         $shop = Shop::first();
 
         if (!$shop) {
@@ -90,8 +86,7 @@ class ZohoSyncController extends Controller
         }
     }
 
-    public function history()
-    {
+    public function history() {
         $shop = Shop::first();
 
         if (!$shop) {
@@ -114,8 +109,7 @@ class ZohoSyncController extends Controller
 
 
 
-    public function settings()
-    {
+    public function settings() {
         $shop = Shop::first();
 
         if (!$shop) {
@@ -130,8 +124,7 @@ class ZohoSyncController extends Controller
         ]);
     }
 
-    public function disconnect()
-    {
+    public function disconnect() {
         $shop = Shop::first();
 
         if (!$shop) {

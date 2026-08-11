@@ -14,9 +14,17 @@
 
 <body>
     <s-app-nav>
-        <s-link href="/zoho/sync">Products</s-link>
-        <s-link href="/zoho/sync/history">Sync History</s-link>
-        <s-link href="/zoho/settings">Settings</s-link>
+        <s-link href="{{ route('zoho.sync', request()->query()) }}">
+            Products
+        </s-link>
+
+        <s-link href="{{ route('zoho.sync.history', request()->query()) }}">
+            Sync History
+        </s-link>
+
+        <s-link href="{{ route('zoho.settings', request()->query()) }}">
+            Settings
+        </s-link>
     </s-app-nav>
 
     <div class="app">
@@ -70,6 +78,17 @@
                                         @endif
                                     </div>
                                 </div>
+
+                                @if(!$zohoConnection)
+                                <!-- <s-link href="/zoho/connect">
+                                    <button type="button" class="sync-button">
+                                        Connect Zoho Books
+                                    </button>
+                                </s-link> -->
+                                <button type="button" class="sync-button" id="connectZohoButton">
+                                    Connect Zoho Books
+                                </button>
+                                @endif
                             </div>
 
                             @if($zohoConnection)
@@ -222,6 +241,24 @@
                     disconnectButton.disabled = false;
                     disconnectButton.innerText = 'Disconnect';
                 }
+            });
+        }
+
+
+        const connectZohoButton = document.getElementById('connectZohoButton');
+
+        if (connectZohoButton) {
+            connectZohoButton.addEventListener('click', () => {
+                const params = new URLSearchParams(window.location.search);
+                const shop = params.get('shop');
+                const host = params.get('host');
+
+                if (!shop || !host) {
+                    alert('Shopify context is missing. Please reopen the app from Shopify Admin.');
+                    return;
+                }
+
+                window.top.location.href = `/zoho/connect?shop=${encodeURIComponent(shop)}&host=${encodeURIComponent(host)}`;
             });
         }
     </script>
