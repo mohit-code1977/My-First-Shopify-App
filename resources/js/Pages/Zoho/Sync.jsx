@@ -2,8 +2,9 @@ import React, { useMemo, useState } from "react";
 import { Head } from "@inertiajs/react";
 
 const SYNC_ALL_URL = "/zoho/sync-all";
-
 const SYNC_VARIANT_URL = (variantId) => `/zoho/sync/${variantId}`;
+
+const PAGE_SIZE = 250;
 
 export default function Sync({
     shop,
@@ -12,44 +13,49 @@ export default function Sync({
     zohoConnected = false,
 }) {
     const [search, setSearch] = useState("");
-
-    const [statusFilter, setStatusFilter] = useState("all");
+    const [direction, setDirection] = useState("shopify-to-zoho");
+    const [connectionFilter, setConnectionFilter] = useState("all");
 
     const [syncingId, setSyncingId] = useState(null);
-
     const [syncingAll, setSyncingAll] = useState(false);
+
+    const [selectedIds, setSelectedIds] = useState([]);
 
     /*
     |--------------------------------------------------------------------------
-    | Dynamic statistics
+    | Helpers
     |--------------------------------------------------------------------------
     */
 
-    const stats = useMemo(() => {
-        const total = variants.length;
+    const getZohoId = (variant) =>
+        variant?.zoho_item_id ?? variant?.zoho_id ?? null;
 
-        const synced = variants.filter((variant) =>
-            Boolean(variant.zoho_item_id ?? variant.zoho_id),
-        ).length;
+    const isSynced = (variant) => Boolean(getZohoId(variant));
 
-        const pending = total - synced;
+    const getProductTitle = (variant) =>
+        variant?.product?.title || "Unknown Product";
 
-        const failed = Number(failedCount || 0);
+    const getVariantTitle = (variant) => variant?.title || "Default Title";
 
-        const percentage = total > 0 ? Math.round((synced / total) * 100) : 0;
+    const getProductImage = (variant) => {
+        return (
+            variant?.image_url ||
+            variant?.image?.src ||
+            variant?.product?.image?.src ||
+            variant?.product?.image_url ||
+            null
+        );
+    };
 
-        return {
-            total,
-            synced,
-            pending,
-            failed,
-            percentage,
-        };
-    }, [variants, failedCount]);
+    const formatPrice = (price) => {
+        const value = Number(price || 0);
+
+        return `₹${value.toFixed(2)}`;
+    };
 
     /*
     |--------------------------------------------------------------------------
-    | Search + filter
+    | Filtering
     |--------------------------------------------------------------------------
     */
 
@@ -57,15 +63,10 @@ export default function Sync({
         const query = search.trim().toLowerCase();
 
         return variants.filter((variant) => {
-            const productTitle = variant.product?.title?.toLowerCase() || "";
-
-            const variantTitle = variant.title?.toLowerCase() || "";
-
-            const sku = variant.sku?.toLowerCase() || "";
-
-            const zohoId = String(
-                variant.zoho_item_id ?? variant.zoho_id ?? "",
-            ).toLowerCase();
+            const productTitle = getProductTitle(variant).toLowerCase();
+            const variantTitle = getVariantTitle(variant).toLowerCase();
+            const sku = String(variant?.sku || "").toLowerCase();
+            const zohoId = String(getZohoId(variant) || "").toLowerCase();
 
             const matchesSearch =
                 !query ||
@@ -74,20 +75,61 @@ export default function Sync({
                 sku.includes(query) ||
                 zohoId.includes(query);
 
-            const isSynced = Boolean(variant.zoho_item_id ?? variant.zoho_id);
+            const synced = isSynced(variant);
 
-            const currentStatus = isSynced ? "synced" : "pending";
+            const matchesConnection =
+                connectionFilter === "all" ||
+                (connectionFilter === "connected" && synced) ||
+                (connectionFilter === "not-connected" && !synced);
 
-            const matchesStatus =
-                statusFilter === "all" || currentStatus === statusFilter;
-
-            return matchesSearch && matchesStatus;
+            return matchesSearch && matchesConnection;
         });
-    }, [variants, search, statusFilter]);
+    }, [variants, search, connectionFilter]);
 
     /*
     |--------------------------------------------------------------------------
-    | Individual sync
+    | Selection
+    |--------------------------------------------------------------------------
+    */
+
+    const allVisibleSelected =
+        filteredVariants.length > 0 &&
+        filteredVariants.every((variant) => selectedIds.includes(variant.id));
+
+    const toggleSelectAll = () => {
+        if (allVisibleSelected) {
+            setSelectedIds((current) =>
+                current.filter(
+                    (id) =>
+                        !filteredVariants.some((variant) => variant.id === id),
+                ),
+            );
+
+            return;
+        }
+
+        setSelectedIds((current) => {
+            const next = new Set(current);
+
+            filteredVariants.forEach((variant) => {
+                next.add(variant.id);
+            });
+
+            return Array.from(next);
+        });
+    };
+
+    const toggleSelected = (variantId) => {
+        setSelectedIds((current) =>
+            current.includes(variantId)
+                ? current.filter((id) => id !== variantId)
+                : [...current, variantId],
+        );
+    };
+
+    /*
+    |--------------------------------------------------------------------------
+    | Individual Sync
     |--------------------------------------------------------------------------
     */
 
@@ -99,7 +141,7 @@ export default function Sync({
         setSyncingId(variant.id);
 
         try {
-            const token = await shopify.idToken();
+            const token = await window.shopify?.idToken();
 
             const csrfToken =
                 document
@@ -108,14 +150,12 @@ export default function Sync({
 
             const response = await fetch(SYNC_VARIANT_URL(variant.id), {
                 method: "POST",
-
                 headers: {
-                    Authorization: `Bearer ${token}`,
+                    Authorization: token ? `Bearer ${token}` : "",
                     "X-CSRF-TOKEN": csrfToken,
                     Accept: "application/json",
                     "Content-Type": "application/json",
                 },
-
                 body: JSON.stringify({}),
             });
 
@@ -125,9 +165,6 @@ export default function Sync({
                 throw new Error(data.message || "Synchronization failed.");
             }
 
-            console.log("Sync successful:", data);
-
-            // Reload so product status / counts stay in sync with DB.
             window.location.reload();
         } catch (error) {
             console.error("Sync failed:", error);
@@ -140,7 +177,7 @@ export default function Sync({
 
     /*
     |--------------------------------------------------------------------------
-    | Sync all
+    | Sync All
     |--------------------------------------------------------------------------
     */
 
@@ -152,7 +189,7 @@ export default function Sync({
         setSyncingAll(true);
 
         try {
-            const token = await shopify.idToken();
+            const token = await window.shopify?.idToken();
 
             const csrfToken =
                 document
@@ -161,14 +198,12 @@ export default function Sync({
 
             const response = await fetch(SYNC_ALL_URL, {
                 method: "POST",
-
                 headers: {
-                    Authorization: `Bearer ${token}`,
+                    Authorization: token ? `Bearer ${token}` : "",
                     "X-CSRF-TOKEN": csrfToken,
                     Accept: "application/json",
                     "Content-Type": "application/json",
                 },
-
                 body: JSON.stringify({}),
             });
 
@@ -177,8 +212,6 @@ export default function Sync({
             if (!response.ok || !data.success) {
                 throw new Error(data.message || "Synchronization failed.");
             }
-
-            console.log("Sync all successful:", data);
 
             window.location.reload();
         } catch (error) {
@@ -192,40 +225,51 @@ export default function Sync({
 
     /*
     |--------------------------------------------------------------------------
-    | Helpers
+    | Refresh
     |--------------------------------------------------------------------------
     */
 
-    const getZohoId = (variant) =>
-        variant.zoho_item_id ?? variant.zoho_id ?? null;
-
-    const isSynced = (variant) => Boolean(getZohoId(variant));
-
-    const formatPrice = (price) => {
-        const value = Number(price || 0);
-
-        return `₹${value.toFixed(2)}`;
+    const refreshPage = () => {
+        window.location.reload();
     };
+
+    /*
+    |--------------------------------------------------------------------------
+    | Zoho → Shopify
+    |--------------------------------------------------------------------------
+    |
+    | The current backend only exposes Shopify → Zoho sync endpoints.
+    | The second tab is therefore kept as the reference UI state, but
+    | doesn't pretend that reverse synchronization already exists.
+    */
+
+    const reverseSyncAvailable = false;
+
+    /*
+    |--------------------------------------------------------------------------
+    | Render
+    |--------------------------------------------------------------------------
+    */
 
     return (
         <>
             <Head title="Products" />
 
-            <div className="zoho-page">
-                {/* =====================================================
-                    HEADER
-                ====================================================== */}
+            <div className="zoho-products-page">
+                {/* =========================================================
+                    APP HEADER
+                ========================================================== */}
 
-                <header className="zoho-header">
-                    <div className="zoho-header-left">
-                        <div className="zoho-brand-mark">Z</div>
+                <header className="zoho-products-header">
+                    <div className="zoho-products-header-left">
+                        <div className="zoho-products-logo">Z</div>
 
                         <div>
-                            <div className="zoho-header-title">
+                            <div className="zoho-products-header-title">
                                 Zoho Books Integration
                             </div>
 
-                            <div className="zoho-header-subtitle">
+                            <div className="zoho-products-header-subtitle">
                                 Shopify Store:{" "}
                                 {shop?.shop_domain || "Unknown store"}
                             </div>
@@ -235,193 +279,216 @@ export default function Sync({
                     <div
                         className={
                             zohoConnected
-                                ? "connection-badge"
-                                : "connection-badge disconnected"
+                                ? "zoho-connection-status connected"
+                                : "zoho-connection-status disconnected"
                         }
                     >
-                        <span className="connection-dot" />
+                        <span className="zoho-connection-dot" />
 
                         {zohoConnected ? "Connected" : "Not Connected"}
                     </div>
                 </header>
 
-                {/* =====================================================
-                    MAIN CONTENT
-                ====================================================== */}
+                {/* =========================================================
+                    PAGE
+                ========================================================== */}
 
-                <main className="zoho-content">
-                    {/* =================================================
-                        PAGE HEADER
-                    ================================================== */}
+                <main className="zoho-products-content">
+                    <section className="reference-products-card">
+                        {/* =================================================
+                            CARD HEADER
+                        ================================================== */}
 
-                    <section className="page-intro">
-                        <div className="page-intro-copy">
-                            <span className="eyebrow">
-                                PRODUCT SYNCHRONIZATION
-                            </span>
-
-                            <h1>Shopify Products</h1>
-
-                            <p>
-                                Manage and synchronize your Shopify products
-                                with Zoho Books.
-                            </p>
-                        </div>
-
-                        <button
-                            type="button"
-                            className="primary-btn"
-                            onClick={syncAll}
-                            disabled={syncingAll || !zohoConnected}
-                        >
-                            <span className="button-icon">↻</span>
-
-                            {syncingAll ? "Syncing..." : "Sync All Products"}
-                        </button>
-                    </section>
-
-
-                    {!zohoConnected && (
-                        <div className="connection-notice">
-                            <strong>Zoho Books is disconnected.</strong>
-                            <span>
-                                Previous synchronization data is preserved, but
-                                new synchronizations are disabled until you
-                                reconnect Zoho Books.
-                            </span>
-                        </div>
-                    )}
-                    
-
-                    {/* =================================================
-                        SYNC OVERVIEW
-                    ================================================== */}
-
-                    <section className="overview-card">
-                        <div className="overview-top">
+                        <div className="reference-products-card-header">
                             <div>
-                                <h2>Sync Overview</h2>
-                                <p>
-                                    {zohoConnected
-                                        ? "Current synchronization status"
-                                        : "Last known synchronization status"}
-                                </p>{" "}
+                                <h1>Products</h1>
                             </div>
 
-                            <div className="sync-percentage">
-                                {zohoConnected
-                                    ? `${stats.percentage}% synced`
-                                    : `${stats.synced} previously synced`}
-                            </div>
+                            <button
+                                type="button"
+                                className="reference-refresh-btn"
+                                onClick={refreshPage}
+                            >
+                                ↻<span>Refresh</span>
+                            </button>
                         </div>
 
-                        <div className="progress-track">
-                            <div
-                                className="progress-bar"
-                                style={{
-                                    width: `${stats.percentage}%`,
-                                }}
-                            />
+                        {/* =================================================
+                            DIRECTION TABS
+                        ================================================== */}
+
+                        <div className="sync-direction-tabs">
+                            <button
+                                type="button"
+                                className={
+                                    direction === "shopify-to-zoho"
+                                        ? "sync-direction-tab active"
+                                        : "sync-direction-tab"
+                                }
+                                onClick={() => setDirection("shopify-to-zoho")}
+                            >
+                                Shopify → Zoho
+                            </button>
+
+                            <button
+                                type="button"
+                                className={
+                                    direction === "zoho-to-shopify"
+                                        ? "sync-direction-tab active"
+                                        : "sync-direction-tab"
+                                }
+                                onClick={() => setDirection("zoho-to-shopify")}
+                                disabled={!reverseSyncAvailable}
+                                title={
+                                    reverseSyncAvailable
+                                        ? ""
+                                        : "Zoho → Shopify sync is not available yet."
+                                }
+                            >
+                                Zoho → Shopify
+                            </button>
                         </div>
 
-                        <div className="overview-stats">
-                            <div className="overview-stat">
-                                <span>Total Products</span>
+                        {/* =================================================
+                            TOOLBAR
+                        ================================================== */}
 
-                                <strong>{stats.total}</strong>
-                            </div>
+                        <div className="reference-products-toolbar">
+                            <div className="reference-search-wrap">
+                                <span className="reference-search-icon">⌕</span>
 
-                            <div className="overview-stat">
-                                <span>Synced</span>
-
-                                <strong className="success-value">
-                                    {stats.synced}
-                                </strong>
-                            </div>
-
-                            <div className="overview-stat">
-                                <span>Pending</span>
-                                <strong>
-                                    {zohoConnected ? stats.pending : "—"}
-                                </strong>
-                            </div>
-
-                            <div className="overview-stat">
-                                <span>Failed</span>
-                                <strong className="danger-value">
-                                    {zohoConnected ? stats.failed : "—"}
-                                </strong>
-                            </div>
-                        </div>
-                    </section>
-
-                    {/* =================================================
-                        PRODUCT TABLE
-                    ================================================== */}
-
-                    <section className="products-card">
-                        <div className="products-toolbar">
-                            <div>
-                                <h2>Shopify Products</h2>
-
-                                <p>
-                                    {filteredVariants.length}{" "}
-                                    {filteredVariants.length === 1
-                                        ? "product"
-                                        : "products"}{" "}
-                                    displayed
-                                </p>
-                            </div>
-
-                            <div className="toolbar-actions">
-                                <div className="search-wrapper">
-                                    <span className="search-icon">⌕</span>
-
-                                    <input
-                                        type="text"
-                                        className="search-box"
-                                        placeholder="Search products..."
-                                        value={search}
-                                        onChange={(event) =>
-                                            setSearch(event.target.value)
-                                        }
-                                    />
-                                </div>
-
-                                <select
-                                    className="filter-select"
-                                    value={statusFilter}
+                                <input
+                                    type="text"
+                                    className="reference-search-input"
+                                    placeholder="Search products, variants, SKU..."
+                                    value={search}
                                     onChange={(event) =>
-                                        setStatusFilter(event.target.value)
+                                        setSearch(event.target.value)
+                                    }
+                                />
+                            </div>
+
+                            <div className="reference-toolbar-right">
+                                <select
+                                    className="reference-page-size"
+                                    value={PAGE_SIZE}
+                                    disabled
+                                    aria-label="Products per page"
+                                >
+                                    <option value={PAGE_SIZE}>
+                                        {PAGE_SIZE} per page
+                                    </option>
+                                </select>
+
+                                <button
+                                    type="button"
+                                    className="reference-small-btn"
+                                    onClick={refreshPage}
+                                >
+                                    Refresh
+                                </button>
+
+                                <button
+                                    type="button"
+                                    className="reference-sync-selected-btn"
+                                    disabled={
+                                        selectedIds.length === 0 ||
+                                        !zohoConnected ||
+                                        direction !== "shopify-to-zoho"
+                                    }
+                                    title={
+                                        direction !== "shopify-to-zoho"
+                                            ? "Reverse sync is not available yet."
+                                            : ""
                                     }
                                 >
-                                    <option value="all">All Status</option>
-
-                                    <option value="synced">Synced</option>
-
-                                    <option value="pending">Pending</option>
-                                </select>
+                                    Sync Selected
+                                </button>
                             </div>
                         </div>
 
-                        {filteredVariants.length > 0 ? (
-                            <div className="table-wrapper">
-                                <table className="products-table">
+                        {/* =================================================
+                            CONNECTION FILTERS
+                        ================================================== */}
+
+                        <div className="reference-connection-tabs">
+                            <button
+                                type="button"
+                                className={
+                                    connectionFilter === "all"
+                                        ? "reference-connection-tab active"
+                                        : "reference-connection-tab"
+                                }
+                                onClick={() => setConnectionFilter("all")}
+                            >
+                                All
+                            </button>
+
+                            <button
+                                type="button"
+                                className={
+                                    connectionFilter === "connected"
+                                        ? "reference-connection-tab active"
+                                        : "reference-connection-tab"
+                                }
+                                onClick={() => setConnectionFilter("connected")}
+                            >
+                                Connected to Zoho (Linked)
+                            </button>
+
+                            <button
+                                type="button"
+                                className={
+                                    connectionFilter === "not-connected"
+                                        ? "reference-connection-tab active"
+                                        : "reference-connection-tab"
+                                }
+                                onClick={() =>
+                                    setConnectionFilter("not-connected")
+                                }
+                            >
+                                Not Connected to Zoho (Not Linked)
+                            </button>
+                        </div>
+
+                        {/* =================================================
+                            TABLE
+                        ================================================== */}
+
+                        {direction === "zoho-to-shopify" ? (
+                            <div className="reference-reverse-sync-placeholder">
+                                <div className="reference-placeholder-icon">
+                                    Z
+                                </div>
+
+                                <h2>Zoho → Shopify</h2>
+
+                                <p>
+                                    Reverse product synchronization is not
+                                    available in the current backend yet.
+                                </p>
+                            </div>
+                        ) : filteredVariants.length > 0 ? (
+                            <div className="reference-table-wrapper">
+                                <table className="reference-products-table">
                                     <thead>
                                         <tr>
-                                            <th>PRODUCT</th>
+                                            <th className="check-column">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={allVisibleSelected}
+                                                    onChange={toggleSelectAll}
+                                                    aria-label="Select all products"
+                                                />
+                                            </th>
 
+                                            <th>IMAGE</th>
+                                            <th>VARIANT</th>
                                             <th>SKU</th>
-
                                             <th>PRICE</th>
-
-                                            <th>INVENTORY</th>
-
-                                            <th>ZOHO ITEM</th>
-
                                             <th>STATUS</th>
-
-                                            <th>ACTION</th>
+                                            <th>INVENTORY</th>
+                                            <th>ACTIONS</th>
                                         </tr>
                                     </thead>
 
@@ -431,46 +498,75 @@ export default function Sync({
 
                                             const zohoId = getZohoId(variant);
 
+                                            const image =
+                                                getProductImage(variant);
+
                                             const isSyncing =
                                                 syncingId === variant.id;
 
-                                            const productTitle =
-                                                variant.product?.title ||
-                                                "Unknown Product";
+                                            const isSelected =
+                                                selectedIds.includes(
+                                                    variant.id,
+                                                );
 
                                             return (
                                                 <tr key={variant.id}>
+                                                    <td className="check-column">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={isSelected}
+                                                            onChange={() =>
+                                                                toggleSelected(
+                                                                    variant.id,
+                                                                )
+                                                            }
+                                                            aria-label={`Select ${getProductTitle(
+                                                                variant,
+                                                            )}`}
+                                                        />
+                                                    </td>
+
                                                     <td>
-                                                        <div className="product-cell">
-                                                            <div className="product-avatar">
-                                                                {productTitle
+                                                        <div className="reference-product-image">
+                                                            {image ? (
+                                                                <img
+                                                                    src={image}
+                                                                    alt=""
+                                                                />
+                                                            ) : (
+                                                                getProductTitle(
+                                                                    variant,
+                                                                )
                                                                     .charAt(0)
-                                                                    .toUpperCase()}
+                                                                    .toUpperCase()
+                                                            )}
+                                                        </div>
+                                                    </td>
+
+                                                    <td>
+                                                        <div className="reference-variant-cell">
+                                                            <div className="reference-product-title">
+                                                                {getProductTitle(
+                                                                    variant,
+                                                                )}
                                                             </div>
 
-                                                            <div>
-                                                                <div className="product-name">
-                                                                    {
-                                                                        productTitle
-                                                                    }
-                                                                </div>
-
-                                                                <div className="variant-name">
-                                                                    {variant.title ||
-                                                                        "Default Variant"}
-                                                                </div>
+                                                            <div className="reference-variant-title">
+                                                                {getVariantTitle(
+                                                                    variant,
+                                                                )}
                                                             </div>
                                                         </div>
                                                     </td>
 
                                                     <td>
-                                                        <span className="sku">
+                                                        <span className="reference-sku">
                                                             {variant.sku || "—"}
                                                         </span>
                                                     </td>
 
                                                     <td>
-                                                        <span className="price">
+                                                        <span className="reference-price">
                                                             {formatPrice(
                                                                 variant.price,
                                                             )}
@@ -478,63 +574,49 @@ export default function Sync({
                                                     </td>
 
                                                     <td>
-                                                        {variant.inventory_quantity ??
-                                                            0}
-                                                    </td>
-
-                                                    <td>
-                                                        {zohoId ? (
-                                                            <span className="zoho-id">
-                                                                {zohoId}
+                                                        {synced ? (
+                                                            <span className="reference-status active">
+                                                                Active
                                                             </span>
                                                         ) : (
-                                                            <span className="empty-id">
-                                                                —
+                                                            <span className="reference-status not-linked">
+                                                                Not Linked
                                                             </span>
                                                         )}
                                                     </td>
 
                                                     <td>
-                                                        <span
-                                                            className={
-                                                                synced
-                                                                    ? "status synced"
-                                                                    : "status pending"
-                                                            }
-                                                        >
-                                                            <span className="status-dot" />
-
-                                                            {synced
-                                                                ? zohoConnected
-                                                                    ? "Synced"
-                                                                    : "Previously Synced"
-                                                                : "Pending"}
+                                                        <span className="reference-inventory">
+                                                            {variant.inventory_quantity ??
+                                                                0}
                                                         </span>
                                                     </td>
 
                                                     <td>
-                                                        <button
-                                                            type="button"
-                                                            className="action-btn"
-                                                            disabled={
-                                                                Boolean(
-                                                                    syncingId,
-                                                                ) ||
-                                                                syncingAll ||
-                                                                !zohoConnected
-                                                            }
-                                                            onClick={() =>
-                                                                syncVariant(
-                                                                    variant,
-                                                                )
-                                                            }
-                                                        >
-                                                            {isSyncing
-                                                                ? "Syncing..."
-                                                                : synced
-                                                                  ? "Sync Again"
-                                                                  : "Sync Now"}
-                                                        </button>
+                                                        <div className="reference-action-group">
+                                                            <button
+                                                                type="button"
+                                                                className="reference-sync-btn"
+                                                                disabled={
+                                                                    !zohoConnected ||
+                                                                    syncingAll ||
+                                                                    Boolean(
+                                                                        syncingId,
+                                                                    )
+                                                                }
+                                                                onClick={() =>
+                                                                    syncVariant(
+                                                                        variant,
+                                                                    )
+                                                                }
+                                                            >
+                                                                {isSyncing
+                                                                    ? "Syncing..."
+                                                                    : synced
+                                                                      ? "Sync Again"
+                                                                      : "Sync"}
+                                                            </button>
+                                                        </div>
                                                     </td>
                                                 </tr>
                                             );
@@ -543,14 +625,31 @@ export default function Sync({
                                 </table>
                             </div>
                         ) : (
-                            <div className="empty-state">
-                                <div className="empty-state-icon">⌕</div>
+                            <div className="reference-empty-state">
+                                <div className="reference-empty-icon">⌕</div>
 
-                                <strong>No products found</strong>
+                                <h2>No products found</h2>
 
-                                <p>Try changing your search or filter.</p>
+                                <p>
+                                    Try changing your search or connection
+                                    filter.
+                                </p>
                             </div>
                         )}
+
+                        {/* =================================================
+                            FOOTER
+                        ================================================== */}
+
+                        <div className="reference-products-footer">
+                            <span>{filteredVariants.length} products</span>
+
+                            <span>
+                                {failedCount > 0
+                                    ? `${failedCount} failed synchronization${failedCount === 1 ? "" : "s"}`
+                                    : "Sync status is up to date"}
+                            </span>
+                        </div>
                     </section>
                 </main>
             </div>
