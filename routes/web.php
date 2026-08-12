@@ -2,14 +2,13 @@
 
 use App\Http\Controllers\ShopifyAuthController;
 use App\Http\Controllers\ProfileController;
-use Illuminate\Foundation\Application;
 use Illuminate\Support\Facades\Route;
 use Inertia\Inertia;
 use App\Http\Controllers\ShopifyProductController;
 use App\Http\Controllers\ZohoAuthController;
 use App\Http\Controllers\ZohoSyncController;
-use Illuminate\Http\Request;
 use App\Http\Controllers\ShopifyWebhookController;
+
 
 
 
@@ -36,19 +35,16 @@ Route::get('/shopify/products', [ShopifyProductController::class, 'products']);
 Route::get('/zoho/connect', [ZohoAuthController::class, 'connect']);
 Route::get('/zoho/callback', [ZohoAuthController::class, 'callback']);
 
-Route::get('/zoho/sync', [ZohoSyncController::class, 'index'])
-    ->name('zoho.sync');
-
 Route::get('/zoho/sync/history', [ZohoSyncController::class, 'history'])
     ->name('zoho.sync.history');
 
-Route::post('/zoho/sync/{variant}', [ZohoSyncController::class, 'syncVariant'])
-    ->middleware('shopify.auth')
+Route::get('/zoho/sync', [ZohoSyncController::class, 'index',])
+    ->name('zoho.sync');
+
+Route::post('/zoho/sync', [ZohoSyncController::class, 'syncVariant',])
     ->name('zoho.sync.variant');
 
-
-Route::post('/zoho/sync-all', [ZohoSyncController::class, 'syncAll'])
-    ->middleware('shopify.auth')
+Route::post('/zoho/sync-all', [ZohoSyncController::class, 'syncAll',])
     ->name('zoho.sync.all');
 
 Route::get('/zoho/settings', [ZohoSyncController::class, 'settings'])

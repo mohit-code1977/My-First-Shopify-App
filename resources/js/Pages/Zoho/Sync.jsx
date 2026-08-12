@@ -2,9 +2,7 @@ import React, { useMemo, useState } from "react";
 import { Head } from "@inertiajs/react";
 
 const SYNC_ALL_URL = "/zoho/sync-all";
-const SYNC_VARIANT_URL = (variantId) => `/zoho/sync/${variantId}`;
-
-const PAGE_SIZE = 250;
+const SYNC_VARIANT_URL = "/zoho/sync";
 
 export default function Sync({
     shop,
@@ -30,6 +28,9 @@ export default function Sync({
     const getZohoId = (variant) =>
         variant?.zoho_item_id ?? variant?.zoho_id ?? null;
 
+    const getShopifyVariantId = (variant) =>
+        variant?.shopify_variant_id ?? variant?.id ?? null;
+
     const isSynced = (variant) => Boolean(getZohoId(variant));
 
     const getProductTitle = (variant) =>
@@ -47,10 +48,35 @@ export default function Sync({
         );
     };
 
-    const formatPrice = (price) => {
-        const value = Number(price || 0);
+    const getCurrencyCode = (variant) =>
+        variant?.currency_code ||
+        variant?.currency ||
+        variant?.product?.currency_code ||
+        shop?.currency_code ||
+        shop?.currency ||
+        null;
 
-        return `₹${value.toFixed(2)}`;
+    const formatPrice = (price, variant) => {
+        const value = Number(price);
+
+        if (!Number.isFinite(value)) {
+            return "—";
+        }
+
+        const currencyCode = getCurrencyCode(variant);
+
+        if (!currencyCode) {
+            return value.toFixed(2);
+        }
+
+        try {
+            return new Intl.NumberFormat(undefined, {
+                style: "currency",
+                currency: currencyCode,
+            }).format(value);
+        } catch {
+            return value.toFixed(2);
+        }
     };
 
     /*
@@ -128,6 +154,104 @@ export default function Sync({
     };
 
     /*
+|--------------------------------------------------------------------------
+| Sync Selected
+|--------------------------------------------------------------------------
+*/
+
+    const syncSelected = async () => {
+        if (
+            selectedIds.length === 0 ||
+            !zohoConnected ||
+            syncingAll ||
+            syncingId
+        ) {
+            return;
+        }
+
+        setSyncingAll(true);
+
+        const selectedVariants = variants.filter((variant) =>
+            selectedIds.includes(variant.id),
+        );
+
+        let successCount = 0;
+        let failedCountLocal = 0;
+        const failures = [];
+
+        try {
+            const token = await window.shopify?.idToken();
+
+            const csrfToken =
+                document
+                    .querySelector('meta[name="csrf-token"]')
+                    ?.getAttribute("content") || "";
+
+            const headers = {
+                Authorization: token ? `Bearer ${token}` : "",
+                "X-CSRF-TOKEN": csrfToken,
+                Accept: "application/json",
+                "Content-Type": "application/json",
+            };
+
+            for (const variant of selectedVariants) {
+                try {
+                    const shopifyVariantId = getShopifyVariantId(variant);
+
+                    const response = await fetch(SYNC_VARIANT_URL, {
+                        method: "POST",
+
+                        headers,
+
+                        body: JSON.stringify({
+                            shopify_variant_id: shopifyVariantId,
+                        }),
+                    });
+
+                    const data = await response.json();
+
+                    if (!response.ok || !data.success) {
+                        throw new Error(
+                            data.message || "Synchronization failed.",
+                        );
+                    }
+
+                    successCount++;
+                } catch (error) {
+                    failedCountLocal++;
+
+                    failures.push(
+                        `${getProductTitle(variant)}: ${
+                            error?.message || "Synchronization failed"
+                        }`,
+                    );
+                }
+            }
+
+            setSelectedIds([]);
+
+            if (failedCountLocal > 0) {
+                window.alert(
+                    `Sync completed.\n\n` +
+                        `Successful: ${successCount}\n` +
+                        `Failed: ${failedCountLocal}\n\n` +
+                        failures.join("\n"),
+                );
+            }
+
+            window.location.reload();
+        } catch (error) {
+            console.error("Selected sync failed:", error);
+
+            window.alert(
+                error?.message || "Selected products synchronization failed.",
+            );
+        } finally {
+            setSyncingAll(false);
+        }
+    };
+
+    /*
     |--------------------------------------------------------------------------
     | Individual Sync
     |--------------------------------------------------------------------------
@@ -148,15 +272,21 @@ export default function Sync({
                     .querySelector('meta[name="csrf-token"]')
                     ?.getAttribute("content") || "";
 
-            const response = await fetch(SYNC_VARIANT_URL(variant.id), {
+            const shopifyVariantId = getShopifyVariantId(variant);
+
+            const response = await fetch(SYNC_VARIANT_URL, {
                 method: "POST",
+
                 headers: {
                     Authorization: token ? `Bearer ${token}` : "",
                     "X-CSRF-TOKEN": csrfToken,
                     Accept: "application/json",
                     "Content-Type": "application/json",
                 },
-                body: JSON.stringify({}),
+
+                body: JSON.stringify({
+                    shopify_variant_id: shopifyVariantId,
+                }),
             });
 
             const data = await response.json();
@@ -369,17 +499,6 @@ export default function Sync({
                             </div>
 
                             <div className="reference-toolbar-right">
-                                <select
-                                    className="reference-page-size"
-                                    value={PAGE_SIZE}
-                                    disabled
-                                    aria-label="Products per page"
-                                >
-                                    <option value={PAGE_SIZE}>
-                                        {PAGE_SIZE} per page
-                                    </option>
-                                </select>
-
                                 <button
                                     type="button"
                                     className="reference-small-btn"
@@ -394,15 +513,17 @@ export default function Sync({
                                     disabled={
                                         selectedIds.length === 0 ||
                                         !zohoConnected ||
-                                        direction !== "shopify-to-zoho"
+                                        direction !== "shopify-to-zoho" ||
+                                        syncingAll ||
+                                        Boolean(syncingId)
                                     }
-                                    title={
-                                        direction !== "shopify-to-zoho"
-                                            ? "Reverse sync is not available yet."
-                                            : ""
-                                    }
+                                    onClick={syncSelected}
                                 >
-                                    Sync Selected
+                                    {syncingAll
+                                        ? `Syncing ${selectedIds.length}...`
+                                        : selectedIds.length > 0
+                                          ? `Sync Selected (${selectedIds.length})`
+                                          : "Sync Selected"}
                                 </button>
                             </div>
                         </div>
@@ -496,8 +617,6 @@ export default function Sync({
                                         {filteredVariants.map((variant) => {
                                             const synced = isSynced(variant);
 
-                                            const zohoId = getZohoId(variant);
-
                                             const image =
                                                 getProductImage(variant);
 
@@ -569,6 +688,7 @@ export default function Sync({
                                                         <span className="reference-price">
                                                             {formatPrice(
                                                                 variant.price,
+                                                                variant,
                                                             )}
                                                         </span>
                                                     </td>
@@ -576,7 +696,7 @@ export default function Sync({
                                                     <td>
                                                         {synced ? (
                                                             <span className="reference-status active">
-                                                                Active
+                                                                Synced
                                                             </span>
                                                         ) : (
                                                             <span className="reference-status not-linked">

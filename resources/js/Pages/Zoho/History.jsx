@@ -5,6 +5,7 @@ export default function History({
     shop,
     histories,
     zohoConnected = false,
+    pendingProducts = 0,
     filters = {},
 }) {
     const historyData = histories?.data || [];
@@ -138,9 +139,7 @@ export default function History({
             (history) => getStatus(history) === "failed",
         ).length;
 
-        const pending = historyData.filter(
-            (history) => getStatus(history) === "pending",
-        ).length;
+        const pending = Number(pendingProducts || 0);
 
         return {
             total,
@@ -148,7 +147,7 @@ export default function History({
             failed,
             pending,
         };
-    }, [histories?.total, historyData]);
+    }, [histories?.total, historyData, pendingProducts]);
 
     const hasActiveFilters = Boolean(search.trim()) || statusFilter !== "all";
 
@@ -300,7 +299,7 @@ export default function History({
                             <div className="history-metric-icon warning">○</div>
 
                             <div>
-                                <span>Pending on Page</span>
+                                <span>Pending Variants</span>
 
                                 <strong className="metric-warning">
                                     {metrics.pending}
