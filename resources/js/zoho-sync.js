@@ -1,96 +1,41 @@
-/**
- * =========================================================
- * ZOHO SYNC DASHBOARD
- * =========================================================
- */
-
+/*--------------- ZOHO SYNC DASHBOARD ---------------*/
 document.addEventListener('DOMContentLoaded', () => {
 
-    /*
-     * -------------------------------------------------------
-     * ELEMENTS
-     * -------------------------------------------------------
-     */
+    /*----------------- ELEMENTS -----------------*/
+    const searchInput = document.getElementById('searchInput');
 
-    const searchInput =
-        document.getElementById('searchInput');
+    const statusFilter = document.getElementById('statusFilter');
 
-    const statusFilter =
-        document.getElementById('statusFilter');
+    const productRows = document.querySelectorAll('.product-row');
 
-    const productRows =
-        document.querySelectorAll('.product-row');
+    const noResults = document.getElementById('noResults');
 
-    const noResults =
-        document.getElementById('noResults');
+    const syncAllButton = document.getElementById('syncAllButton');
 
-    const syncAllButton =
-        document.getElementById('syncAllButton');
-
-    const syncButtons =
-        document.querySelectorAll('.sync-button');
+    const syncButtons = document.querySelectorAll('.sync-button');
 
 
-    /*
-     * -------------------------------------------------------
-     * CSRF TOKEN
-     * -------------------------------------------------------
-     */
-
-    const csrfToken =
-        document.querySelector('meta[name="csrf-token"]')?.content;
+    /*-------------- CSRF TOKEN --------------*/
+    const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content;
 
 
-    /*
-     * -------------------------------------------------------
-     * SEARCH + STATUS FILTER
-     * -------------------------------------------------------
-     */
-
+    /*-------------- SEARCH + STATUS FILTER --------------*/
     function filterProducts() {
-
-        const search =
-            searchInput
-                ? searchInput.value
-                    .trim()
-                    .toLowerCase()
-                : '';
-
-        const status =
-            statusFilter
-                ? statusFilter.value
-                : 'all';
+        const search = searchInput ? searchInput.value.trim().toLowerCase(): '';
+        const status = statusFilter ? statusFilter.value : 'all';
 
         let visibleRows = 0;
 
-
         productRows.forEach(row => {
+            const rowText = row.innerText.toLowerCase();
+            const rowStatus = row.dataset.status;
+            const matchesSearch = rowText.includes(search);
 
-            const rowText =
-                row.innerText.toLowerCase();
+            const matchesStatus = status === 'all' || rowStatus === status;
 
-            const rowStatus =
-                row.dataset.status;
+            const shouldShow = matchesSearch && matchesStatus;
 
-
-            const matchesSearch =
-                rowText.includes(search);
-
-            const matchesStatus =
-                status === 'all' ||
-                rowStatus === status;
-
-
-            const shouldShow =
-                matchesSearch &&
-                matchesStatus;
-
-
-            row.style.display =
-                shouldShow
-                    ? ''
-                    : 'none';
-
+            row.style.display = shouldShow ? '' : 'none';
 
             if (shouldShow) {
                 visibleRows++;
@@ -98,156 +43,66 @@ document.addEventListener('DOMContentLoaded', () => {
 
         });
 
-
         if (noResults) {
-
-            noResults.hidden =
-                visibleRows !== 0;
-
+            noResults.hidden = visibleRows !== 0;
         }
-
     }
 
-
-    /*
-     * -------------------------------------------------------
-     * SEARCH LISTENER
-     * -------------------------------------------------------
-     */
-
+    /*------------- SEARCH LISTENER -------------*/
     if (searchInput) {
-
-        searchInput.addEventListener(
-            'input',
-            filterProducts
-        );
-
+        searchInput.addEventListener('input',filterProducts);
     }
 
-
-    /*
-     * -------------------------------------------------------
-     * STATUS FILTER LISTENER
-     * -------------------------------------------------------
-     */
-
+    /*--------------STATUS FILTER LISTENER -------------*/
     if (statusFilter) {
-
-        statusFilter.addEventListener(
-            'change',
-            filterProducts
-        );
-
+        statusFilter.addEventListener('change',filterProducts);
     }
 
 
-    /*
-     * -------------------------------------------------------
-     * INDIVIDUAL SYNC
-     * -------------------------------------------------------
-     */
-
+    /*--------------- INDIVIDUAL SYNC ---------------*/
     syncButtons.forEach(button => {
 
-        button.addEventListener(
-            'click',
-            async () => {
-
-                const variantId =
-                    button.dataset.variantId;
-
+        button.addEventListener('click', async () => {
+                const variantId = button.dataset.variantId;
 
                 if (!variantId) {
-
-                    console.error(
-                        'Variant ID is missing.'
-                    );
-
+                    console.error('Variant ID is missing.');
                     return;
-
                 }
 
-
-                /*
-                 * Prevent double-click
-                 */
-
+                /*------------ Prevent double-click ------------*/
                 button.disabled = true;
-
-
-                const originalText =
-                    button.innerText;
-
-
-                button.innerText =
-                    'Syncing...';
-
+                const originalText = button.innerText;
+                button.innerText = 'Syncing...';
 
                 try {
-
-                    const response =
-                        await fetch(
-                            `/zoho/sync/${variantId}`,
-                            {
+                    const response = await fetch(`/zoho/sync/${variantId}`,{
                                 method: 'POST',
-
                                 headers: {
-                                    'X-CSRF-TOKEN':
-                                        csrfToken,
-
-                                    'Accept':
-                                        'application/json'
+                                    'X-CSRF-TOKEN': csrfToken,
+                                    'Accept': 'application/json'
                                 }
                             }
                         );
 
-
-                    const data =
-                        await response.json();
-
+                    const data = await response.json();
 
                     if (!response.ok || !data.success) {
-
-                        throw new Error(
-                            data.message ||
-                            'Synchronization failed.'
-                        );
-
+                        throw new Error(data.message || 'Synchronization failed.');
                     }
 
+                    console.log('Sync successful:',data);
 
-                    console.log(
-                        'Sync successful:',
-                        data
-                    );
-
-
-                    button.innerText =
-                        'Synced';
-
+                    button.innerText = 'Synced';
 
                 } catch (error) {
-
-                    console.error(
-                        'Sync failed:',
-                        error
-                    );
-
-
-                    button.innerText =
-                        'Failed';
-
-
-                } finally {
-
+                    console.error('Sync failed:', error);
+                    button.innerText = 'Failed';
+                } 
+                finally {
                     setTimeout(() => {
-
-                        button.disabled =
-                            false;
-
-                        button.innerText =
-                            originalText;
-
+                        button.disabled = false;
+                        button.innerText = originalText;
                     }, 1500);
 
                 }
@@ -258,114 +113,52 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
 
-    /*
-     * -------------------------------------------------------
-     * SYNC ALL
-     * -------------------------------------------------------
-     */
-
+    /*--------------- SYNC ALL ---------------*/
     if (syncAllButton) {
 
-        syncAllButton.addEventListener(
-            'click',
-            async () => {
+        syncAllButton.addEventListener('click', async () => {
 
-                const originalText =
-                    syncAllButton.innerText;
-
-
-                syncAllButton.disabled =
-                    true;
-
-
-                syncAllButton.innerText =
-                    'Syncing...';
-
-
+                const originalText = syncAllButton.innerText;
+                syncAllButton.disabled = true;
+                syncAllButton.innerText = 'Syncing...';
+                
                 try {
-
-                    const response =
-                        await fetch(
-                            '/zoho/sync-all',
-                            {
+                    const response = await fetch('/zoho/sync-all',{
                                 method: 'POST',
-
                                 headers: {
-                                    'X-CSRF-TOKEN':
-                                        csrfToken,
-
-                                    'Accept':
-                                        'application/json'
+                                    'X-CSRF-TOKEN': csrfToken,
+                                    'Accept':'application/json'
                                 }
                             }
                         );
 
-
-                    const data =
-                        await response.json();
-
+                    const data = await response.json();
 
                     if (!response.ok || !data.success) {
-
-                        throw new Error(
-                            data.message ||
-                            'Synchronization failed.'
-                        );
-
+                        throw new Error(data.message || 'Synchronization failed.');
                     }
 
+                    console.log('Sync all successful:', data);
 
-                    console.log(
-                        'Sync all successful:',
-                        data
-                    );
+                    const summary = data.data;
 
-
-                    const summary =
-                        data.data;
-
-
-                    syncAllButton.innerText =
-                        `Done: ${summary.created} created, ${summary.updated} updated`;
-
+                    syncAllButton.innerText = `Done: ${summary.created} created, ${summary.updated} updated`;
 
                 } catch (error) {
+                    console.error('Sync all failed:',error);
 
-                    console.error(
-                        'Sync all failed:',
-                        error
-                    );
-
-
-                    syncAllButton.innerText =
-                        'Sync Failed';
-
+                    syncAllButton.innerText = 'Sync Failed';
                 } finally {
-
                     setTimeout(() => {
-
-                        syncAllButton.disabled =
-                            false;
-
-                        syncAllButton.innerText =
-                            originalText;
-
+                        syncAllButton.disabled = false;
+                        syncAllButton.innerText = originalText;
                     }, 2500);
-
                 }
-
             }
         );
-
     }
 
 
-    /*
-     * -------------------------------------------------------
-     * INITIAL FILTER
-     * -------------------------------------------------------
-     */
-
+    /*-------------- INITIAL FILTER --------------*/
     filterProducts();
-
 });
