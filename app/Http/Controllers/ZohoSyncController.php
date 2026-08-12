@@ -202,7 +202,7 @@ GRAPHQL;
         }
     }
 
-    public function history()
+    public function history(Request $request)
     {
         $shop = Shop::first();
 
@@ -210,14 +210,56 @@ GRAPHQL;
             abort(404, 'No Shopify shop installed.');
         }
 
+        $search = trim((string) $request->query('search', ''));
+        $status = $request->query('status', 'all');
+
         $histories = SyncHistory::with([
             'productVariant.product',
         ])
             ->where('shop_id', $shop->id)
-            ->latest('id')
-            ->paginate(20);
 
-        $zohoConnection = $shop->zohoConnection;
+            ->when($search !== '', function ($query) use ($search) {
+                $query->where(function ($q) use ($search) {
+                    $q->where('action', 'like', "%{$search}%")
+                        ->orWhere('status', 'like', "%{$search}%")
+                        ->orWhere('message', 'like', "%{$search}%")
+                        ->orWhere('zoho_item_id', 'like', "%{$search}%")
+
+                        ->orWhereHas(
+                            'productVariant',
+                            function ($variantQuery) use ($search) {
+                                $variantQuery
+                                    ->where('title', 'like', "%{$search}%")
+                                    ->orWhere(
+                                        'sku',
+                                        'like',
+                                        "%{$search}%"
+                                    );
+                            }
+                        )
+
+                        ->orWhereHas(
+                            'productVariant.product',
+                            function ($productQuery) use ($search) {
+                                $productQuery->where(
+                                    'title',
+                                    'like',
+                                    "%{$search}%"
+                                );
+                            }
+                        );
+                });
+            })
+
+            ->when(
+                $status !== 'all',
+                fn($query) =>
+                $query->where('status', $status)
+            )
+
+            ->latest('id')
+            ->paginate(20)
+            ->withQueryString();
 
         return Inertia::render('Zoho/History', [
             'shop' => [
@@ -227,7 +269,12 @@ GRAPHQL;
 
             'histories' => $histories,
 
-            'zohoConnected' => $zohoConnection !== null,
+            'zohoConnected' => $shop->zohoConnection !== null,
+
+            'filters' => [
+                'search' => $search,
+                'status' => $status,
+            ],
         ]);
     }
 

@@ -280,6 +280,19 @@ export default function Sync({
                         </button>
                     </section>
 
+
+                    {!zohoConnected && (
+                        <div className="connection-notice">
+                            <strong>Zoho Books is disconnected.</strong>
+                            <span>
+                                Previous synchronization data is preserved, but
+                                new synchronizations are disabled until you
+                                reconnect Zoho Books.
+                            </span>
+                        </div>
+                    )}
+                    
+
                     {/* =================================================
                         SYNC OVERVIEW
                     ================================================== */}
@@ -288,12 +301,17 @@ export default function Sync({
                         <div className="overview-top">
                             <div>
                                 <h2>Sync Overview</h2>
-
-                                <p>Current synchronization status</p>
+                                <p>
+                                    {zohoConnected
+                                        ? "Current synchronization status"
+                                        : "Last known synchronization status"}
+                                </p>{" "}
                             </div>
 
                             <div className="sync-percentage">
-                                {stats.percentage}% synced
+                                {zohoConnected
+                                    ? `${stats.percentage}% synced`
+                                    : `${stats.synced} previously synced`}
                             </div>
                         </div>
 
@@ -323,15 +341,15 @@ export default function Sync({
 
                             <div className="overview-stat">
                                 <span>Pending</span>
-
-                                <strong>{stats.pending}</strong>
+                                <strong>
+                                    {zohoConnected ? stats.pending : "—"}
+                                </strong>
                             </div>
 
                             <div className="overview-stat">
                                 <span>Failed</span>
-
                                 <strong className="danger-value">
-                                    {stats.failed}
+                                    {zohoConnected ? stats.failed : "—"}
                                 </strong>
                             </div>
                         </div>
@@ -487,7 +505,9 @@ export default function Sync({
                                                             <span className="status-dot" />
 
                                                             {synced
-                                                                ? "Synced"
+                                                                ? zohoConnected
+                                                                    ? "Synced"
+                                                                    : "Previously Synced"
                                                                 : "Pending"}
                                                         </span>
                                                     </td>

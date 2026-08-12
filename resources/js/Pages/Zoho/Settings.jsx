@@ -1,37 +1,53 @@
 import React, { useState } from "react";
-import { Head, router } from "@inertiajs/react";
+import { Head } from "@inertiajs/react";
 
 export default function Settings({ shop, zohoConnection, host }) {
     const [disconnecting, setDisconnecting] = useState(false);
+    const [showDisconnectModal, setShowDisconnectModal] = useState(false);
 
     const connected = Boolean(zohoConnection);
 
-    const disconnect = () => {
+    const disconnect = async () => {
         if (disconnecting) {
-            return;
-        }
-
-        const confirmed = window.confirm(
-            "Are you sure you want to disconnect Zoho Books?",
-        );
-
-        if (!confirmed) {
             return;
         }
 
         setDisconnecting(true);
 
-        router.post(
-            "/zoho/settings/disconnect",
-            {},
-            {
-                preserveScroll: true,
+        try {
+            const csrfToken =
+                document
+                    .querySelector('meta[name="csrf-token"]')
+                    ?.getAttribute("content") || "";
 
-                onFinish: () => {
-                    setDisconnecting(false);
+            const response = await fetch("/zoho/settings/disconnect", {
+                method: "POST",
+
+                headers: {
+                    "X-CSRF-TOKEN": csrfToken,
+                    Accept: "application/json",
+                    "Content-Type": "application/json",
                 },
-            },
-        );
+
+                body: JSON.stringify({}),
+            });
+
+            const data = await response.json();
+
+            if (!response.ok || !data.success) {
+                throw new Error(
+                    data.message || "Failed to disconnect Zoho Books.",
+                );
+            }
+
+            window.location.reload();
+        } catch (error) {
+            console.error("Disconnect failed:", error);
+
+            window.alert(error?.message || "Failed to disconnect Zoho Books.");
+        } finally {
+            setDisconnecting(false);
+        }
     };
 
     return (
@@ -214,11 +230,11 @@ export default function Settings({ shop, zohoConnection, host }) {
                                             type="button"
                                             className="danger-btn"
                                             disabled={disconnecting}
-                                            onClick={disconnect}
+                                            onClick={() =>
+                                                setShowDisconnectModal(true)
+                                            }
                                         >
-                                            {disconnecting
-                                                ? "Disconnecting..."
-                                                : "Disconnect"}
+                                            Disconnect
                                         </button>
                                     </div>
                                 ) : (
@@ -333,6 +349,47 @@ export default function Settings({ shop, zohoConnection, host }) {
                     </div>
                 </main>
             </div>
+
+            {showDisconnectModal && (
+                <div className="confirm-modal-overlay">
+                    <div className="confirm-modal">
+                        <div className="confirm-modal-icon">!</div>
+
+                        <h3>Disconnect Zoho Books?</h3>
+
+                        <p>
+                            This will remove the Zoho Books connection from this
+                            Shopify store. Your existing products and sync
+                            history will be preserved.
+                        </p>
+
+                        <div className="confirm-modal-actions">
+                            <button
+                                type="button"
+                                className="modal-cancel-btn"
+                                onClick={() => setShowDisconnectModal(false)}
+                                disabled={disconnecting}
+                            >
+                                Cancel
+                            </button>
+
+                            <button
+                                type="button"
+                                className="modal-danger-btn"
+                                onClick={() => {
+                                    setShowDisconnectModal(false);
+                                    disconnect();
+                                }}
+                                disabled={disconnecting}
+                            >
+                                {disconnecting
+                                    ? "Disconnecting..."
+                                    : "Disconnect"}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </>
     );
 }

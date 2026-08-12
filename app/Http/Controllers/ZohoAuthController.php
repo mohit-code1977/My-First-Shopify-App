@@ -291,7 +291,7 @@ class ZohoAuthController extends Controller
             ], 400);
         }
 
-        $adminUrl = 'https://' . $decodedHost . '/apps/' . config('shopify.api_key');
+        $adminUrl = 'https://' . $decodedHost . '/apps/zoho-books-integration-20';
 
         $query = http_build_query([
             'shop' => $shop,

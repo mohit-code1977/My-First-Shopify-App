@@ -5,6 +5,9 @@ name = "zoho books integration"
 application_url = "https://facilities-shareware-subscriptions-restored.trycloudflare.com"
 embedded = true
 
+[build]
+automatically_update_urls_on_dev = true
+
 [webhooks]
 api_version = "2026-07"
 

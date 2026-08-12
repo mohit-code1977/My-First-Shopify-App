@@ -1,41 +1,35 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
+import { Head, router } from "@inertiajs/react";
 
-import { Head } from "@inertiajs/react";
-
-export default function History({ shop, histories, zohoConnected = false }) {
+export default function History({
+    shop,
+    histories,
+    zohoConnected = false,
+    filters = {},
+}) {
     const historyData = histories?.data || [];
 
-    const [search, setSearch] = useState("");
-    const [statusFilter, setStatusFilter] = useState("all");
+    const [search, setSearch] = useState(filters.search || "");
+    const [statusFilter, setStatusFilter] = useState(filters.status || "all");
 
-    const filteredHistory = useMemo(() => {
-        const query = search.trim().toLowerCase();
+    useEffect(() => {
+        const timeout = setTimeout(() => {
+            router.get(
+                "/zoho/sync/history",
+                {
+                    search,
+                    status: statusFilter,
+                },
+                {
+                    preserveState: true,
+                    preserveScroll: true,
+                    replace: true,
+                },
+            );
+        }, 350);
 
-        return historyData.filter((history) => {
-            const product = history.product_variant?.product?.title?.toLowerCase() || "";
-
-            const variant = history.product_variant?.title?.toLowerCase() || "";
-
-            const action = history.action?.toLowerCase() || "";
-
-            const status = history.status?.toLowerCase() || "";
-
-            const message = history.message?.toLowerCase() || "";
-
-            const matchesSearch =
-                !query ||
-                product.includes(query) ||
-                variant.includes(query) ||
-                action.includes(query) ||
-                status.includes(query) ||
-                message.includes(query);
-
-            const matchesStatus =
-                statusFilter === "all" || status === statusFilter;
-
-            return matchesSearch && matchesStatus;
-        });
-    }, [historyData, search, statusFilter]);
+        return () => clearTimeout(timeout);
+    }, [search, statusFilter]);
 
     const formatLabel = (value) => {
         if (!value) {
@@ -67,6 +61,8 @@ export default function History({ shop, histories, zohoConnected = false }) {
             time: date.toLocaleTimeString(),
         };
     };
+
+    const hasActiveFilters = Boolean(search.trim()) || statusFilter !== "all";
 
     return (
         <>
@@ -126,8 +122,9 @@ export default function History({ shop, histories, zohoConnected = false }) {
                                 <h2>Synchronization Activity</h2>
 
                                 <p>
-                                    {filteredHistory.length}{" "}
-                                    {filteredHistory.length === 1
+                                    {histories?.total ?? historyData.length}{" "}
+                                    {(histories?.total ??
+                                        historyData.length) === 1
                                         ? "record"
                                         : "records"}{" "}
                                     displayed
@@ -169,20 +166,20 @@ export default function History({ shop, histories, zohoConnected = false }) {
                             </div>
                         </div>
 
-                        {filteredHistory.length === 0 ? (
+                        {historyData.length === 0 ? (
                             <div className="empty-state">
                                 <div className="empty-state-icon">↻</div>
 
                                 <strong>
-                                    {historyData.length === 0
-                                        ? "No synchronization history"
-                                        : "No matching activity"}
+                                    {hasActiveFilters
+                                        ? "No matching activity"
+                                        : "No synchronization history"}
                                 </strong>
 
                                 <p>
-                                    {historyData.length === 0
-                                        ? "Your sync activity will appear here."
-                                        : "Try changing your search or status filter."}
+                                    {hasActiveFilters
+                                        ? "Try changing your search or status filter."
+                                        : "Your sync activity will appear here."}
                                 </p>
                             </div>
                         ) : (
@@ -205,7 +202,7 @@ export default function History({ shop, histories, zohoConnected = false }) {
                                     </thead>
 
                                     <tbody>
-                                        {filteredHistory.map((history) => {
+                                        {historyData.map((history) => {
                                             const productTitle =
                                                 history.product_variant?.product
                                                     ?.title ||
@@ -327,6 +324,40 @@ export default function History({ shop, histories, zohoConnected = false }) {
                             </div>
                         )}
                     </section>
+
+                    {histories?.last_page > 1 && (
+                        <div className="pagination">
+                            {histories.links.map((link, index) => (
+                                <button
+                                    key={index}
+                                    type="button"
+                                    disabled={!link.url}
+                                    className={
+                                        link.active
+                                            ? "pagination-btn active"
+                                            : "pagination-btn"
+                                    }
+                                    onClick={() => {
+                                        if (!link.url) {
+                                            return;
+                                        }
+
+                                        router.get(
+                                            link.url,
+                                            {},
+                                            {
+                                                preserveState: true,
+                                                preserveScroll: true,
+                                            },
+                                        );
+                                    }}
+                                    dangerouslySetInnerHTML={{
+                                        __html: link.label,
+                                    }}
+                                />
+                            ))}
+                        </div>
+                    )}
                 </main>
             </div>
         </>
