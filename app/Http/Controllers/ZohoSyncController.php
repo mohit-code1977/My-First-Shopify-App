@@ -10,6 +10,7 @@ use App\Services\ZohoService;
 use Illuminate\Http\JsonResponse;
 use App\Services\ShopifyService;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Http\Request;
 
 class ZohoSyncController extends Controller
 {
@@ -29,12 +30,17 @@ class ZohoSyncController extends Controller
             ->orderBy('id')
             ->get();
 
+        $zohoConnection = $shop->zohoConnection;
+
         return Inertia::render('Zoho/Sync', [
             'shop' => [
                 'id' => $shop->id,
                 'shop_domain' => $shop->shop_domain,
             ],
+
             'variants' => $variants,
+
+            'zohoConnected' => $zohoConnection !== null,
         ]);
     }
 
@@ -171,6 +177,13 @@ GRAPHQL;
             ], 404);
         }
 
+        if (!$shop->zohoConnection) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Zoho is not connected.',
+            ], 409);
+        }
+
         try {
             $zohoService = new ZohoService($shop);
 
@@ -204,19 +217,24 @@ GRAPHQL;
             ->latest('id')
             ->paginate(20);
 
+        $zohoConnection = $shop->zohoConnection;
+
         return Inertia::render('Zoho/History', [
             'shop' => [
                 'id' => $shop->id,
                 'shop_domain' => $shop->shop_domain,
             ],
+
             'histories' => $histories,
+
+            'zohoConnected' => $zohoConnection !== null,
         ]);
     }
 
 
 
 
-    public function settings()
+    public function settings(Request $request)
     {
         $shop = Shop::first();
 
@@ -231,7 +249,10 @@ GRAPHQL;
                 'id' => $shop->id,
                 'shop_domain' => $shop->shop_domain,
             ],
+
             'zohoConnection' => $zohoConnection,
+
+            'host' => $request->query('host'),
         ]);
     }
 

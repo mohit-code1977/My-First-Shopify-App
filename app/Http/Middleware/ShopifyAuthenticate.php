@@ -2,11 +2,12 @@
 
 namespace App\Http\Middleware;
 
+use App\Models\Shop;
 use App\Services\ShopifyService;
 use Closure;
 use Illuminate\Http\Request;
-use Symfony\Component\HttpFoundation\Response;
 use Illuminate\Support\Facades\Log;
+use Symfony\Component\HttpFoundation\Response;
 
 class ShopifyAuthenticate
 {
@@ -34,9 +35,11 @@ class ShopifyAuthenticate
 
         try {
             /*
-             * Decode token payload first so we can obtain
-             * the Shopify shop from the `dest` claim.
-             */
+            |--------------------------------------------------------------------------
+            | Decode Shopify App Bridge ID token
+            |--------------------------------------------------------------------------
+            */
+
             $parts = explode('.', $token);
 
             if (count($parts) !== 3) {
@@ -59,8 +62,11 @@ class ShopifyAuthenticate
             }
 
             /*
-             * Validate expiration.
-             */
+            |--------------------------------------------------------------------------
+            | Validate token expiration
+            |--------------------------------------------------------------------------
+            */
+
             if (
                 empty($payload['exp']) ||
                 $payload['exp'] < time()
@@ -71,11 +77,11 @@ class ShopifyAuthenticate
             }
 
             /*
-             * Shopify ID token contains:
-             *
-             * dest:
-             * https://store-name.myshopify.com
-             */
+            |--------------------------------------------------------------------------
+            | Get Shopify shop from token
+            |--------------------------------------------------------------------------
+            */
+
             $destination = $payload['dest'] ?? null;
 
             if (!$destination) {
@@ -96,8 +102,11 @@ class ShopifyAuthenticate
             }
 
             /*
-             * Only allow Shopify shop domains.
-             */
+            |--------------------------------------------------------------------------
+            | Validate Shopify domain
+            |--------------------------------------------------------------------------
+            */
+
             if (
                 !preg_match(
                     '/^[a-zA-Z0-9][a-zA-Z0-9\-]*\.myshopify\.com$/',
@@ -110,18 +119,44 @@ class ShopifyAuthenticate
             }
 
             /*
-             * Exchange the App Bridge ID token for
-             * an offline Admin API access token.
-             */
-            $shop = $this->shopifyService->exchangeToken(
-                $shopDomain,
-                $token
-            );
+            |--------------------------------------------------------------------------
+            | Find existing shop
+            |--------------------------------------------------------------------------
+            */
+
+            $shop = Shop::where(
+                'shop_domain',
+                $shopDomain
+            )->first();
 
             /*
-             * Make authenticated shop available
-             * to controllers.
-             */
+            |--------------------------------------------------------------------------
+            | Exchange App Bridge ID token only when necessary
+            |--------------------------------------------------------------------------
+            |
+            | If we don't have a valid stored Shopify token,
+            | exchange the current App Bridge token.
+            |
+            */
+
+            if (
+                !$shop ||
+                !$shop->access_token ||
+                !$shop->access_token_expires_at ||
+                now()->gte($shop->access_token_expires_at)
+            ) {
+                $shop = $this->shopifyService->exchangeToken(
+                    $shopDomain,
+                    $token
+                );
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Make shop available to controllers
+            |--------------------------------------------------------------------------
+            */
+
             $request->attributes->set(
                 'shop',
                 $shop
@@ -133,7 +168,6 @@ class ShopifyAuthenticate
             );
 
             return $next($request);
-
         } catch (\Throwable $e) {
 
             Log::error(
@@ -145,9 +179,7 @@ class ShopifyAuthenticate
 
             return response()->json([
                 'success' => false,
-                'message' =>
-                    'Shopify authentication failed.',
-                'error' => $e->getMessage(),
+                'message' => $e->getMessage(),
             ], 401);
         }
     }

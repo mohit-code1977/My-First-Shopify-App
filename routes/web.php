@@ -17,15 +17,6 @@ Route::get('/', function (Illuminate\Http\Request $request) {
     return redirect()->route('zoho.sync', $request->query());
 });
 
-// Route::get('/', function () {
-//     return Inertia::render('Welcome', [
-//         'canLogin' => Route::has('login'),
-//         'canRegister' => Route::has('register'),
-//         'laravelVersion' => Application::VERSION,
-//         'phpVersion' => PHP_VERSION,
-//     ]);
-// });
-
 Route::get('/dashboard', function () {
     return Inertia::render('Dashboard');
 })->middleware(['auth', 'verified'])->name('dashboard');
@@ -52,9 +43,12 @@ Route::get('/zoho/sync/history', [ZohoSyncController::class, 'history'])
     ->name('zoho.sync.history');
 
 Route::post('/zoho/sync/{variant}', [ZohoSyncController::class, 'syncVariant'])
+    ->middleware('shopify.auth')
     ->name('zoho.sync.variant');
 
+
 Route::post('/zoho/sync-all', [ZohoSyncController::class, 'syncAll'])
+    ->middleware('shopify.auth')
     ->name('zoho.sync.all');
 
 Route::get('/zoho/settings', [ZohoSyncController::class, 'settings'])

@@ -17,6 +17,10 @@ return Application::configure(basePath: dirname(__DIR__))
             'webhooks/products',
         ]);
 
+        $middleware->alias([
+            'shopify.auth' => \App\Http\Middleware\ShopifyAuthenticate::class,
+        ]);
+
         $middleware->web(append: [
             \App\Http\Middleware\HandleInertiaRequests::class,
             \Illuminate\Http\Middleware\AddLinkHeadersForPreloadedAssets::class,

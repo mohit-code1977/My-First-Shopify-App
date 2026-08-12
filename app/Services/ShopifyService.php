@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Shop;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 
 class ShopifyService
 {
@@ -43,22 +44,30 @@ class ShopifyService
                     'client_secret' => env('SHOPIFY_API_SECRET'),
 
                     'grant_type' =>
-                        'urn:ietf:params:oauth:grant-type:token-exchange',
+                    'urn:ietf:params:oauth:grant-type:token-exchange',
 
                     'subject_token' => $idToken,
 
                     'subject_token_type' =>
-                        'urn:shopify:params:oauth:token-type:id_token',
+                    'urn:ietf:params:oauth:token-type:id_token',
 
                     'requested_token_type' =>
-                        'urn:shopify:params:oauth:token-type:offline-access-token',
+                    'urn:shopify:params:oauth:token-type:offline-access-token',
+
+                    'expiring' => 1,
                 ]
             );
+
+        Log::info('Shopify token exchange response', [
+            'shop' => $shopDomain,
+            'status' => $response->status(),
+            'body' => $response->json(),
+        ]);
 
         if (!$response->successful()) {
             throw new \Exception(
                 'Shopify token exchange failed: ' .
-                $response->body()
+                    $response->body()
             );
         }
 
@@ -77,18 +86,16 @@ class ShopifyService
             [
                 'access_token' => $data['access_token'],
 
-                /*
-                 * Token exchange does not use the old
-                 * authorization-code refresh token flow.
-                 */
-                'refresh_token' => null,
+                'refresh_token' =>
+                $data['refresh_token'] ?? null,
 
-                'scope' => $data['scope'] ?? null,
+                'scope' =>
+                $data['scope'] ?? null,
 
                 'access_token_expires_at' =>
-                    isset($data['expires_in'])
-                        ? now()->addSeconds($data['expires_in'])
-                        : null,
+                isset($data['expires_in'])
+                    ? now()->addSeconds($data['expires_in'])
+                    : null,
             ]
         );
 
@@ -123,7 +130,7 @@ class ShopifyService
         if (!$response->successful()) {
             throw new \Exception(
                 'Shopify token refresh failed: ' .
-                $response->body()
+                    $response->body()
             );
         }
 
@@ -139,15 +146,15 @@ class ShopifyService
             'access_token' => $data['access_token'],
 
             'refresh_token' =>
-                $data['refresh_token'] ?? $shop->refresh_token,
+            $data['refresh_token'] ?? $shop->refresh_token,
 
             'scope' =>
-                $data['scope'] ?? $shop->scope,
+            $data['scope'] ?? $shop->scope,
 
             'access_token_expires_at' =>
-                isset($data['expires_in'])
-                    ? now()->addSeconds($data['expires_in'])
-                    : null,
+            isset($data['expires_in'])
+                ? now()->addSeconds($data['expires_in'])
+                : null,
         ]);
 
         return $data['access_token'];
@@ -191,7 +198,7 @@ GRAPHQL;
         if (!$checkResponse->successful()) {
             throw new \Exception(
                 'Failed to check Shopify webhooks: ' .
-                $checkResponse->body()
+                    $checkResponse->body()
             );
         }
 
@@ -200,7 +207,7 @@ GRAPHQL;
         if (!empty($checkData['errors'])) {
             throw new \Exception(
                 'Shopify webhook query failed: ' .
-                json_encode($checkData['errors'])
+                    json_encode($checkData['errors'])
             );
         }
 
@@ -216,7 +223,7 @@ GRAPHQL;
                     'success' => true,
                     'created' => false,
                     'message' =>
-                        'Product update webhook already exists.',
+                    'Product update webhook already exists.',
                     'webhook_id' => $webhook['id'],
                     'uri' => $webhook['uri'],
                 ];
@@ -267,7 +274,7 @@ GRAPHQL;
         if (!$response->successful()) {
             throw new \Exception(
                 'Failed to create Shopify webhook: ' .
-                $response->body()
+                    $response->body()
             );
         }
 
@@ -276,7 +283,7 @@ GRAPHQL;
         if (!empty($data['errors'])) {
             throw new \Exception(
                 'Shopify webhook creation failed: ' .
-                json_encode($data['errors'])
+                    json_encode($data['errors'])
             );
         }
 
@@ -292,7 +299,7 @@ GRAPHQL;
         if (!empty($result['userErrors'])) {
             throw new \Exception(
                 'Shopify webhook user errors: ' .
-                json_encode($result['userErrors'])
+                    json_encode($result['userErrors'])
             );
         }
 
@@ -300,11 +307,11 @@ GRAPHQL;
             'success' => true,
             'created' => true,
             'message' =>
-                'Product update webhook created successfully.',
+            'Product update webhook created successfully.',
             'webhook_id' =>
-                $result['webhookSubscription']['id'] ?? null,
+            $result['webhookSubscription']['id'] ?? null,
             'uri' =>
-                $result['webhookSubscription']['uri']
+            $result['webhookSubscription']['uri']
                 ?? $webhookUrl,
         ];
     }

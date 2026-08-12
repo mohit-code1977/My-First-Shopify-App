@@ -1,23 +1,23 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
 client_id = "50ab25cf8e26951c5f6e71e2f458baf5"
-
-application_url = "https://invalid-inclusion-believed-statistical.trycloudflare.com"
-
-embedded = true
-
 name = "zoho books integration"
+application_url = "https://facilities-shareware-subscriptions-restored.trycloudflare.com"
+embedded = true
 
 [webhooks]
 api_version = "2026-07"
 
-[access_scopes]
-scopes = "read_products,write_products"
-optional_scopes = []
-
 [access.admin]
-embedded_app_direct_api_access = true
 direct_api_mode = "offline"
+embedded_app_direct_api_access = true
+
+[access_scopes]
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+scopes = "read_products,write_products"
+optional_scopes = [ ]
 
 [auth]
 redirect_urls = [
-    "https://invalid-inclusion-believed-statistical.trycloudflare.com/auth/callback"
+  "https://facilities-shareware-subscriptions-restored.trycloudflare.com/auth/callback"
 ]
