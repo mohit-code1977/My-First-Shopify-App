@@ -2,7 +2,7 @@
 
 client_id = "50ab25cf8e26951c5f6e71e2f458baf5"
 name = "zoho books integration"
-application_url = "https://facilities-shareware-subscriptions-restored.trycloudflare.com"
+application_url = "https://achiness-shorthand-vaporizer.ngrok-free.dev"
 embedded = true
 
 [build]
@@ -22,5 +22,5 @@ optional_scopes = [ ]
 
 [auth]
 redirect_urls = [
-  "https://facilities-shareware-subscriptions-restored.trycloudflare.com/auth/callback"
+  "https://achiness-shorthand-vaporizer.ngrok-free.dev/auth/callback"
 ]
