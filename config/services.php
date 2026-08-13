@@ -44,6 +44,7 @@ return [
         'client_id' => env('ZOHO_CLIENT_ID'),
         'client_secret' => env('ZOHO_CLIENT_SECRET'),
         'redirect_uri' => env('ZOHO_REDIRECT_URI'),
+        'oauth_initiation_url' => env('ZOHO_OAUTH_INITIATION_URL', 'https://accounts.zoho.com'),
         'accounts_url' => env('ZOHO_ACCOUNTS_URL', 'https://accounts.zoho.in'),
         'api_url' => env('ZOHO_API_URL', 'https://www.zohoapis.in'),
     ],

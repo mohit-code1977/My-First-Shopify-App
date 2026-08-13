@@ -46,28 +46,16 @@ class ZohoDatacenter
     }
 
     /**
-     * Resolve initiation Accounts URL based on existing shop connection or configured environment default.
+     * Resolve initiation Accounts URL for a new OAuth authorization flow.
+     * Always uses ZOHO_OAUTH_INITIATION_URL (https://accounts.zoho.com).
      */
     public static function getInitiationAccountsUrl(?\App\Models\Shop $shop = null): string
     {
-        if ($shop) {
-            try {
-                $connection = \App\Models\ZohoConnection::where('shop_id', $shop->id)->first();
-                if ($connection && !empty($connection->accounts_url)) {
-                    $validated = self::validateAccountsUrl($connection->accounts_url);
-                    if ($validated) {
-                        return $validated;
-                    }
-                }
-            } catch (\Throwable $e) {
-                // Ignore DB errors during fallback
-            }
-        }
+        $configured = config('services.zoho.oauth_initiation_url') ?: env('ZOHO_OAUTH_INITIATION_URL');
+        $validated = self::validateAccountsUrl($configured);
 
-        $envAccountsUrl = config('services.zoho.accounts_url') ?: env('ZOHO_ACCOUNTS_URL');
-        $validatedEnv = self::validateAccountsUrl($envAccountsUrl);
-        if ($validatedEnv) {
-            return $validatedEnv;
+        if ($validated) {
+            return $validated;
         }
 
         return self::GLOBAL_ACCOUNTS_URL;

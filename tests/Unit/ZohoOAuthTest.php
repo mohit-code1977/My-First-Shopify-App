@@ -60,8 +60,8 @@ class ZohoOAuthTest extends TestCase
         $content = json_decode($response->getContent(), true);
 
         $this->assertTrue($content['success']);
-        // Uses stored connection's accounts URL if present
-        $this->assertStringStartsWith('https://accounts.zoho.eu/oauth/v2/auth', $content['redirect_url']);
+        // MUST hit global accounts.zoho.com authorization endpoint (ZOHO_OAUTH_INITIATION_URL)
+        $this->assertStringStartsWith('https://accounts.zoho.com/oauth/v2/auth', $content['redirect_url']);
     }
 
     public function test_india_user_callback_exchanges_token_at_accounts_zoho_in()
@@ -303,5 +303,31 @@ class ZohoOAuthTest extends TestCase
         $this->assertEquals(403, $response->getStatusCode());
         $content = json_decode($response->getContent(), true);
         $this->assertEquals('Zoho OAuth state has already been used.', $content['error']);
+    }
+
+    public function test_inactive_connection_does_not_control_oauth_initiation()
+    {
+        // Setup an inactive connection with India endpoints
+        ZohoConnection::create([
+            'shop_id' => $this->shop1->id,
+            'is_active' => false,
+            'organization_id' => 'org_in_old_123',
+            'accounts_url' => 'https://accounts.zoho.in',
+            'api_url' => 'https://www.zohoapis.in',
+            'data_center' => 'in',
+            'disconnected_at' => now(),
+        ]);
+
+        $controller = new ZohoAuthController();
+        $request = Request::create('/api/zoho/connect', 'POST', ['host' => $this->validHostB64]);
+        $request->attributes->set('shop', $this->shop1);
+
+        $response = $controller->initiate($request);
+
+        $this->assertEquals(200, $response->getStatusCode());
+        $content = json_decode($response->getContent(), true);
+
+        // Verification: MUST still initiate at ZOHO_OAUTH_INITIATION_URL (accounts.zoho.com)
+        $this->assertStringStartsWith('https://accounts.zoho.com/oauth/v2/auth', $content['redirect_url']);
     }
 }

@@ -11,6 +11,7 @@ use Illuminate\Http\JsonResponse;
 use App\Services\ShopifyService;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Http\Request;
+use App\Models\ZohoConnection;
 use App\Models\Product;
 use Illuminate\Support\Facades\Log;
 
