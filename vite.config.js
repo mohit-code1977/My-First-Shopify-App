@@ -6,8 +6,9 @@ export default defineConfig({
     plugins: [
         laravel({
             input: [
-                'resources/js/app.jsx',
+                'resources/css/app.css',
                 'resources/css/zoho-sync.css',
+                'resources/js/app.jsx',
                 'resources/js/zoho-sync.js',
             ],
             refresh: true,

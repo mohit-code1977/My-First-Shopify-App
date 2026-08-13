@@ -39,6 +39,9 @@ query {
             id
             title
             handle
+            featuredImage {
+                url
+            }
             variants(first: 10) {
                 nodes {
                     id
@@ -108,6 +111,7 @@ GRAPHQL;
                 [
                     'title' => $shopifyProduct['title'],
                     'handle' => $shopifyProduct['handle'],
+                    'image_url' => $shopifyProduct['featuredImage']['url'] ?? null,
                 ]
             );
 

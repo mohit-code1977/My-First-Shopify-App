@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\Http;
 class ZohoAuthController extends Controller {
     /**
      * Protected endpoint to initiate Zoho Books OAuth flow from authenticated Shopify app context.
+     * Always uses the global Multi-DC authorization entry point (accounts.zoho.com).
      */
     public function initiate(Request $request)
     {
@@ -50,12 +51,15 @@ class ZohoAuthController extends Controller {
 
         /*
         |--------------------------------------------------------------------------
-        | Build Zoho OAuth Authorization URL with Raw State
+        | Global OAuth Initiation Entry Point (accounts.zoho.com)
         |--------------------------------------------------------------------------
         */
 
+        $clientId = config('services.zoho.client_id') ?: env('ZOHO_CLIENT_ID');
+        $redirectUri = config('services.zoho.redirect_uri') ?: env('ZOHO_REDIRECT_URI');
+
         $params = http_build_query([
-            'client_id' => env('ZOHO_CLIENT_ID'),
+            'client_id' => $clientId,
             'response_type' => 'code',
             'access_type' => 'offline',
             'prompt' => 'consent',
@@ -64,11 +68,12 @@ class ZohoAuthController extends Controller {
                 'ZohoBooks.settings.CREATE',
                 'ZohoBooks.settings.UPDATE',
             ]),
-            'redirect_uri' => env('ZOHO_REDIRECT_URI'),
+            'redirect_uri' => $redirectUri,
             'state' => $rawState,
         ]);
 
-        $url = env('ZOHO_ACCOUNTS_URL') . '/oauth/v2/auth?' . $params;
+        $accountsBaseUrl = ZohoDatacenter::getInitiationAccountsUrl($shop);
+        $url = $accountsBaseUrl . '/oauth/v2/auth?' . $params;
 
         return response()->json([
             'success' => true,
@@ -144,7 +149,7 @@ class ZohoAuthController extends Controller {
 
         /*
         |--------------------------------------------------------------------------
-        | Resolve and Validate Accounts URL for Token Exchange
+        | Resolve and Validate Accounts URL from OAuth Callback Parameters
         |--------------------------------------------------------------------------
         */
 
@@ -168,17 +173,21 @@ class ZohoAuthController extends Controller {
 
         /*
         |--------------------------------------------------------------------------
-        | Exchange Authorization Code for Zoho Tokens
+        | Exchange Authorization Code at Resolved Accounts Server
         |--------------------------------------------------------------------------
         */
+
+        $clientId = config('services.zoho.client_id') ?: env('ZOHO_CLIENT_ID');
+        $clientSecret = config('services.zoho.client_secret') ?: env('ZOHO_CLIENT_SECRET');
+        $redirectUri = config('services.zoho.redirect_uri') ?: env('ZOHO_REDIRECT_URI');
 
         $response = Http::asForm()->post(
             $tokenExchangeAccountsUrl . '/oauth/v2/token',
             [
                 'code' => $code,
-                'client_id' => env('ZOHO_CLIENT_ID'),
-                'client_secret' => env('ZOHO_CLIENT_SECRET'),
-                'redirect_uri' => env('ZOHO_REDIRECT_URI'),
+                'client_id' => $clientId,
+                'client_secret' => $clientSecret,
+                'redirect_uri' => $redirectUri,
                 'grant_type' => 'authorization_code',
             ]
         );
@@ -209,7 +218,7 @@ class ZohoAuthController extends Controller {
 
         /*
         |--------------------------------------------------------------------------
-        | Validate and Resolve Persistent API Domain & Accounts URL for Shop
+        | Validate API Domain & Resolve Accounts & API URLs for Merchant
         |--------------------------------------------------------------------------
         */
 
@@ -223,7 +232,7 @@ class ZohoAuthController extends Controller {
                 ], 400);
             }
         } else {
-            $apiUrl = ZohoDatacenter::validateApiUrl(env('ZOHO_API_URL')) ?? 'https://www.zohoapis.com';
+            $apiUrl = ZohoDatacenter::validateApiUrl(config('services.zoho.api_url') ?: env('ZOHO_API_URL')) ?? 'https://www.zohoapis.com';
         }
 
         if (!empty($validatedAccountsServer)) {
@@ -231,6 +240,8 @@ class ZohoAuthController extends Controller {
         } else {
             $accountsUrl = ZohoDatacenter::getAccountsUrlForApiUrl($apiUrl);
         }
+
+        $apiDomainHost = parse_url($apiUrl, PHP_URL_HOST);
 
         /*
         |--------------------------------------------------------------------------
@@ -277,7 +288,7 @@ class ZohoAuthController extends Controller {
 
         /*
         |--------------------------------------------------------------------------
-        | Save / Update Zoho Connection for the Recovered Shop
+        | Save / Update Zoho Connection for the Recovered Shop (Reuses Row if Exists)
         |--------------------------------------------------------------------------
         */
 
@@ -286,11 +297,18 @@ class ZohoAuthController extends Controller {
                 'shop_id' => $shopModel->id,
             ],
             [
+                'is_active' => true,
                 'organization_id' => $organizationId,
+                'organization_name' => $organization['name'] ?? $organization['organization_name'] ?? null,
                 'access_token' => $accessToken,
                 'refresh_token' => $refreshToken,
                 'accounts_url' => $accountsUrl,
                 'api_url' => $apiUrl,
+                'api_domain' => $apiDomainHost,
+                'data_center' => strtolower($apiDomainHost ?? ''),
+                'scope' => $tokenData['scope'] ?? 'ZohoBooks.settings.READ,ZohoBooks.settings.CREATE,ZohoBooks.settings.UPDATE',
+                'connected_at' => now(),
+                'disconnected_at' => null,
                 'expires_at' => now()->addSeconds(
                     $tokenData['expires_in'] ?? 3600
                 ),

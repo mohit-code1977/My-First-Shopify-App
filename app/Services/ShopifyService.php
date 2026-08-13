@@ -58,10 +58,10 @@ class ShopifyService
                 ]
             );
 
-        Log::info('Shopify token exchange response', [
+        Log::info('Shopify token exchange completed', [
             'shop' => $shopDomain,
             'status' => $response->status(),
-            'body' => $response->json(),
+            'success' => $response->successful(),
         ]);
 
         if (!$response->successful()) {

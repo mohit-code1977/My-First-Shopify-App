@@ -4,7 +4,8 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 
-class Shop extends Model{
+class Shop extends Model
+{
     protected $fillable = [
         'shop_domain',
         'access_token',
@@ -19,11 +20,18 @@ class Shop extends Model{
         'access_token_expires_at' => 'datetime',
     ];
 
-    public function products(){
+    public function products()
+    {
         return $this->hasMany(Product::class);
     }
 
-    public function zohoConnection(){
-    return $this->hasOne(ZohoConnection::class);
-}
+    public function zohoConnection()
+    {
+        return $this->hasOne(ZohoConnection::class)->where('is_active', true);
+    }
+
+    public function allZohoConnections()
+    {
+        return $this->hasMany(ZohoConnection::class);
+    }
 }

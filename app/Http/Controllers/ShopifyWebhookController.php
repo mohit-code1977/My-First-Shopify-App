@@ -125,11 +125,19 @@ class ShopifyWebhookController extends Controller {
             ->whereIn('shopify_product_id', $productIdCandidates)
             ->first();
 
+        $imageUrl = $payload['image']['src'] ?? ($payload['images'][0]['src'] ?? ($payload['image_url'] ?? null));
+
         if ($product) {
-            $product->update([
+            $updateData = [
                 'title' => $payload['title'] ?? $product->title,
                 'handle' => $payload['handle'] ?? $product->handle,
-            ]);
+            ];
+
+            if ($imageUrl !== null) {
+                $updateData['image_url'] = $imageUrl;
+            }
+
+            $product->update($updateData);
         }
 
         /*

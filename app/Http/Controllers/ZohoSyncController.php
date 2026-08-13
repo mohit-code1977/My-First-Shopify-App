@@ -834,7 +834,9 @@ GRAPHQL;
             ], 404);
         }
 
-        $connection = $shop->zohoConnection;
+        $connection = ZohoConnection::where('shop_id', $shop->id)
+            ->where('is_active', true)
+            ->first();
 
         if (!$connection) {
             return response()->json([
@@ -843,7 +845,12 @@ GRAPHQL;
             ], 404);
         }
 
-        $connection->delete();
+        $connection->update([
+            'is_active' => false,
+            'disconnected_at' => now(),
+            'access_token' => null,
+            'refresh_token' => null,
+        ]);
 
         return response()->json([
             'success' => true,

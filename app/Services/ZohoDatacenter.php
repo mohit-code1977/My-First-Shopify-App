@@ -5,6 +5,11 @@ namespace App\Services;
 class ZohoDatacenter
 {
     /**
+     * Global OAuth initiation entry point for server-based applications.
+     */
+    public const GLOBAL_ACCOUNTS_URL = 'https://accounts.zoho.com';
+
+    /**
      * Map of allowed Accounts domain hosts to their corresponding API domain hosts.
      */
     public const ALLOWED_DATACENTERS = [
@@ -31,6 +36,42 @@ class ZohoDatacenter
         'cn' => 'accounts.zoho.com.cn',
         'sa' => 'accounts.zoho.sa',
     ];
+
+    /**
+     * Get global initiation accounts URL.
+     */
+    public static function getGlobalAccountsUrl(): string
+    {
+        return self::GLOBAL_ACCOUNTS_URL;
+    }
+
+    /**
+     * Resolve initiation Accounts URL based on existing shop connection or configured environment default.
+     */
+    public static function getInitiationAccountsUrl(?\App\Models\Shop $shop = null): string
+    {
+        if ($shop) {
+            try {
+                $connection = \App\Models\ZohoConnection::where('shop_id', $shop->id)->first();
+                if ($connection && !empty($connection->accounts_url)) {
+                    $validated = self::validateAccountsUrl($connection->accounts_url);
+                    if ($validated) {
+                        return $validated;
+                    }
+                }
+            } catch (\Throwable $e) {
+                // Ignore DB errors during fallback
+            }
+        }
+
+        $envAccountsUrl = config('services.zoho.accounts_url') ?: env('ZOHO_ACCOUNTS_URL');
+        $validatedEnv = self::validateAccountsUrl($envAccountsUrl);
+        if ($validatedEnv) {
+            return $validatedEnv;
+        }
+
+        return self::GLOBAL_ACCOUNTS_URL;
+    }
 
     /**
      * Validate and sanitize an Accounts URL. Must be HTTPS and have an allowed Accounts host.
@@ -96,12 +137,12 @@ class ZohoDatacenter
             return "https://" . self::LOCATION_MAP[$loc];
         }
 
-        $defaultEnvUrl = self::validateAccountsUrl(env('ZOHO_ACCOUNTS_URL'));
+        $defaultEnvUrl = self::validateAccountsUrl(config('services.zoho.accounts_url') ?: env('ZOHO_ACCOUNTS_URL'));
         if ($defaultEnvUrl !== null) {
             return $defaultEnvUrl;
         }
 
-        return 'https://accounts.zoho.com';
+        return self::GLOBAL_ACCOUNTS_URL;
     }
 
     /**
@@ -118,6 +159,6 @@ class ZohoDatacenter
             }
         }
 
-        return 'https://accounts.zoho.com';
+        return self::GLOBAL_ACCOUNTS_URL;
     }
 }

@@ -7,6 +7,7 @@ use App\Models\Shop;
 use App\Models\ZohoConnection;
 use App\Models\SyncHistory;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 
 class ZohoService
 {
@@ -57,12 +58,15 @@ class ZohoService
             throw new \RuntimeException('Zoho connection is missing or has an invalid accounts_url endpoint configuration.');
         }
 
+        $clientId = config('services.zoho.client_id') ?: env('ZOHO_CLIENT_ID');
+        $clientSecret = config('services.zoho.client_secret') ?: env('ZOHO_CLIENT_SECRET');
+
         $response = Http::asForm()->post(
             $accountsUrl . '/oauth/v2/token',
             [
                 'refresh_token' => $connection->refresh_token,
-                'client_id' => env('ZOHO_CLIENT_ID'),
-                'client_secret' => env('ZOHO_CLIENT_SECRET'),
+                'client_id' => $clientId,
+                'client_secret' => $clientSecret,
                 'grant_type' => 'refresh_token',
             ]
         );
@@ -133,12 +137,24 @@ class ZohoService
 
         // Throw an exception when Zoho returns an unsuccessful response
         if (!$response->successful()) {
+            $responseData = $response->json();
+            $code = $responseData['code'] ?? 0;
             throw new \Exception(
-                'Zoho API request failed: ' . $response->body()
+                'Zoho API request failed: ' . $response->body(),
+                is_numeric($code) ? (int) $code : 0
             );
         }
 
-        return $response->json();
+        $responseData = $response->json();
+
+        if (isset($responseData['code']) && (int) $responseData['code'] !== 0) {
+            throw new \Exception(
+                'Zoho API error (' . $responseData['code'] . '): ' . ($responseData['message'] ?? 'Unknown error'),
+                (int) $responseData['code']
+            );
+        }
+
+        return $responseData;
     }
 
     // Get all items from Zoho Books
@@ -179,6 +195,48 @@ class ZohoService
         } while ($hasMorePage);
 
         return $allItems;
+    }
+
+    /**
+     * Fetch single item from Zoho Books by item ID. Returns null if item is not found (code 1002).
+     */
+    public function getItem(string $zohoItemId): ?array
+    {
+        try {
+            $response = $this->makeRequest('GET', '/books/v3/items/' . $zohoItemId);
+            return $response['item'] ?? null;
+        } catch (\Throwable $e) {
+            if ($this->isItemNotFoundException($e)) {
+                return null;
+            }
+            throw $e;
+        }
+    }
+
+    public function isItemNotFoundResponse(array $response): bool
+    {
+        $code = (int) ($response['code'] ?? 0);
+        return $code === 1002 || $code === 5;
+    }
+
+    public function isItemNotFoundException(\Throwable $e): bool
+    {
+        $code = $e->getCode();
+        if ($code === 1002 || $code === 5) {
+            return true;
+        }
+
+        $message = strtolower($e->getMessage());
+
+        return str_contains($message, '"code":1002') ||
+            str_contains($message, '"code": 1002') ||
+            str_contains($message, '"code":5') ||
+            str_contains($message, '"code": 5') ||
+            str_contains($message, 'code 1002') ||
+            str_contains($message, 'code 5') ||
+            str_contains($message, 'not available') ||
+            str_contains($message, 'couldnt find any resource') ||
+            str_contains($message, 'could not find any resource');
     }
 
 
@@ -300,7 +358,7 @@ class ZohoService
 
     // Create a Zoho Books item from a Shopify product variant
     public function createItem(ProductVariant $variant): array {
-        // Prevent duplicate Zoho item creation
+        // Prevent duplicate Zoho item creation if variant already has zoho_item_id
         if ($variant->zoho_item_id) {
             return [
                 'message' => 'Zoho item already exists for this variant.',
@@ -308,6 +366,17 @@ class ZohoService
                 'created' => false,
                 'updated' => false,
             ];
+        }
+
+        // Duplicate protection: check if an item with this Shopify Variant ID already exists in Zoho
+        $existingInZoho = $this->findItemByShopifyVariantId($variant->shopify_variant_id);
+        if ($existingInZoho && !empty($existingInZoho['item_id'])) {
+            $zohoItemId = (string) $existingInZoho['item_id'];
+            $variant->update([
+                'zoho_item_id' => $zohoItemId,
+            ]);
+
+            return $this->updateItem($variant);
         }
 
         // Get the parent Shopify product
@@ -356,13 +425,13 @@ class ZohoService
 
         // Save the Zoho item ID against the Shopify variant
         $variant->update([
-            'zoho_item_id' => $zohoItemId,
+            'zoho_item_id' => (string) $zohoItemId,
         ]);
 
         // Return sync information along with the Zoho response
         return [
             'message' => 'Zoho item created successfully.',
-            'zoho_item_id' => $zohoItemId,
+            'zoho_item_id' => (string) $zohoItemId,
             'created' => true,
             'updated' => false,
             'zoho_response' => $result,
@@ -393,12 +462,45 @@ class ZohoService
             $data['sku'] = $variant->sku;
         }
 
-        // Update the existing item in Zoho Books
-        $result = $this->makeRequest(
-            'PUT',
-            '/books/v3/items/' . $variant->zoho_item_id,
-            $data
-        );
+        try {
+            // Update the existing item in Zoho Books
+            $result = $this->makeRequest(
+                'PUT',
+                '/books/v3/items/' . $variant->zoho_item_id,
+                $data
+            );
+        } catch (\Throwable $e) {
+            if ($this->isItemNotFoundException($e)) {
+                // Code 1002 detected: clear stale local mapping
+                $variant->update([
+                    'zoho_item_id' => null,
+                    'zoho_sync_hash' => null,
+                    'zoho_synced_at' => null,
+                ]);
+
+                // Reconcile: find existing item by cf_shopify_variant_id or create new
+                $existingInZoho = $this->findItemByShopifyVariantId($variant->shopify_variant_id);
+                if ($existingInZoho && !empty($existingInZoho['item_id'])) {
+                    $variant->update([
+                        'zoho_item_id' => (string) $existingInZoho['item_id'],
+                    ]);
+                    return $this->updateItem($variant);
+                }
+
+                return $this->createItem($variant);
+            }
+
+            throw $e;
+        }
+
+        // Upload product featured image if available (failure does not rollback item update)
+        if (!empty($product->image_url)) {
+            try {
+                $this->uploadItemImage($variant, $product->image_url);
+            } catch (\Throwable $e) {
+                Log::error("Zoho image upload failed during updateItem for variant {$variant->id}: " . $e->getMessage());
+            }
+        }
 
         // Return sync information along with the Zoho response
         return [
@@ -410,54 +512,120 @@ class ZohoService
         ];
     }
 
+    /**
+     * Dedicated method for uploading/replacing a Zoho item's image via multipart/form-data.
+     */
+    public function uploadItemImage(ProductVariant $variant, ?string $imageUrl = null): array
+    {
+        $zohoItemId = $variant->zoho_item_id;
+
+        if (!$zohoItemId) {
+            return [
+                'success' => false,
+                'message' => 'Variant is not linked to a Zoho item.',
+            ];
+        }
+
+        $url = $imageUrl ?? $variant->product?->image_url;
+
+        if (empty($url)) {
+            return [
+                'success' => true,
+                'skipped' => true,
+                'message' => 'No image URL provided or found on product.',
+            ];
+        }
+
+        try {
+            // Download the image bytes
+            $imageResponse = Http::timeout(10)->get($url);
+
+            if (!$imageResponse->successful()) {
+                Log::warning("Failed to download image from {$url} for Zoho item {$zohoItemId}");
+                return [
+                    'success' => false,
+                    'message' => 'Failed to download image from URL.',
+                ];
+            }
+
+            $imageBytes = $imageResponse->body();
+            $filename = basename(parse_url($url, PHP_URL_PATH) ?? 'image.jpg') ?: 'image.jpg';
+
+            $connection = $this->getConnection();
+            $apiUrl = ZohoDatacenter::validateApiUrl($connection->api_url);
+
+            if (!$apiUrl) {
+                throw new \RuntimeException('Zoho connection has an invalid api_url endpoint configuration.');
+            }
+
+            $token = $this->getAccessToken();
+
+            $response = Http::withHeaders([
+                'Authorization' => 'Zoho-oauthtoken ' . $token,
+            ])->attach(
+                'image',
+                $imageBytes,
+                $filename
+            )->post(
+                $apiUrl . '/books/v3/items/' . $zohoItemId . '/image',
+                [
+                    'organization_id' => $connection->organization_id,
+                ]
+            );
+
+            if (!$response->successful()) {
+                Log::warning("Zoho image upload failed for item {$zohoItemId}: " . $response->body());
+                return [
+                    'success' => false,
+                    'message' => 'Zoho image upload API call failed.',
+                    'response' => $response->json(),
+                ];
+            }
+
+            return [
+                'success' => true,
+                'uploaded' => true,
+                'zoho_response' => $response->json(),
+            ];
+        } catch (\Throwable $e) {
+            Log::error("Zoho image upload exception for item {$zohoItemId}: " . $e->getMessage());
+            return [
+                'success' => false,
+                'message' => $e->getMessage(),
+            ];
+        }
+    }
+
 
     public function syncItem(ProductVariant $variant): array
     {
         /*
-    |--------------------------------------------------------------------------
-    | 1. Check Zoho's real current state
-    |--------------------------------------------------------------------------
-    */
-
-        $zohoItem = $this->findItemByShopifyVariantId(
-            $variant->shopify_variant_id
-        );
-
-        /*
-    |--------------------------------------------------------------------------
-    | 2. Reconcile local mapping with Zoho
-    |--------------------------------------------------------------------------
-    */
-
-        if (!$zohoItem) {
-            /*
-        | Zoho item does not exist anymore.
-        |
-        | Clear stale local mapping so the next operation
-        | treats this variant as a new Zoho item.
+        |--------------------------------------------------------------------------
+        | 1. Reconcile local mapping with Zoho
+        |--------------------------------------------------------------------------
         */
 
-            $variant->update([
-                'zoho_item_id' => null,
-                'zoho_sync_hash' => null,
-                'zoho_synced_at' => null,
-            ]);
-        } else {
-            /*
-        | Zoho item exists.
-        |
-        | Make local mapping match the real Zoho item ID.
-        */
+        // If local variant has a mapped zoho_item_id, verify whether it still exists in Zoho
+        if ($variant->zoho_item_id) {
+            $existingItem = $this->getItem($variant->zoho_item_id);
 
-            $realZohoItemId =
-                $zohoItem['item_id'] ?? null;
-
-            if ($realZohoItemId) {
+            if (!$existingItem) {
+                // Item 1002 Not Found in Zoho: clear stale local mapping
                 $variant->update([
-                    'zoho_item_id' =>
-                    $realZohoItemId,
+                    'zoho_item_id' => null,
+                    'zoho_sync_hash' => null,
+                    'zoho_synced_at' => null,
                 ]);
             }
+        }
+
+        // Search Zoho by custom field cf_shopify_variant_id if local mapping is missing or was cleared
+        $zohoItem = $this->findItemByShopifyVariantId($variant->shopify_variant_id);
+
+        if ($zohoItem && !empty($zohoItem['item_id'])) {
+            $variant->update([
+                'zoho_item_id' => (string) $zohoItem['item_id'],
+            ]);
         }
 
         /*
