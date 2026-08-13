@@ -1,11 +1,39 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Head } from "@inertiajs/react";
 
 export default function Settings({ shop, zohoConnection, host }) {
+    const [shopData, setShopData] = useState(shop || {});
+    const [zohoConn, setZohoConn] = useState(zohoConnection);
+    const [loading, setLoading] = useState(true);
     const [disconnecting, setDisconnecting] = useState(false);
     const [showDisconnectModal, setShowDisconnectModal] = useState(false);
 
-    const connected = Boolean(zohoConnection);
+    const connected = Boolean(zohoConn);
+
+    const loadData = async () => {
+        setLoading(true);
+        try {
+            const token = await window.shopify?.idToken();
+            const headers = {
+                Accept: "application/json",
+                Authorization: token ? `Bearer ${token}` : "",
+            };
+            const response = await fetch("/api/zoho/settings", { headers });
+            const data = await response.json();
+            if (response.ok && data.success) {
+                if (data.shop) setShopData(data.shop);
+                setZohoConn(data.zohoConnection);
+            }
+        } catch (error) {
+            console.error("Failed to load settings data:", error);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        loadData();
+    }, []);
 
     const disconnect = async () => {
         if (disconnecting) {
@@ -15,6 +43,7 @@ export default function Settings({ shop, zohoConnection, host }) {
         setDisconnecting(true);
 
         try {
+            const token = await window.shopify?.idToken();
             const csrfToken =
                 document
                     .querySelector('meta[name="csrf-token"]')
@@ -24,6 +53,7 @@ export default function Settings({ shop, zohoConnection, host }) {
                 method: "POST",
 
                 headers: {
+                    Authorization: token ? `Bearer ${token}` : "",
                     "X-CSRF-TOKEN": csrfToken,
                     Accept: "application/json",
                     "Content-Type": "application/json",
@@ -40,7 +70,7 @@ export default function Settings({ shop, zohoConnection, host }) {
                 );
             }
 
-            window.location.reload();
+            await loadData();
         } catch (error) {
             console.error("Disconnect failed:", error);
 
@@ -68,7 +98,7 @@ export default function Settings({ shop, zohoConnection, host }) {
 
                             <div className="zoho-header-subtitle">
                                 Shopify Store:{" "}
-                                {shop?.shop_domain || "Unknown store"}
+                                {shopData?.shop_domain || "Unknown store"}
                             </div>
                         </div>
                     </div>

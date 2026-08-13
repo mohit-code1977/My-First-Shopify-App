@@ -8,6 +8,7 @@ use App\Models\Shop;
 use App\Services\ShopifyService;
 use App\Services\ZohoService;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Http\Request;
 
 class ShopifyProductController extends Controller{
     // Inject the Shopify service when creating the controller
@@ -16,10 +17,9 @@ class ShopifyProductController extends Controller{
     ) {}
 
     // Fetch products from Shopify and synchronize products, variants, and Zoho items
-    public function products()
-    {
-        // Get the installed Shopify shop
-        $shop = Shop::first();
+    public function products(Request $request) {
+        // Get the authenticated Shopify shop from request attributes
+        $shop = $request->attributes->get('shop');
 
         // Stop if no Shopify shop is installed
         if (!$shop) {

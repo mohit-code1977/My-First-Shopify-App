@@ -20,30 +20,40 @@ class ZohoSyncController extends Controller
         private ShopifyService $shopifyService
     ) {}
 
-    public function index()
+    public function index(Request $request)
     {
-        $shop = Shop::first();
+        $shopDomain = $request->query('shop');
+        $host = $request->query('host');
+
+        return Inertia::render(
+            'Zoho/Sync',
+            [
+                'shop' => [
+                    'shop_domain' => $shopDomain,
+                ],
+                'variants' => [],
+                'failedCount' => 0,
+                'zohoConnected' => false,
+                'host' => $host,
+            ]
+        );
+    }
+
+    public function data(Request $request): JsonResponse
+    {
+        $shop = $request->attributes->get('shop');
 
         if (!$shop) {
-            abort(404, 'No Shopify shop installed.');
+            return response()->json([
+                'success' => false,
+                'message' => 'No Shopify shop installed.',
+            ], 404);
         }
 
         try {
-            /*
-        |--------------------------------------------------------------------------
-        | Fetch CURRENT Shopify catalog directly
-        |--------------------------------------------------------------------------
-        */
-
             $shopifyVariants =
                 $this->fetchShopifyCatalog($shop);
         } catch (\Throwable $e) {
-            /*
-        |--------------------------------------------------------------------------
-        | Do not destroy the page if Shopify is temporarily unavailable.
-        |--------------------------------------------------------------------------
-        */
-
             Log::error(
                 'Shopify catalog fetch failed.',
                 [
@@ -54,15 +64,6 @@ class ZohoSyncController extends Controller
 
             $shopifyVariants = [];
         }
-
-        /*
-    |--------------------------------------------------------------------------
-    | Load ONLY local integration mappings
-    |--------------------------------------------------------------------------
-    |
-    | Local DB is NOT the source of product data anymore.
-    |
-    */
 
         $variantIds = collect($shopifyVariants)
             ->pluck('shopify_variant_id')
@@ -93,12 +94,6 @@ class ZohoSyncController extends Controller
             ])
             ->keyBy('shopify_variant_id');
 
-        /*
-    |--------------------------------------------------------------------------
-    | Merge Shopify data + local Zoho mapping
-    |--------------------------------------------------------------------------
-    */
-
         $variants = collect($shopifyVariants)
             ->map(function (array $variant) use (
                 $localMappings
@@ -111,16 +106,9 @@ class ZohoSyncController extends Controller
                 return array_merge(
                     $variant,
                     [
-                        /*
-                    | UI uses this as the stable row ID.
-                    | It is the Shopify Variant ID now.
-                    */
                         'id' =>
                         $variant['shopify_variant_id'],
 
-                        /*
-                    | Zoho integration state.
-                    */
                         'zoho_item_id' =>
                         $mapping?->zoho_item_id,
 
@@ -137,24 +125,15 @@ class ZohoSyncController extends Controller
         $zohoConnection =
             $shop->zohoConnection;
 
-        return Inertia::render(
-            'Zoho/Sync',
-            [
-                'shop' => [
-                    'id' =>
-                    $shop->id,
-
-                    'shop_domain' =>
-                    $shop->shop_domain,
-                ],
-
-                'variants' =>
-                $variants,
-
-                'zohoConnected' =>
-                $zohoConnection !== null,
-            ]
-        );
+        return response()->json([
+            'success' => true,
+            'shop' => [
+                'id' => $shop->id,
+                'shop_domain' => $shop->shop_domain,
+            ],
+            'variants' => $variants,
+            'zohoConnected' => $zohoConnection !== null,
+        ]);
     }
 
 
@@ -320,7 +299,7 @@ GRAPHQL;
 
     public function syncVariant(Request $request): JsonResponse
     {
-        $shop = Shop::first();
+        $shop = $request->attributes->get('shop');
 
         if (!$shop) {
             return response()->json([
@@ -565,9 +544,9 @@ GRAPHQL;
     }
 
 
-    public function syncAll(): JsonResponse
+    public function syncAll(Request $request): JsonResponse
     {
-        $shop = Shop::first();
+        $shop = $request->attributes->get('shop');
 
         if (!$shop) {
             return response()->json([
@@ -701,10 +680,37 @@ GRAPHQL;
 
     public function history(Request $request)
     {
-        $shop = Shop::first();
+        $shopDomain = $request->query('shop');
+
+        return Inertia::render('Zoho/History', [
+            'shop' => [
+                'shop_domain' => $shopDomain,
+            ],
+            'histories' => [
+                'data' => [],
+                'total' => 0,
+                'current_page' => 1,
+                'last_page' => 1,
+                'links' => [],
+            ],
+            'pendingProducts' => 0,
+            'zohoConnected' => false,
+            'filters' => [
+                'search' => (string) $request->query('search', ''),
+                'status' => (string) $request->query('status', 'all'),
+            ],
+        ]);
+    }
+
+    public function historyData(Request $request): JsonResponse
+    {
+        $shop = $request->attributes->get('shop');
 
         if (!$shop) {
-            abort(404, 'No Shopify shop installed.');
+            return response()->json([
+                'success' => false,
+                'message' => 'No Shopify shop installed.',
+            ], 404);
         }
 
         $search = trim((string) $request->query('search', ''));
@@ -714,63 +720,30 @@ GRAPHQL;
             'productVariant.product',
         ])
             ->where('shop_id', $shop->id)
-
             ->when($search !== '', function ($query) use ($search) {
                 $query->where(function ($q) use ($search) {
                     $q->where('action', 'like', "%{$search}%")
                         ->orWhere('status', 'like', "%{$search}%")
                         ->orWhere('message', 'like', "%{$search}%")
                         ->orWhere('zoho_item_id', 'like', "%{$search}%")
-
-                        ->orWhereHas(
-                            'productVariant',
-                            function ($variantQuery) use ($search) {
-                                $variantQuery
-                                    ->where('title', 'like', "%{$search}%")
-                                    ->orWhere(
-                                        'sku',
-                                        'like',
-                                        "%{$search}%"
-                                    );
-                            }
-                        )
-
-                        ->orWhereHas(
-                            'productVariant.product',
-                            function ($productQuery) use ($search) {
-                                $productQuery->where(
-                                    'title',
-                                    'like',
-                                    "%{$search}%"
-                                );
-                            }
-                        );
+                        ->orWhereHas('productVariant', function ($variantQuery) use ($search) {
+                            $variantQuery->where('title', 'like', "%{$search}%")
+                                ->orWhere('sku', 'like', "%{$search}%");
+                        })
+                        ->orWhereHas('productVariant.product', function ($productQuery) use ($search) {
+                            $productQuery->where('title', 'like', "%{$search}%");
+                        });
                 });
             })
-
-            ->when(
-                $status !== 'all',
-                fn($query) =>
-                $query->where('status', $status)
-            )
-
+            ->when($status !== 'all', fn($query) => $query->where('status', $status))
             ->latest('id')
             ->paginate(20)
             ->withQueryString();
 
-
-
-        /*
-|--------------------------------------------------------------------------
-| Current Shopify products pending Zoho synchronization
-|--------------------------------------------------------------------------
-*/
-
         $pendingProducts = 0;
 
         try {
-            $shopifyVariants =
-                $this->fetchShopifyCatalog($shop);
+            $shopifyVariants = $this->fetchShopifyCatalog($shop);
 
             $variantIds = collect($shopifyVariants)
                 ->pluck('shopify_variant_id')
@@ -778,48 +751,30 @@ GRAPHQL;
                 ->values();
 
             $syncedVariantIds = ProductVariant::query()
-                ->whereIn(
-                    'shopify_variant_id',
-                    $variantIds
-                )
-                ->whereHas(
-                    'product',
-                    function ($query) use ($shop) {
-                        $query->where(
-                            'shop_id',
-                            $shop->id
-                        );
-                    }
-                )
+                ->whereIn('shopify_variant_id', $variantIds)
+                ->whereHas('product', function ($query) use ($shop) {
+                    $query->where('shop_id', $shop->id);
+                })
                 ->whereNotNull('zoho_item_id')
                 ->pluck('shopify_variant_id');
 
-            $pendingProducts = $variantIds
-                ->diff($syncedVariantIds)
-                ->count();
+            $pendingProducts = $variantIds->diff($syncedVariantIds)->count();
         } catch (\Throwable $e) {
-            Log::error(
-                'Failed to calculate pending Shopify products.',
-                [
-                    'shop_id' => $shop->id,
-                    'message' => $e->getMessage(),
-                ]
-            );
+            Log::error('Failed to calculate pending Shopify products.', [
+                'shop_id' => $shop->id,
+                'message' => $e->getMessage(),
+            ]);
         }
 
-
-        return Inertia::render('Zoho/History', [
+        return response()->json([
+            'success' => true,
             'shop' => [
                 'id' => $shop->id,
                 'shop_domain' => $shop->shop_domain,
             ],
-
             'histories' => $histories,
-
             'pendingProducts' => $pendingProducts,
-
             'zohoConnected' => $shop->zohoConnection !== null,
-
             'filters' => [
                 'search' => $search,
                 'status' => $status,
@@ -832,29 +787,45 @@ GRAPHQL;
 
     public function settings(Request $request)
     {
-        $shop = Shop::first();
+        $shopDomain = $request->query('shop');
+        $host = $request->query('host');
+
+        return Inertia::render('Zoho/Settings', [
+            'shop' => [
+                'shop_domain' => $shopDomain,
+            ],
+            'zohoConnection' => null,
+            'host' => $host,
+        ]);
+    }
+
+    public function settingsData(Request $request): JsonResponse
+    {
+        $shop = $request->attributes->get('shop');
 
         if (!$shop) {
-            abort(404, 'No Shopify shop installed.');
+            return response()->json([
+                'success' => false,
+                'message' => 'No Shopify shop installed.',
+            ], 404);
         }
 
         $zohoConnection = $shop->zohoConnection;
 
-        return Inertia::render('Zoho/Settings', [
+        return response()->json([
+            'success' => true,
             'shop' => [
                 'id' => $shop->id,
                 'shop_domain' => $shop->shop_domain,
             ],
-
             'zohoConnection' => $zohoConnection,
-
             'host' => $request->query('host'),
         ]);
     }
 
-    public function disconnect()
+    public function disconnect(Request $request)
     {
-        $shop = Shop::first();
+        $shop = $request->attributes->get('shop');
 
         if (!$shop) {
             return response()->json([

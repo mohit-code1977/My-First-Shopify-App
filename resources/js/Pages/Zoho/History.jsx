@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Head, router } from "@inertiajs/react";
+import { Head } from "@inertiajs/react";
 
 export default function History({
     shop,
@@ -8,10 +8,44 @@ export default function History({
     pendingProducts = 0,
     filters = {},
 }) {
-    const historyData = histories?.data || [];
+    const [shopData, setShopData] = useState(shop || {});
+    const [historiesState, setHistoriesState] = useState(histories || { data: [], total: 0 });
+    const [zohoConn, setZohoConn] = useState(zohoConnected);
+    const [pendingCount, setPendingCount] = useState(pendingProducts);
+    const [loading, setLoading] = useState(true);
+
+    const historyData = historiesState?.data || [];
 
     const [search, setSearch] = useState(filters.search || "");
     const [statusFilter, setStatusFilter] = useState(filters.status || "all");
+
+    const loadData = async (page = 1, searchQuery = search, statusVal = statusFilter) => {
+        setLoading(true);
+        try {
+            const token = await window.shopify?.idToken();
+            const headers = {
+                Accept: "application/json",
+                Authorization: token ? `Bearer ${token}` : "",
+            };
+            const params = new URLSearchParams({
+                page: String(page),
+                search: searchQuery,
+                status: statusVal,
+            });
+            const response = await fetch(`/api/zoho/sync/history?${params.toString()}`, { headers });
+            const data = await response.json();
+            if (response.ok && data.success) {
+                if (data.shop) setShopData(data.shop);
+                if (data.histories) setHistoriesState(data.histories);
+                if (typeof data.zohoConnected === "boolean") setZohoConn(data.zohoConnected);
+                if (typeof data.pendingProducts === "number") setPendingCount(data.pendingProducts);
+            }
+        } catch (error) {
+            console.error("Failed to load history data:", error);
+        } finally {
+            setLoading(false);
+        }
+    };
 
     /*
     |--------------------------------------------------------------------------
@@ -21,18 +55,7 @@ export default function History({
 
     useEffect(() => {
         const timeout = setTimeout(() => {
-            router.get(
-                "/zoho/sync/history",
-                {
-                    search,
-                    status: statusFilter,
-                },
-                {
-                    preserveState: true,
-                    preserveScroll: true,
-                    replace: true,
-                },
-            );
+            loadData(1, search, statusFilter);
         }, 350);
 
         return () => clearTimeout(timeout);
@@ -129,7 +152,7 @@ export default function History({
     */
 
     const metrics = useMemo(() => {
-        const total = Number(histories?.total ?? 0) || historyData.length;
+        const total = Number(historiesState?.total ?? 0) || historyData.length;
 
         const success = historyData.filter(
             (history) => getStatus(history) === "success",
@@ -139,7 +162,7 @@ export default function History({
             (history) => getStatus(history) === "failed",
         ).length;
 
-        const pending = Number(pendingProducts || 0);
+        const pending = Number(pendingCount || 0);
 
         return {
             total,
@@ -147,7 +170,7 @@ export default function History({
             failed,
             pending,
         };
-    }, [histories?.total, historyData, pendingProducts]);
+    }, [historiesState?.total, historyData, pendingCount]);
 
     const hasActiveFilters = Boolean(search.trim()) || statusFilter !== "all";
 
@@ -169,18 +192,7 @@ export default function History({
     */
 
     const refreshPage = () => {
-        router.get(
-            "/zoho/sync/history",
-            {
-                search,
-                status: statusFilter,
-            },
-            {
-                preserveState: true,
-                preserveScroll: true,
-                replace: true,
-            },
-        );
+        loadData(historiesState?.current_page || 1, search, statusFilter);
     };
 
     /*
@@ -209,21 +221,21 @@ export default function History({
 
                             <div className="zoho-header-subtitle">
                                 Shopify Store:{" "}
-                                {shop?.shop_domain || "Unknown store"}
+                                {shopData?.shop_domain || "Unknown store"}
                             </div>
                         </div>
                     </div>
 
                     <div
                         className={
-                            zohoConnected
+                            zohoConn
                                 ? "connection-badge"
                                 : "connection-badge disconnected"
                         }
                     >
                         <span className="connection-dot" />
 
-                        {zohoConnected ? "Connected" : "Not Connected"}
+                        {zohoConn ? "Connected" : "Not Connected"}
                     </div>
                 </header>
 
@@ -590,15 +602,15 @@ export default function History({
                         PAGINATION
                     ================================================== */}
 
-                    {histories?.last_page > 1 && (
+                    {historiesState?.last_page > 1 && (
                         <div className="history-pagination">
                             <div className="history-pagination-info">
-                                Page <strong>{histories.current_page}</strong>{" "}
-                                of <strong>{histories.last_page}</strong>
+                                Page <strong>{historiesState.current_page}</strong>{" "}
+                                of <strong>{historiesState.last_page}</strong>
                             </div>
 
                             <div className="pagination">
-                                {histories.links.map((link, index) => (
+                                {historiesState.links.map((link, index) => (
                                     <button
                                         key={index}
                                         type="button"
@@ -613,14 +625,23 @@ export default function History({
                                                 return;
                                             }
 
-                                            router.get(
-                                                link.url,
-                                                {},
-                                                {
-                                                    preserveState: true,
-                                                    preserveScroll: true,
-                                                },
-                                            );
+                                            try {
+                                                const url = new URL(
+                                                    link.url,
+                                                    window.location.origin,
+                                                );
+                                                const pageParam =
+                                                    url.searchParams.get(
+                                                        "page",
+                                                    ) || 1;
+                                                loadData(
+                                                    pageParam,
+                                                    search,
+                                                    statusFilter,
+                                                );
+                                            } catch {
+                                                loadData(1, search, statusFilter);
+                                            }
                                         }}
                                         dangerouslySetInnerHTML={{
                                             __html: link.label,

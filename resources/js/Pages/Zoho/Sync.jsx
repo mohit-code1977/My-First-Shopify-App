@@ -1,8 +1,9 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Head } from "@inertiajs/react";
 
 const SYNC_ALL_URL = "/zoho/sync-all";
 const SYNC_VARIANT_URL = "/zoho/sync";
+const SYNC_DATA_URL = "/api/zoho/sync";
 
 export default function Sync({
     shop,
@@ -10,6 +11,11 @@ export default function Sync({
     failedCount = 0,
     zohoConnected = false,
 }) {
+    const [loading, setLoading] = useState(true);
+    const [shopData, setShopData] = useState(shop || {});
+    const [variantsData, setVariantsData] = useState(variants || []);
+    const [connectedState, setConnectedState] = useState(zohoConnected);
+
     const [search, setSearch] = useState("");
     const [direction, setDirection] = useState("shopify-to-zoho");
     const [connectionFilter, setConnectionFilter] = useState("all");
@@ -18,6 +24,34 @@ export default function Sync({
     const [syncingAll, setSyncingAll] = useState(false);
 
     const [selectedIds, setSelectedIds] = useState([]);
+
+    const loadData = async () => {
+        setLoading(true);
+        try {
+            const token = await window.shopify?.idToken();
+            const headers = {
+                Accept: "application/json",
+                Authorization: token ? `Bearer ${token}` : "",
+            };
+            const response = await fetch(SYNC_DATA_URL, { headers });
+            const data = await response.json();
+            if (response.ok && data.success) {
+                if (data.variants) setVariantsData(data.variants);
+                if (data.shop) setShopData(data.shop);
+                if (typeof data.zohoConnected === "boolean") {
+                    setConnectedState(data.zohoConnected);
+                }
+            }
+        } catch (error) {
+            console.error("Failed to load sync data:", error);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        loadData();
+    }, []);
 
     /*
     |--------------------------------------------------------------------------
@@ -52,8 +86,8 @@ export default function Sync({
         variant?.currency_code ||
         variant?.currency ||
         variant?.product?.currency_code ||
-        shop?.currency_code ||
-        shop?.currency ||
+        shopData?.currency_code ||
+        shopData?.currency ||
         null;
 
     const formatPrice = (price, variant) => {
@@ -88,7 +122,7 @@ export default function Sync({
     const filteredVariants = useMemo(() => {
         const query = search.trim().toLowerCase();
 
-        return variants.filter((variant) => {
+        return (variantsData || []).filter((variant) => {
             const productTitle = getProductTitle(variant).toLowerCase();
             const variantTitle = getVariantTitle(variant).toLowerCase();
             const sku = String(variant?.sku || "").toLowerCase();
@@ -110,7 +144,7 @@ export default function Sync({
 
             return matchesSearch && matchesConnection;
         });
-    }, [variants, search, connectionFilter]);
+    }, [variantsData, search, connectionFilter]);
 
     /*
     |--------------------------------------------------------------------------
@@ -162,7 +196,7 @@ export default function Sync({
     const syncSelected = async () => {
         if (
             selectedIds.length === 0 ||
-            !zohoConnected ||
+            !connectedState ||
             syncingAll ||
             syncingId
         ) {
@@ -171,7 +205,7 @@ export default function Sync({
 
         setSyncingAll(true);
 
-        const selectedVariants = variants.filter((variant) =>
+        const selectedVariants = (variantsData || []).filter((variant) =>
             selectedIds.includes(variant.id),
         );
 
@@ -239,7 +273,7 @@ export default function Sync({
                 );
             }
 
-            window.location.reload();
+            await loadData();
         } catch (error) {
             console.error("Selected sync failed:", error);
 
@@ -258,7 +292,7 @@ export default function Sync({
     */
 
     const syncVariant = async (variant) => {
-        if (!zohoConnected || !variant?.id || syncingId || syncingAll) {
+        if (!connectedState || !variant?.id || syncingId || syncingAll) {
             return;
         }
 
@@ -295,7 +329,7 @@ export default function Sync({
                 throw new Error(data.message || "Synchronization failed.");
             }
 
-            window.location.reload();
+            await loadData();
         } catch (error) {
             console.error("Sync failed:", error);
 
@@ -312,7 +346,7 @@ export default function Sync({
     */
 
     const syncAll = async () => {
-        if (!zohoConnected || syncingAll || syncingId) {
+        if (!connectedState || syncingAll || syncingId) {
             return;
         }
 
@@ -343,7 +377,7 @@ export default function Sync({
                 throw new Error(data.message || "Synchronization failed.");
             }
 
-            window.location.reload();
+            await loadData();
         } catch (error) {
             console.error("Sync all failed:", error);
 
@@ -360,7 +394,7 @@ export default function Sync({
     */
 
     const refreshPage = () => {
-        window.location.reload();
+        loadData();
     };
 
     /*
@@ -401,21 +435,21 @@ export default function Sync({
 
                             <div className="zoho-products-header-subtitle">
                                 Shopify Store:{" "}
-                                {shop?.shop_domain || "Unknown store"}
+                                {shopData?.shop_domain || "Unknown store"}
                             </div>
                         </div>
                     </div>
 
                     <div
                         className={
-                            zohoConnected
+                            connectedState
                                 ? "zoho-connection-status connected"
                                 : "zoho-connection-status disconnected"
                         }
                     >
                         <span className="zoho-connection-dot" />
 
-                        {zohoConnected ? "Connected" : "Not Connected"}
+                        {connectedState ? "Connected" : "Not Connected"}
                     </div>
                 </header>
 

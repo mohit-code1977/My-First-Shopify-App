@@ -36,76 +36,107 @@ class ShopifyAuthenticate
         try {
             /*
             |--------------------------------------------------------------------------
-            | Decode Shopify App Bridge ID token
+            | 1. Decode & Validate Token Structure
             |--------------------------------------------------------------------------
             */
 
             $parts = explode('.', $token);
 
             if (count($parts) !== 3) {
-                throw new \Exception(
-                    'Invalid Shopify token format.'
-                );
+                throw new \Exception('Invalid Shopify token format.');
             }
 
-            $payload = json_decode(
-                base64_decode(
-                    strtr($parts[1], '-_', '+/')
-                ),
-                true
-            );
+            [$headerB64, $payloadB64, $signatureB64] = $parts;
 
+            $header = json_decode(self::base64UrlDecode($headerB64), true);
+            if (!is_array($header)) {
+                throw new \Exception('Invalid Shopify token header.');
+            }
+
+            if (empty($header['alg']) || $header['alg'] !== 'HS256') {
+                throw new \Exception('Unsupported Shopify token algorithm.');
+            }
+
+            $payload = json_decode(self::base64UrlDecode($payloadB64), true);
             if (!is_array($payload)) {
-                throw new \Exception(
-                    'Invalid Shopify token payload.'
-                );
+                throw new \Exception('Invalid Shopify token payload.');
             }
 
             /*
             |--------------------------------------------------------------------------
-            | Validate token expiration
+            | 2. Cryptographic Signature Verification (HMAC-SHA256)
             |--------------------------------------------------------------------------
             */
 
-            if (
-                empty($payload['exp']) ||
-                $payload['exp'] < time()
-            ) {
-                throw new \Exception(
-                    'Shopify token has expired.'
-                );
+            $apiSecret = config('services.shopify.api_secret') ?: env('SHOPIFY_API_SECRET');
+
+            if (!$apiSecret) {
+                throw new \Exception('Shopify API secret key is not configured.');
+            }
+
+            $expectedSignature = hash_hmac('sha256', "{$headerB64}.{$payloadB64}", $apiSecret, true);
+            $providedSignature = self::base64UrlDecode($signatureB64);
+
+            if (!hash_equals($expectedSignature, $providedSignature)) {
+                throw new \Exception('Invalid Shopify token signature.');
             }
 
             /*
             |--------------------------------------------------------------------------
-            | Get Shopify shop from token
+            | 3. Validate Audience Claim (aud)
+            |--------------------------------------------------------------------------
+            */
+
+            $apiKey = config('services.shopify.api_key') ?: env('SHOPIFY_API_KEY');
+
+            if ($apiKey && (!isset($payload['aud']) || $payload['aud'] !== $apiKey)) {
+                throw new \Exception('Shopify token audience mismatch.');
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | 4. Validate Expiration (exp) and Not-Before (nbf) Claims
+            |--------------------------------------------------------------------------
+            */
+
+            $now = time();
+            $leeway = 60;
+
+            if (!isset($payload['exp']) || !is_numeric($payload['exp'])) {
+                throw new \Exception('Shopify token expiration claim missing.');
+            }
+
+            if (($payload['exp'] + $leeway) < $now) {
+                throw new \Exception('Shopify token has expired.');
+            }
+
+            if (array_key_exists('nbf', $payload)) {
+                if (!is_numeric($payload['nbf'])) {
+                    throw new \Exception('Shopify token not-before claim is invalid.');
+                }
+
+                if (($payload['nbf'] - $leeway) > $now) {
+                    throw new \Exception('Shopify token is not active yet.');
+                }
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | 5. Validate Destination (dest) and Issuer (iss) Claims
             |--------------------------------------------------------------------------
             */
 
             $destination = $payload['dest'] ?? null;
 
             if (!$destination) {
-                throw new \Exception(
-                    'Shopify shop information missing from token.'
-                );
+                throw new \Exception('Shopify shop information missing from token.');
             }
 
-            $shopDomain = parse_url(
-                $destination,
-                PHP_URL_HOST
-            );
+            $shopDomain = parse_url($destination, PHP_URL_HOST);
 
             if (!$shopDomain) {
-                throw new \Exception(
-                    'Invalid Shopify shop destination.'
-                );
+                throw new \Exception('Invalid Shopify shop destination.');
             }
-
-            /*
-            |--------------------------------------------------------------------------
-            | Validate Shopify domain
-            |--------------------------------------------------------------------------
-            */
 
             if (
                 !preg_match(
@@ -113,9 +144,19 @@ class ShopifyAuthenticate
                     $shopDomain
                 )
             ) {
-                throw new \Exception(
-                    'Invalid Shopify shop domain.'
-                );
+                throw new \Exception('Invalid Shopify shop domain.');
+            }
+
+            $issuer = $payload['iss'] ?? null;
+
+            if (!$issuer) {
+                throw new \Exception('Shopify token issuer missing.');
+            }
+
+            $issuerHost = parse_url($issuer, PHP_URL_HOST);
+
+            if (!$issuerHost || $issuerHost !== $shopDomain) {
+                throw new \Exception('Shopify token issuer mismatch.');
             }
 
             /*
@@ -124,10 +165,14 @@ class ShopifyAuthenticate
             |--------------------------------------------------------------------------
             */
 
-            $shop = Shop::where(
-                'shop_domain',
-                $shopDomain
-            )->first();
+            try {
+                $shop = Shop::where(
+                    'shop_domain',
+                    $shopDomain
+                )->first();
+            } catch (\Throwable $e) {
+                $shop = null;
+            }
 
             /*
             |--------------------------------------------------------------------------
@@ -182,5 +227,29 @@ class ShopifyAuthenticate
                 'message' => $e->getMessage(),
             ], 401);
         }
+    }
+
+    /**
+     * Decode base64url encoded string strictly.
+     */
+    private static function base64UrlDecode(string $input): string
+    {
+        if (trim($input) === '') {
+            throw new \Exception('Invalid base64url input.');
+        }
+
+        $remainder = strlen($input) % 4;
+
+        if ($remainder) {
+            $input .= str_repeat('=', 4 - $remainder);
+        }
+
+        $decoded = base64_decode(strtr($input, '-_', '+/'), true);
+
+        if ($decoded === false) {
+            throw new \Exception('Invalid base64url decoding.');
+        }
+
+        return $decoded;
     }
 }

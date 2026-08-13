@@ -30,28 +30,35 @@ Route::middleware('auth')->group(function () {
 require __DIR__ . '/auth.php';
 Route::get('/install', [ShopifyAuthController::class, 'install']);
 Route::get('/auth/callback', [ShopifyAuthController::class, 'callback']);
-Route::get('/shopify/products', [ShopifyProductController::class, 'products']);
 
 Route::get('/zoho/connect', [ZohoAuthController::class, 'connect']);
 Route::get('/zoho/callback', [ZohoAuthController::class, 'callback']);
 
-Route::get('/zoho/sync/history', [ZohoSyncController::class, 'history'])
-    ->name('zoho.sync.history');
-
-Route::get('/zoho/sync', [ZohoSyncController::class, 'index',])
+Route::get('/zoho/sync', [ZohoSyncController::class, 'index'])
     ->name('zoho.sync');
 
-Route::post('/zoho/sync', [ZohoSyncController::class, 'syncVariant',])
-    ->name('zoho.sync.variant');
-
-Route::post('/zoho/sync-all', [ZohoSyncController::class, 'syncAll',])
-    ->name('zoho.sync.all');
+Route::get('/zoho/sync/history', [ZohoSyncController::class, 'history'])
+    ->name('zoho.sync.history');
 
 Route::get('/zoho/settings', [ZohoSyncController::class, 'settings'])
     ->name('zoho.settings');
 
-Route::post('/zoho/settings/disconnect', [ZohoSyncController::class, 'disconnect'])
-    ->name('zoho.settings.disconnect');
+Route::middleware(['shopify.auth'])->group(function () {
+    Route::get('/api/zoho/sync', [ZohoSyncController::class, 'data']);
+    Route::get('/api/zoho/sync/history', [ZohoSyncController::class, 'historyData']);
+    Route::get('/api/zoho/settings', [ZohoSyncController::class, 'settingsData']);
+
+    Route::get('/shopify/products', [ShopifyProductController::class, 'products']);
+
+    Route::post('/zoho/sync', [ZohoSyncController::class, 'syncVariant'])
+        ->name('zoho.sync.variant');
+
+    Route::post('/zoho/sync-all', [ZohoSyncController::class, 'syncAll'])
+        ->name('zoho.sync.all');
+
+    Route::post('/zoho/settings/disconnect', [ZohoSyncController::class, 'disconnect'])
+        ->name('zoho.settings.disconnect');
+});
 
 Route::post('/webhooks/products', [ShopifyWebhookController::class, 'productsUpdate'])
     ->name('shopify.webhooks.products');
