@@ -8,17 +8,23 @@ use App\Models\ZohoConnection;
 use App\Models\SyncHistory;
 use Illuminate\Support\Facades\Http;
 
-class ZohoService {
+class ZohoService
+{
+    private const SHOPIFY_VARIANT_FIELD_API_NAME =
+    'cf_shopify_variant_id';
+
     // Current Shopify shop
     protected Shop $shop;
 
     // Store the Shopify shop when creating the service
-    public function __construct(Shop $shop) {
+    public function __construct(Shop $shop)
+    {
         $this->shop = $shop;
     }
 
     // Get the Zoho connection for the current Shopify shop
-    public function getConnection(): ZohoConnection {
+    public function getConnection(): ZohoConnection
+    {
         $connection = $this->shop->zohoConnection;
 
         if (!$connection) {
@@ -29,7 +35,8 @@ class ZohoService {
     }
 
     // Return a valid Zoho access token
-    public function getAccessToken(): string {
+    public function getAccessToken(): string
+    {
         $connection = $this->getConnection();
 
         if ($connection->expires_at->isFuture()) {
@@ -40,7 +47,8 @@ class ZohoService {
     }
 
     // Generate a new access token using the stored refresh token
-    public function refreshAccessToken(): string {
+    public function refreshAccessToken(): string
+    {
         $connection = $this->getConnection();
 
         $response = Http::asForm()->post(
@@ -122,12 +130,161 @@ class ZohoService {
     }
 
     // Get all items from Zoho Books
-    public function getItems(): array {
-        return $this->makeRequest(
+    public function getItems(): array
+    {
+        $allItems = [];
+
+        $page = 1;
+        $perPage = 200;
+
+        do {
+            $response = $this->makeRequest(
+                'GET',
+                '/books/v3/items',
+                [
+                    'page' => $page,
+                    'per_page' => $perPage,
+                ]
+            );
+
+            $items = $response['items'] ?? [];
+
+            foreach ($items as $item) {
+                $allItems[] = $item;
+            }
+
+            $pageContext =
+                $response['page_context']
+                ?? [];
+
+            $hasMorePage =
+                (bool) (
+                    $pageContext['has_more_page']
+                    ?? false
+                );
+
+            $page++;
+        } while ($hasMorePage);
+
+        return $allItems;
+    }
+
+
+
+    public function getShopifyVariantMappings(): array
+    {
+        $fieldId = $this->getShopifyVariantFieldId();
+
+        $items = $this->getItems();
+
+        $mappings = [];
+
+        foreach ($items as $item) {
+            $customFields = $item['custom_fields'] ?? [];
+
+            foreach ($customFields as $customField) {
+                if (
+                    (string) (
+                        $customField['customfield_id'] ?? '') !== (string) $fieldId
+                ) {
+                    continue;
+                }
+
+                $shopifyVariantId =
+                    $customField['value']
+                    ?? null;
+
+                $zohoItemId =
+                    $item['item_id']
+                    ?? null;
+
+                if (
+                    !$shopifyVariantId ||
+                    !$zohoItemId
+                ) {
+                    continue;
+                }
+
+                $mappings[(string) $shopifyVariantId] = [
+                    'zoho_item_id' =>
+                    (string) $zohoItemId,
+
+                    'zoho_item' =>
+                    $item,
+                ];
+
+                break;
+            }
+        }
+
+        return $mappings;
+    }
+
+
+    private function getShopifyVariantFieldId(): string
+    {
+        $response = $this->makeRequest(
             'GET',
-            '/books/v3/items'
+            '/books/v3/settings/fields',
+            [
+                'entity' => 'item',
+                'filter_custom_fields' => 'true',
+                'skip_inactive_fields' => 'true',
+            ]
+        );
+
+        $fields = $response['fields'] ?? [];
+
+        foreach ($fields as $field) {
+            if (
+                ($field['api_name'] ?? null) ===
+                self::SHOPIFY_VARIANT_FIELD_API_NAME
+            ) {
+                return (string) $field['field_id'];
+            }
+        }
+
+        throw new \Exception(
+            'Zoho custom field "' .
+                self::SHOPIFY_VARIANT_FIELD_API_NAME .
+                '" was not found.'
         );
     }
+
+
+    public function findItemByShopifyVariantId(
+        string $shopifyVariantId
+    ): ?array {
+        $fieldId = $this->getShopifyVariantFieldId();
+
+        $items = $this->getItems();
+
+        foreach ($items as $item) {
+            $customFields =
+                $item['custom_fields'] ?? [];
+
+            foreach ($customFields as $customField) {
+                if ((string) (
+                        $customField['customfield_id']?? '') !== (string) $fieldId
+                ) {
+                    continue;
+                }
+
+                $value = $customField['value'] ?? null;
+
+                if (
+                    $value !== null &&
+                    (string) $value ===
+                    $shopifyVariantId
+                ) {
+                    return $item;
+                }
+            }
+        }
+
+        return null;
+    }
+
 
     // Create a Zoho Books item from a Shopify product variant
     public function createItem(ProductVariant $variant): array {
@@ -145,23 +302,37 @@ class ZohoService {
         $product = $variant->product;
 
         // Build the Zoho item data
-        $data = [
-            'name' => $product->title . ' - ' . $variant->title,
-            'rate' => (float) $variant->price,
-            'product_type' => 'goods',
-        ];
+        $shopifyVariantFieldId = $this->getShopifyVariantFieldId();
 
+        $data = [
+            'name' =>
+            $product->title .
+                ' - ' .
+                $variant->title,
+
+            'rate' =>
+            (float) $variant->price,
+
+            'product_type' =>
+            'goods',
+
+            'custom_fields' => [
+                [
+                    'customfield_id' =>
+                    $shopifyVariantFieldId,
+
+                    'value' =>
+                    $variant->shopify_variant_id,
+                ],
+            ],
+        ];
         // Add SKU only when Shopify has one
         if (!empty($variant->sku)) {
             $data['sku'] = $variant->sku;
         }
 
         // Create the item in Zoho Books
-        $result = $this->makeRequest(
-            'POST',
-            '/books/v3/items',
-            $data
-        );
+        $result = $this->makeRequest('POST', '/books/v3/items', $data);
 
         // Get the Zoho item ID from the API response
         $zohoItemId = $result['item']['item_id'] ?? null;
@@ -187,7 +358,7 @@ class ZohoService {
     }
 
     // Update an existing Zoho Books item using Shopify variant data
-    public function updateItem(ProductVariant $variant): array {
+    public function updateItem(ProductVariant $variant): array  {
         // Make sure the variant is already linked to a Zoho item
         if (!$variant->zoho_item_id) {
             throw new \Exception(
@@ -226,116 +397,243 @@ class ZohoService {
             'zoho_response' => $result,
         ];
     }
-    
 
-    public function syncItem(ProductVariant $variant): array {
-    $currentHash = $this->getSyncHash($variant);
 
-    /*
+    public function syncItem(ProductVariant $variant): array
+    {
+        /*
     |--------------------------------------------------------------------------
-    | Skip unchanged variant
+    | 1. Check Zoho's real current state
     |--------------------------------------------------------------------------
     */
 
-    if (
-        $variant->zoho_item_id &&
-        $variant->zoho_sync_hash === $currentHash
-    ) {
-        SyncHistory::create([
-            'shop_id' => $this->shop->id,
-            'product_variant_id' => $variant->id,
-            'action' => 'skip',
-            'status' => 'skipped',
-            'zoho_item_id' => $variant->zoho_item_id,
-            'message' => 'Variant is already synchronized. No changes detected.',
-            'synced_at' => now(),
-        ]);
+        $zohoItem = $this->findItemByShopifyVariantId(
+            $variant->shopify_variant_id
+        );
 
-        return [
-            'message' => 'Zoho item is already up to date.',
-            'zoho_item_id' => $variant->zoho_item_id,
-            'created' => false,
-            'updated' => false,
-            'skipped' => true,
-        ];
-    }
-
-    try {
         /*
-        |--------------------------------------------------------------------------
-        | Create new Zoho item
-        |--------------------------------------------------------------------------
+    |--------------------------------------------------------------------------
+    | 2. Reconcile local mapping with Zoho
+    |--------------------------------------------------------------------------
+    */
+
+        if (!$zohoItem) {
+            /*
+        | Zoho item does not exist anymore.
+        |
+        | Clear stale local mapping so the next operation
+        | treats this variant as a new Zoho item.
         */
 
-        if (!$variant->zoho_item_id) {
-            $result = $this->createItem($variant);
-
             $variant->update([
-                'zoho_sync_hash' => $currentHash,
-                'zoho_synced_at' => now(),
+                'zoho_item_id' => null,
+                'zoho_sync_hash' => null,
+                'zoho_synced_at' => null,
             ]);
+        } else {
+            /*
+        | Zoho item exists.
+        |
+        | Make local mapping match the real Zoho item ID.
+        */
 
-            SyncHistory::create([
-                'shop_id' => $this->shop->id,
-                'product_variant_id' => $variant->id,
-                'action' => 'create',
-                'status' => 'success',
-                'zoho_item_id' => $variant->zoho_item_id,
-                'message' => $result['message'] ?? 'Zoho item created successfully.',
-                'synced_at' => now(),
-            ]);
+            $realZohoItemId =
+                $zohoItem['item_id'] ?? null;
 
-            return $result;
+            if ($realZohoItemId) {
+                $variant->update([
+                    'zoho_item_id' =>
+                    $realZohoItemId,
+                ]);
+            }
         }
 
         /*
-        |--------------------------------------------------------------------------
-        | Update existing Zoho item
-        |--------------------------------------------------------------------------
-        */
+    |--------------------------------------------------------------------------
+    | 3. Calculate current Shopify data hash
+    |--------------------------------------------------------------------------
+    */
 
-        $result = $this->updateItem($variant);
+        $currentHash =
+            $this->getSyncHash($variant);
 
-        $variant->update([
-            'zoho_sync_hash' => $currentHash,
-            'zoho_synced_at' => now(),
-        ]);
-
-        SyncHistory::create([
-            'shop_id' => $this->shop->id,
-            'product_variant_id' => $variant->id,
-            'action' => 'update',
-            'status' => 'success',
-            'zoho_item_id' => $variant->zoho_item_id,
-            'message' => $result['message'] ?? 'Zoho item updated successfully.',
-            'synced_at' => now(),
-        ]);
-
-        return $result;
-
-    } catch (\Throwable $e) {
         /*
+    |--------------------------------------------------------------------------
+    | 4. Skip only when the REAL Zoho item exists
+    |    and Shopify data hasn't changed.
+    |--------------------------------------------------------------------------
+    */
+
+        if (
+            $zohoItem &&
+            $variant->zoho_item_id &&
+            $variant->zoho_sync_hash === $currentHash
+        ) {
+            SyncHistory::create([
+                'shop_id' =>
+                $this->shop->id,
+
+                'product_variant_id' =>
+                $variant->id,
+
+                'action' =>
+                'skip',
+
+                'status' =>
+                'skipped',
+
+                'zoho_item_id' =>
+                $variant->zoho_item_id,
+
+                'message' =>
+                'Variant is already synchronized. No changes detected.',
+
+                'synced_at' =>
+                now(),
+            ]);
+
+            return [
+                'message' =>
+                'Zoho item is already up to date.',
+
+                'zoho_item_id' =>
+                $variant->zoho_item_id,
+
+                'created' =>
+                false,
+
+                'updated' =>
+                false,
+
+                'skipped' =>
+                true,
+            ];
+        }
+
+        try {
+            /*
         |--------------------------------------------------------------------------
-        | Record failed synchronization
+        | 5. Create if Zoho item does not exist
         |--------------------------------------------------------------------------
         */
 
-        SyncHistory::create([
-            'shop_id' => $this->shop->id,
-            'product_variant_id' => $variant->id,
-            'action' => $variant->zoho_item_id ? 'update' : 'create',
-            'status' => 'failed',
-            'zoho_item_id' => $variant->zoho_item_id,
-            'message' => $e->getMessage(),
-            'synced_at' => now(),
-        ]);
+            if (!$variant->zoho_item_id) {
+                $result =
+                    $this->createItem($variant);
 
-        throw $e;
+                $variant->update([
+                    'zoho_sync_hash' =>
+                    $currentHash,
+
+                    'zoho_synced_at' =>
+                    now(),
+                ]);
+
+                SyncHistory::create([
+                    'shop_id' =>
+                    $this->shop->id,
+
+                    'product_variant_id' =>
+                    $variant->id,
+
+                    'action' =>
+                    'create',
+
+                    'status' =>
+                    'success',
+
+                    'zoho_item_id' =>
+                    $variant->zoho_item_id,
+
+                    'message' =>
+                    $result['message']
+                        ??
+                        'Zoho item created successfully.',
+
+                    'synced_at' =>
+                    now(),
+                ]);
+
+                return $result;
+            }
+
+            /*
+        |--------------------------------------------------------------------------
+        | 6. Update existing Zoho item
+        |--------------------------------------------------------------------------
+        */
+
+            $result =
+                $this->updateItem($variant);
+
+            $variant->update([
+                'zoho_sync_hash' =>
+                $currentHash,
+
+                'zoho_synced_at' =>
+                now(),
+            ]);
+
+            SyncHistory::create([
+                'shop_id' =>
+                $this->shop->id,
+
+                'product_variant_id' =>
+                $variant->id,
+
+                'action' =>
+                'update',
+
+                'status' =>
+                'success',
+
+                'zoho_item_id' =>
+                $variant->zoho_item_id,
+
+                'message' =>
+                $result['message']
+                    ??
+                    'Zoho item updated successfully.',
+
+                'synced_at' =>
+                now(),
+            ]);
+
+            return $result;
+        } catch (\Throwable $e) {
+
+            SyncHistory::create([
+                'shop_id' =>
+                $this->shop->id,
+
+                'product_variant_id' =>
+                $variant->id,
+
+                'action' =>
+                $variant->zoho_item_id
+                    ? 'update'
+                    : 'create',
+
+                'status' =>
+                'failed',
+
+                'zoho_item_id' =>
+                $variant->zoho_item_id,
+
+                'message' =>
+                $e->getMessage(),
+
+                'synced_at' =>
+                now(),
+            ]);
+
+            throw $e;
+        }
     }
-}
 
     // Synchronize all Shopify product variants with Zoho Books
-    public function syncAllVariants(): array {
+    public function syncAllVariants(): array
+    {
         // Get all Shopify product variants with their parent products
         $variants = ProductVariant::with('product')->get();
 
@@ -382,7 +680,8 @@ class ZohoService {
     }
 
 
-    private function getSyncHash(ProductVariant $variant): string { 
+    private function getSyncHash(ProductVariant $variant): string
+    {
         return hash('sha256', json_encode([
             'title' => $variant->title,
             'sku' => $variant->sku,
