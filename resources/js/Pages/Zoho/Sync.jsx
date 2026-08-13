@@ -546,7 +546,7 @@ export default function Sync({
                                     className="reference-sync-selected-btn"
                                     disabled={
                                         selectedIds.length === 0 ||
-                                        !zohoConnected ||
+                                        !connectedState ||
                                         direction !== "shopify-to-zoho" ||
                                         syncingAll ||
                                         Boolean(syncingId)
@@ -752,7 +752,7 @@ export default function Sync({
                                                                 type="button"
                                                                 className="reference-sync-btn"
                                                                 disabled={
-                                                                    !zohoConnected ||
+                                                                    !connectedState ||
                                                                     syncingAll ||
                                                                     Boolean(
                                                                         syncingId,
