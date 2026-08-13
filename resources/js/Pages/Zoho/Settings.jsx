@@ -183,7 +183,7 @@ export default function Settings({ shop, zohoConnection, host }) {
                                             </div>
 
                                             <div className="setting-value">
-                                                {zohoConnection.organization_id ||
+                                                {zohoConn.organization_id ||
                                                     "—"}
                                             </div>
                                         </div>
@@ -201,7 +201,7 @@ export default function Settings({ shop, zohoConnection, host }) {
                                             </div>
 
                                             <div className="setting-value">
-                                                {zohoConnection.expires_at ||
+                                                {zohoConn.expires_at ||
                                                     "—"}
                                             </div>
                                         </div>
@@ -285,25 +285,55 @@ export default function Settings({ shop, zohoConnection, host }) {
                                             className="primary-btn"
                                             onClick={async () => {
                                                 try {
-                                                    const token = await window.shopify?.idToken();
-                                                    const response = await fetch('/api/zoho/connect', {
-                                                        method: 'POST',
-                                                        headers: {
-                                                            'Content-Type': 'application/json',
-                                                            'Accept': 'application/json',
-                                                            'Authorization': token ? `Bearer ${token}` : '',
-                                                        },
-                                                        body: JSON.stringify({ host: host || '' }),
-                                                    });
-                                                    const data = await response.json();
-                                                    if (response.ok && data.redirect_url) {
-                                                        window.open(data.redirect_url, '_top');
+                                                    const token =
+                                                        await window.shopify?.idToken();
+                                                    const response =
+                                                        await fetch(
+                                                            "/api/zoho/connect",
+                                                            {
+                                                                method: "POST",
+                                                                headers: {
+                                                                    "Content-Type":
+                                                                        "application/json",
+                                                                    Accept: "application/json",
+                                                                    Authorization:
+                                                                        token
+                                                                            ? `Bearer ${token}`
+                                                                            : "",
+                                                                },
+                                                                body: JSON.stringify(
+                                                                    {
+                                                                        host:
+                                                                            host ||
+                                                                            "",
+                                                                    },
+                                                                ),
+                                                            },
+                                                        );
+                                                    const data =
+                                                        await response.json();
+                                                    if (
+                                                        response.ok &&
+                                                        data.redirect_url
+                                                    ) {
+                                                        window.open(
+                                                            data.redirect_url,
+                                                            "_top",
+                                                        );
                                                     } else {
-                                                        alert(data.error || 'Failed to initiate Zoho connection.');
+                                                        alert(
+                                                            data.error ||
+                                                                "Failed to initiate Zoho connection.",
+                                                        );
                                                     }
                                                 } catch (err) {
-                                                    console.error('Zoho connect error:', err);
-                                                    alert('Failed to initiate Zoho connection.');
+                                                    console.error(
+                                                        "Zoho connect error:",
+                                                        err,
+                                                    );
+                                                    alert(
+                                                        "Failed to initiate Zoho connection.",
+                                                    );
                                                 }
                                             }}
                                         >

@@ -11,7 +11,6 @@ use App\Http\Controllers\ShopifyWebhookController;
 
 
 
-
 Route::get('/', function (Illuminate\Http\Request $request) {
     return redirect()->route('zoho.sync', $request->query());
 });

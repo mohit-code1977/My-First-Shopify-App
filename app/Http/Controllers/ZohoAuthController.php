@@ -5,11 +5,11 @@ namespace App\Http\Controllers;
 use App\Models\Shop;
 use App\Models\ZohoConnection;
 use App\Models\ZohoOauthState;
+use App\Services\ZohoDatacenter;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
 
-class ZohoAuthController extends Controller
-{
+class ZohoAuthController extends Controller {
     /**
      * Protected endpoint to initiate Zoho Books OAuth flow from authenticated Shopify app context.
      */
@@ -144,12 +144,36 @@ class ZohoAuthController extends Controller
 
         /*
         |--------------------------------------------------------------------------
+        | Resolve and Validate Accounts URL for Token Exchange
+        |--------------------------------------------------------------------------
+        */
+
+        $accountsServerParam = $request->query('accounts-server');
+        $validatedAccountsServer = null;
+
+        if ($accountsServerParam !== null && trim($accountsServerParam) !== '') {
+            $validatedAccountsServer = ZohoDatacenter::validateAccountsUrl($accountsServerParam);
+            if (!$validatedAccountsServer) {
+                return response()->json([
+                    'error' => 'Invalid or untrusted Zoho accounts-server parameter.',
+                ], 400);
+            }
+            $tokenExchangeAccountsUrl = $validatedAccountsServer;
+        } else {
+            $tokenExchangeAccountsUrl = ZohoDatacenter::resolveAccountsUrl(
+                null,
+                $request->query('location')
+            );
+        }
+
+        /*
+        |--------------------------------------------------------------------------
         | Exchange Authorization Code for Zoho Tokens
         |--------------------------------------------------------------------------
         */
 
         $response = Http::asForm()->post(
-            env('ZOHO_ACCOUNTS_URL') . '/oauth/v2/token',
+            $tokenExchangeAccountsUrl . '/oauth/v2/token',
             [
                 'code' => $code,
                 'client_id' => env('ZOHO_CLIENT_ID'),
@@ -185,7 +209,32 @@ class ZohoAuthController extends Controller
 
         /*
         |--------------------------------------------------------------------------
-        | Get Zoho Books Organizations
+        | Validate and Resolve Persistent API Domain & Accounts URL for Shop
+        |--------------------------------------------------------------------------
+        */
+
+        $rawApiDomain = $tokenData['api_domain'] ?? null;
+
+        if ($rawApiDomain !== null && trim($rawApiDomain) !== '') {
+            $apiUrl = ZohoDatacenter::validateApiUrl($rawApiDomain);
+            if (!$apiUrl) {
+                return response()->json([
+                    'error' => 'Invalid or untrusted Zoho API domain in token response.',
+                ], 400);
+            }
+        } else {
+            $apiUrl = ZohoDatacenter::validateApiUrl(env('ZOHO_API_URL')) ?? 'https://www.zohoapis.com';
+        }
+
+        if (!empty($validatedAccountsServer)) {
+            $accountsUrl = $validatedAccountsServer;
+        } else {
+            $accountsUrl = ZohoDatacenter::getAccountsUrlForApiUrl($apiUrl);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Get Zoho Books Organizations using Connection-Specific API URL
         |--------------------------------------------------------------------------
         */
 
@@ -193,7 +242,7 @@ class ZohoAuthController extends Controller
             'Authorization' => 'Zoho-oauthtoken ' . $accessToken,
             'Accept' => 'application/json',
         ])->get(
-            env('ZOHO_API_URL') . '/books/v3/organizations'
+            $apiUrl . '/books/v3/organizations'
         );
 
         if (!$organizationResponse->successful()) {
@@ -240,6 +289,8 @@ class ZohoAuthController extends Controller
                 'organization_id' => $organizationId,
                 'access_token' => $accessToken,
                 'refresh_token' => $refreshToken,
+                'accounts_url' => $accountsUrl,
+                'api_url' => $apiUrl,
                 'expires_at' => now()->addSeconds(
                     $tokenData['expires_in'] ?? 3600
                 ),

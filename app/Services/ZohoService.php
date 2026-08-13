@@ -51,8 +51,14 @@ class ZohoService
     {
         $connection = $this->getConnection();
 
+        $accountsUrl = ZohoDatacenter::validateAccountsUrl($connection->accounts_url);
+
+        if (!$accountsUrl) {
+            throw new \RuntimeException('Zoho connection is missing or has an invalid accounts_url endpoint configuration.');
+        }
+
         $response = Http::asForm()->post(
-            env('ZOHO_ACCOUNTS_URL') . '/oauth/v2/token',
+            $accountsUrl . '/oauth/v2/token',
             [
                 'refresh_token' => $connection->refresh_token,
                 'client_id' => env('ZOHO_CLIENT_ID'),
@@ -91,9 +97,15 @@ class ZohoService
     ): array {
         $connection = $this->getConnection();
 
+        $apiUrl = ZohoDatacenter::validateApiUrl($connection->api_url);
+
+        if (!$apiUrl) {
+            throw new \RuntimeException('Zoho connection is missing or has an invalid api_url endpoint configuration.');
+        }
+
         $token = $this->getAccessToken();
 
-        $url = rtrim(env('ZOHO_API_URL'), '/') . $endpoint;
+        $url = rtrim($connection->api_url, '/') . $endpoint;
 
         // Send organization ID as a query parameter
         $query = [

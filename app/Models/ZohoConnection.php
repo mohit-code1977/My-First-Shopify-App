@@ -10,6 +10,8 @@ class ZohoConnection extends Model{
         'organization_id',
         'access_token',
         'refresh_token',
+        'accounts_url',
+        'api_url',
         'expires_at',
     ];
 
