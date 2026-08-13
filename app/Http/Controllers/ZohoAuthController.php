@@ -4,52 +4,53 @@ namespace App\Http\Controllers;
 
 use App\Models\Shop;
 use App\Models\ZohoConnection;
+use App\Models\ZohoOauthState;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Str;
 
 class ZohoAuthController extends Controller
 {
     /**
-     * Start Zoho Books OAuth flow.
+     * Protected endpoint to initiate Zoho Books OAuth flow from authenticated Shopify app context.
      */
-    public function connect(Request $request)
+    public function initiate(Request $request)
     {
-        $shop = $request->query('shop');
-        $host = $request->query('host');
+        $shop = $request->attributes->get('shop');
 
-        if (!$shop || !$host) {
-            return response()->json([
-                'error' => 'Missing Shopify shop context.',
-            ], 400);
-        }
-
-        // Make sure this Shopify store actually exists.
-        $shopModel = Shop::where('shop_domain', $shop)->first();
-
-        if (!$shopModel) {
+        if (!$shop) {
             return response()->json([
                 'error' => 'No Shopify shop installed.',
-            ], 404);
+            ], 401);
+        }
+
+        $host = $request->input('host') ?: $request->query('host');
+
+        if (!$host || !$this->isValidShopifyHost($host)) {
+            return response()->json([
+                'error' => 'Invalid or missing Shopify host parameter.',
+            ], 400);
         }
 
         /*
         |--------------------------------------------------------------------------
-        | Generate OAuth state
+        | Generate Cryptographically Secure OAuth State & Store SHA-256 Hash
         |--------------------------------------------------------------------------
         */
 
-        $state = Str::random(40);
+        $rawState = bin2hex(random_bytes(32));
+        $stateHash = hash('sha256', $rawState);
 
-        session([
-            'zoho_oauth_state' => $state,
-            'zoho_oauth_shop' => $shop,
-            'zoho_oauth_host' => $host,
+        ZohoOauthState::create([
+            'state' => $stateHash,
+            'shop_id' => $shop->id,
+            'host' => $host,
+            'expires_at' => now()->addMinutes(15),
+            'consumed_at' => null,
         ]);
 
         /*
         |--------------------------------------------------------------------------
-        | Build Zoho OAuth URL
+        | Build Zoho OAuth Authorization URL with Raw State
         |--------------------------------------------------------------------------
         */
 
@@ -58,73 +59,92 @@ class ZohoAuthController extends Controller
             'response_type' => 'code',
             'access_type' => 'offline',
             'prompt' => 'consent',
-
             'scope' => implode(',', [
                 'ZohoBooks.settings.READ',
                 'ZohoBooks.settings.CREATE',
                 'ZohoBooks.settings.UPDATE',
             ]),
-
             'redirect_uri' => env('ZOHO_REDIRECT_URI'),
-            'state' => $state,
+            'state' => $rawState,
         ]);
 
-        $url = env('ZOHO_ACCOUNTS_URL')
-            . '/oauth/v2/auth?'
-            . $params;
+        $url = env('ZOHO_ACCOUNTS_URL') . '/oauth/v2/auth?' . $params;
 
-        return redirect()->away($url);
+        return response()->json([
+            'success' => true,
+            'redirect_url' => $url,
+        ]);
     }
 
     /**
-     * Handle Zoho OAuth callback.
+     * Handle public Zoho OAuth callback.
      */
     public function callback(Request $request)
     {
         $code = $request->query('code');
-        $state = $request->query('state');
+        $rawState = $request->query('state');
 
-        /*
-        |--------------------------------------------------------------------------
-        | Validate OAuth response
-        |--------------------------------------------------------------------------
-        */
-
-        if (!$code || !$state) {
+        if (!$code || !$rawState) {
             return response()->json([
                 'error' => 'Authorization code or state missing.',
             ], 400);
         }
 
-        $savedState = session('zoho_oauth_state');
+        /*
+        |--------------------------------------------------------------------------
+        | Validate & Consume Server-Side OAuth Hashed State Record
+        |--------------------------------------------------------------------------
+        */
 
-        if (
-            !$savedState ||
-            !hash_equals($savedState, $state)
-        ) {
+        $stateHash = hash('sha256', $rawState);
+        $stateRecord = ZohoOauthState::where('state', $stateHash)->first();
+
+        if (!$stateRecord) {
             return response()->json([
                 'error' => 'Invalid Zoho OAuth state.',
             ], 403);
         }
 
+        if ($stateRecord->consumed_at !== null) {
+            return response()->json([
+                'error' => 'Zoho OAuth state has already been used.',
+            ], 403);
+        }
+
+        if (now()->gte($stateRecord->expires_at)) {
+            return response()->json([
+                'error' => 'Zoho OAuth state has expired.',
+            ], 403);
+        }
+
+        // Consume state immediately
+        $stateRecord->update(['consumed_at' => now()]);
+
         /*
         |--------------------------------------------------------------------------
-        | Recover Shopify context
+        | Recover Exact Shopify Shop from State Record
         |--------------------------------------------------------------------------
         */
 
-        $shop = session('zoho_oauth_shop');
-        $host = session('zoho_oauth_host');
+        $shopModel = Shop::find($stateRecord->shop_id);
 
-        if (!$shop || !$host) {
+        if (!$shopModel) {
             return response()->json([
-                'error' => 'Shopify context missing.',
+                'error' => 'Associated Shopify shop not found.',
+            ], 404);
+        }
+
+        $host = $stateRecord->host;
+
+        if (!$this->isValidShopifyHost($host)) {
+            return response()->json([
+                'error' => 'Invalid Shopify host destination.',
             ], 400);
         }
 
         /*
         |--------------------------------------------------------------------------
-        | Exchange authorization code for Zoho tokens
+        | Exchange Authorization Code for Zoho Tokens
         |--------------------------------------------------------------------------
         */
 
@@ -165,7 +185,7 @@ class ZohoAuthController extends Controller
 
         /*
         |--------------------------------------------------------------------------
-        | Get Zoho Books organizations
+        | Get Zoho Books Organizations
         |--------------------------------------------------------------------------
         */
 
@@ -183,10 +203,7 @@ class ZohoAuthController extends Controller
             ], 500);
         }
 
-        $organizations = $organizationResponse->json(
-            'organizations',
-            []
-        );
+        $organizations = $organizationResponse->json('organizations', []);
 
         if (empty($organizations)) {
             return response()->json([
@@ -196,19 +213,12 @@ class ZohoAuthController extends Controller
 
         /*
         |--------------------------------------------------------------------------
-        | Select default organization
+        | Select Default Organization
         |--------------------------------------------------------------------------
         */
 
-        $organization =
-            collect($organizations)->firstWhere(
-                'is_default_org',
-                true
-            )
-            ?? $organizations[0];
-
-        $organizationId =
-            $organization['organization_id'] ?? null;
+        $organization = collect($organizations)->firstWhere('is_default_org', true) ?? $organizations[0];
+        $organizationId = $organization['organization_id'] ?? null;
 
         if (!$organizationId) {
             return response()->json([
@@ -218,24 +228,7 @@ class ZohoAuthController extends Controller
 
         /*
         |--------------------------------------------------------------------------
-        | Get Shopify shop
-        |--------------------------------------------------------------------------
-        */
-
-        $shopModel = Shop::where(
-            'shop_domain',
-            $shop
-        )->first();
-
-        if (!$shopModel) {
-            return response()->json([
-                'error' => 'No Shopify shop installed.',
-            ], 404);
-        }
-
-        /*
-        |--------------------------------------------------------------------------
-        | Save / update Zoho connection
+        | Save / Update Zoho Connection for the Recovered Shop
         |--------------------------------------------------------------------------
         */
 
@@ -255,49 +248,40 @@ class ZohoAuthController extends Controller
 
         /*
         |--------------------------------------------------------------------------
-        | Clear OAuth session
+        | Return to Shopify Embedded App Root
         |--------------------------------------------------------------------------
         */
 
-        session()->forget([
-            'zoho_oauth_state',
-            'zoho_oauth_shop',
-            'zoho_oauth_host',
-        ]);
-
-        /*
-        |--------------------------------------------------------------------------
-        | Return to Shopify embedded app ROOT
-        |--------------------------------------------------------------------------
-        |
-        | IMPORTANT:
-        |
-        | Do NOT redirect to:
-        |
-        | /apps/zoho/settings
-        |
-        | Shopify Admin's embedded-app root should be opened first.
-        | The app's own <s-app-nav> handles /zoho/settings internally.
-        |
-        */
-
-        $decodedHost = base64_decode(
-            strtr($host, '-_', '+/')
-        );
-
-        if (!$decodedHost) {
-            return response()->json([
-                'error' => 'Invalid Shopify host.',
-            ], 400);
-        }
+        $decodedHost = base64_decode(strtr($host, '-_', '+/'));
 
         $adminUrl = 'https://' . $decodedHost . '/apps/zoho-books-integration-20';
 
         $query = http_build_query([
-            'shop' => $shop,
+            'shop' => $shopModel->shop_domain,
             'host' => $host,
         ]);
 
         return redirect()->away($adminUrl . '?' . $query);
+    }
+
+    /**
+     * Validate base64-encoded Shopify host string.
+     */
+    private function isValidShopifyHost(string $host): bool
+    {
+        if (trim($host) === '') {
+            return false;
+        }
+
+        $decoded = base64_decode(strtr($host, '-_', '+/'), true);
+
+        if ($decoded === false || trim($decoded) === '') {
+            return false;
+        }
+
+        return (bool) preg_match(
+            '/^(admin\.shopify\.com\/store\/[a-zA-Z0-9\-]+|[a-zA-Z0-9][a-zA-Z0-9\-]*\.myshopify\.com(\/admin)?)$/',
+            $decoded
+        );
     }
 }

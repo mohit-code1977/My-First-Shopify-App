@@ -283,18 +283,28 @@ export default function Settings({ shop, zohoConnection, host }) {
                                         <button
                                             type="button"
                                             className="primary-btn"
-                                            onClick={() => {
-                                                const params =
-                                                    new URLSearchParams({
-                                                        shop:
-                                                            shop?.shop_domain ||
-                                                            "",
-                                                        host: host || "",
+                                            onClick={async () => {
+                                                try {
+                                                    const token = await window.shopify?.idToken();
+                                                    const response = await fetch('/api/zoho/connect', {
+                                                        method: 'POST',
+                                                        headers: {
+                                                            'Content-Type': 'application/json',
+                                                            'Accept': 'application/json',
+                                                            'Authorization': token ? `Bearer ${token}` : '',
+                                                        },
+                                                        body: JSON.stringify({ host: host || '' }),
                                                     });
-
-                                                const connectUrl = `${window.location.origin}/zoho/connect?${params.toString()}`;
-
-                                                window.open(connectUrl, "_top");
+                                                    const data = await response.json();
+                                                    if (response.ok && data.redirect_url) {
+                                                        window.open(data.redirect_url, '_top');
+                                                    } else {
+                                                        alert(data.error || 'Failed to initiate Zoho connection.');
+                                                    }
+                                                } catch (err) {
+                                                    console.error('Zoho connect error:', err);
+                                                    alert('Failed to initiate Zoho connection.');
+                                                }
                                             }}
                                         >
                                             Connect Zoho Books

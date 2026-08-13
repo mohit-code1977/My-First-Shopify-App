@@ -31,7 +31,6 @@ require __DIR__ . '/auth.php';
 Route::get('/install', [ShopifyAuthController::class, 'install']);
 Route::get('/auth/callback', [ShopifyAuthController::class, 'callback']);
 
-Route::get('/zoho/connect', [ZohoAuthController::class, 'connect']);
 Route::get('/zoho/callback', [ZohoAuthController::class, 'callback']);
 
 Route::get('/zoho/sync', [ZohoSyncController::class, 'index'])
@@ -44,6 +43,7 @@ Route::get('/zoho/settings', [ZohoSyncController::class, 'settings'])
     ->name('zoho.settings');
 
 Route::middleware(['shopify.auth'])->group(function () {
+    Route::post('/api/zoho/connect', [ZohoAuthController::class, 'initiate']);
     Route::get('/api/zoho/sync', [ZohoSyncController::class, 'data']);
     Route::get('/api/zoho/sync/history', [ZohoSyncController::class, 'historyData']);
     Route::get('/api/zoho/settings', [ZohoSyncController::class, 'settingsData']);
