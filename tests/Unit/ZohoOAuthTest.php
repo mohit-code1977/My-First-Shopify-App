@@ -62,6 +62,11 @@ class ZohoOAuthTest extends TestCase
         $this->assertTrue($content['success']);
         // MUST hit global accounts.zoho.com authorization endpoint (ZOHO_OAUTH_INITIATION_URL)
         $this->assertStringStartsWith('https://accounts.zoho.com/oauth/v2/auth', $content['redirect_url']);
+
+        // MUST request both ZohoBooks and ZohoInventory scopes
+        $this->assertStringContainsString('ZohoBooks.settings.READ', $content['redirect_url']);
+        $this->assertStringContainsString('ZohoInventory.items.READ', $content['redirect_url']);
+        $this->assertStringContainsString('ZohoInventory.inventoryadjustments.READ', $content['redirect_url']);
     }
 
     public function test_india_user_callback_exchanges_token_at_accounts_zoho_in()
@@ -329,5 +334,56 @@ class ZohoOAuthTest extends TestCase
 
         // Verification: MUST still initiate at ZOHO_OAUTH_INITIATION_URL (accounts.zoho.com)
         $this->assertStringStartsWith('https://accounts.zoho.com/oauth/v2/auth', $content['redirect_url']);
+    }
+
+    public function test_granted_scopes_including_books_and_inventory_are_persisted()
+    {
+        $grantedScopeStr = 'ZohoBooks.settings.READ,ZohoBooks.settings.CREATE,ZohoBooks.settings.UPDATE,ZohoInventory.items.READ,ZohoInventory.items.CREATE,ZohoInventory.items.UPDATE,ZohoInventory.inventoryadjustments.READ,ZohoInventory.inventoryadjustments.CREATE,ZohoInventory.inventoryadjustments.UPDATE';
+
+        Http::fake([
+            'https://accounts.zoho.in/oauth/v2/token' => Http::response([
+                'access_token' => 'zoho_combined_access_123',
+                'refresh_token' => 'zoho_combined_refresh_123',
+                'expires_in' => 3600,
+                'api_domain' => 'https://www.zohoapis.in',
+                'scope' => $grantedScopeStr,
+            ], 200),
+            'https://www.zohoapis.in/books/v3/organizations' => Http::response([
+                'organizations' => [
+                    [
+                        'organization_id' => 'zoho_scope_org_999',
+                        'name' => 'Combined Scope Org',
+                        'is_default_org' => true,
+                    ],
+                ],
+            ], 200),
+        ]);
+
+        $rawState = 'scope_test_raw_oauth_state';
+        ZohoOauthState::create([
+            'state' => hash('sha256', $rawState),
+            'shop_id' => $this->shop1->id,
+            'host' => $this->validHostB64,
+            'expires_at' => now()->addMinutes(10),
+        ]);
+
+        $controller = new ZohoAuthController();
+        $request = Request::create('/zoho/callback', 'GET', [
+            'code' => 'auth_code_combined_scope',
+            'state' => $rawState,
+            'accounts-server' => 'https://accounts.zoho.in',
+            'location' => 'in',
+        ]);
+
+        $response = $controller->callback($request);
+
+        $this->assertEquals(302, $response->getStatusCode());
+
+        $connection = ZohoConnection::where('shop_id', $this->shop1->id)->first();
+        $this->assertNotNull($connection);
+        $this->assertEquals($grantedScopeStr, $connection->scope);
+        $this->assertStringContainsString('ZohoBooks.settings.READ', $connection->scope);
+        $this->assertStringContainsString('ZohoInventory.items.READ', $connection->scope);
+        $this->assertStringContainsString('ZohoInventory.inventoryadjustments.READ', $connection->scope);
     }
 }

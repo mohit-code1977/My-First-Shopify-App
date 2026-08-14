@@ -14,8 +14,7 @@ class ZohoAuthController extends Controller {
      * Protected endpoint to initiate Zoho Books OAuth flow from authenticated Shopify app context.
      * Always uses the global Multi-DC authorization entry point (accounts.zoho.com).
      */
-    public function initiate(Request $request)
-    {
+    public function initiate(Request $request) {
         $shop = $request->attributes->get('shop');
 
         if (!$shop) {
@@ -67,6 +66,12 @@ class ZohoAuthController extends Controller {
                 'ZohoBooks.settings.READ',
                 'ZohoBooks.settings.CREATE',
                 'ZohoBooks.settings.UPDATE',
+                'ZohoInventory.items.READ',
+                'ZohoInventory.items.CREATE',
+                'ZohoInventory.items.UPDATE',
+                'ZohoInventory.inventoryadjustments.READ',
+                'ZohoInventory.inventoryadjustments.CREATE',
+                'ZohoInventory.inventoryadjustments.UPDATE',
             ]),
             'redirect_uri' => $redirectUri,
             'state' => $rawState,
@@ -306,7 +311,7 @@ class ZohoAuthController extends Controller {
                 'api_url' => $apiUrl,
                 'api_domain' => $apiDomainHost,
                 'data_center' => strtolower($apiDomainHost ?? ''),
-                'scope' => $tokenData['scope'] ?? 'ZohoBooks.settings.READ,ZohoBooks.settings.CREATE,ZohoBooks.settings.UPDATE',
+                'scope' => $tokenData['scope'] ?? 'ZohoBooks.settings.READ,ZohoBooks.settings.CREATE,ZohoBooks.settings.UPDATE,ZohoInventory.items.READ,ZohoInventory.items.CREATE,ZohoInventory.items.UPDATE,ZohoInventory.inventoryadjustments.READ,ZohoInventory.inventoryadjustments.CREATE,ZohoInventory.inventoryadjustments.UPDATE',
                 'connected_at' => now(),
                 'disconnected_at' => null,
                 'expires_at' => now()->addSeconds(
