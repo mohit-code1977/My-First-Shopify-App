@@ -9,18 +9,20 @@ return new class extends Migration {
     /**
      * Run the migrations.
      */
-    public function up(): void {
-    Schema::table('zoho_connections', function (Blueprint $table) {
-        $table->text('scope')->nullable()->change();
-    });
-}
+    public function up(): void
+    {
+        Schema::table('zoho_connections', function (Blueprint $table) {
+            $table->text('scope')->nullable()->change();
+        });
+    }
 
     /**
      * Reverse the migrations.
      */
-    public function down(): void {
-    Schema::table('zoho_connections', function (Blueprint $table) {
-        $table->string('scope')->nullable()->change();
-    });
-}
+    public function down(): void
+    {
+        Schema::table('zoho_connections', function (Blueprint $table) {
+            $table->string('scope')->nullable()->change();
+        });
+    }
 };
