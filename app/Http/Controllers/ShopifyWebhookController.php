@@ -15,6 +15,12 @@ class ShopifyWebhookController extends Controller {
      * Handle Shopify products/update webhook.
      */
     public function productsUpdate(Request $request) {
+        Log::info('Shopify products/update webhook received', [
+    'shop' => $request->header('X-Shopify-Shop-Domain'),
+    'webhook_id' => $request->header('X-Shopify-Webhook-Id'),
+    'topic' => $request->header('X-Shopify-Topic'),
+    'payload' => $request->getContent(),
+]);
         /*
         |--------------------------------------------------------------------------
         | 1. Verify HMAC Signature
