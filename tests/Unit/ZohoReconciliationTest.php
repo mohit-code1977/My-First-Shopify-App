@@ -12,8 +12,7 @@ use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 
-class ZohoReconciliationTest extends TestCase
-{
+class ZohoReconciliationTest extends TestCase {
     use RefreshDatabase;
 
     private Shop $shop;
@@ -432,5 +431,124 @@ class ZohoReconciliationTest extends TestCase
         $variant->refresh();
         $this->assertEquals('valid_zoho_555', $variant->zoho_item_id);
         $this->assertTrue($result['updated']);
+    }
+
+    public function test_unmapped_variant_links_to_existing_zoho_item_by_sku()
+    {
+        $product = Product::create([
+            'shop_id' => $this->shop->id,
+            'shopify_product_id' => 'gid://shopify/Product/900',
+            'title' => 'Jacket',
+            'handle' => 'jacket',
+        ]);
+
+        $variant = ProductVariant::create([
+            'product_id' => $product->id,
+            'shopify_variant_id' => 'gid://shopify/ProductVariant/901',
+            'title' => 'Medium',
+            'sku' => 'JKT-M-123',
+            'price' => '85.00',
+            'inventory_quantity' => 5,
+            'zoho_item_id' => null,
+        ]);
+
+        Http::fake(function (Request $request) {
+            $path = parse_url($request->url(), PHP_URL_PATH);
+
+            if (str_contains($path, '/settings/fields')) {
+                return Http::response($this->getFieldsMockResponse(), 200);
+            }
+
+            if ($request->method() === 'GET' && str_contains($path, '/items')) {
+                return Http::response([
+                    'code' => 0,
+                    'items' => [
+                        [
+                            'item_id' => 'zoho_sku_item_999',
+                            'sku' => 'JKT-M-123',
+                            'name' => 'Existing Zoho Jacket',
+                            'custom_fields' => [],
+                        ],
+                    ],
+                ], 200);
+            }
+
+            if ($request->method() === 'PUT' && str_contains($path, '/items/zoho_sku_item_999')) {
+                return Http::response([
+                    'code' => 0,
+                    'message' => 'The item has been updated.',
+                    'item' => ['item_id' => 'zoho_sku_item_999'],
+                ], 200);
+            }
+
+            return Http::response(['code' => 0], 200);
+        });
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncItem($variant);
+
+        $variant->refresh();
+        $this->assertEquals('zoho_sku_item_999', $variant->zoho_item_id);
+        $this->assertTrue($result['updated']);
+
+        // Verify that PUT request updated cf_shopify_variant_id
+        Http::assertSent(function (Request $request) {
+            return $request->method() === 'PUT' &&
+                str_contains($request->url(), '/items/zoho_sku_item_999') &&
+                isset($request->data()['custom_fields'][0]['value']) &&
+                $request->data()['custom_fields'][0]['value'] === 'gid://shopify/ProductVariant/901';
+        });
+    }
+
+    public function test_sku_lookup_skipped_when_sku_is_empty()
+    {
+        $product = Product::create([
+            'shop_id' => $this->shop->id,
+            'shopify_product_id' => 'gid://shopify/Product/910',
+            'title' => 'Hat',
+            'handle' => 'hat',
+        ]);
+
+        $variant = ProductVariant::create([
+            'product_id' => $product->id,
+            'shopify_variant_id' => 'gid://shopify/ProductVariant/911',
+            'title' => 'One Size',
+            'sku' => '',
+            'price' => '15.00',
+            'inventory_quantity' => 10,
+            'zoho_item_id' => null,
+        ]);
+
+        Http::fake(function (Request $request) {
+            $path = parse_url($request->url(), PHP_URL_PATH);
+
+            if (str_contains($path, '/settings/fields')) {
+                return Http::response($this->getFieldsMockResponse(), 200);
+            }
+
+            if ($request->method() === 'GET' && str_contains($path, '/items')) {
+                return Http::response([
+                    'code' => 0,
+                    'items' => [],
+                ], 200);
+            }
+
+            if ($request->method() === 'POST' && str_contains($path, '/items')) {
+                return Http::response([
+                    'code' => 0,
+                    'message' => 'The item has been added.',
+                    'item' => ['item_id' => 'zoho_new_hat_111'],
+                ], 200);
+            }
+
+            return Http::response(['code' => 0], 200);
+        });
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncItem($variant);
+
+        $variant->refresh();
+        $this->assertEquals('zoho_new_hat_111', $variant->zoho_item_id);
+        $this->assertTrue($result['created']);
     }
 }

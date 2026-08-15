@@ -163,15 +163,40 @@ class ShopifyService
     /**
      * Register products/update webhook.
      */
-    public function registerProductUpdateWebhook(
-        Shop $shop
-    ): array {
-        $accessToken =
-            $this->getValidAccessToken($shop);
+    public function registerProductUpdateWebhook(Shop $shop): array
+    {
+        return $this->registerWebhookSubscription(
+            $shop,
+            'PRODUCTS_UPDATE',
+            '/webhooks/products',
+            'Product update'
+        );
+    }
 
-        $webhookUrl =
-            rtrim(env('SHOPIFY_APP_URL'), '/') .
-            '/webhooks/products';
+    /**
+     * Register inventory_levels/update webhook.
+     */
+    public function registerInventoryLevelUpdateWebhook(Shop $shop): array
+    {
+        return $this->registerWebhookSubscription(
+            $shop,
+            'INVENTORY_LEVELS_UPDATE',
+            '/webhooks/inventory-levels',
+            'Inventory level update'
+        );
+    }
+
+    /**
+     * Generic helper to register a Shopify GraphQL webhook subscription.
+     */
+    protected function registerWebhookSubscription(
+        Shop $shop,
+        string $topic,
+        string $path,
+        string $label
+    ): array {
+        $accessToken = $this->getValidAccessToken($shop);
+        $webhookUrl = rtrim(env('SHOPIFY_APP_URL'), '/') . $path;
 
         $query = <<<'GRAPHQL'
 query {
@@ -197,8 +222,7 @@ GRAPHQL;
 
         if (!$checkResponse->successful()) {
             throw new \Exception(
-                'Failed to check Shopify webhooks: ' .
-                    $checkResponse->body()
+                "Failed to check Shopify webhooks for {$label}: " . $checkResponse->body()
             );
         }
 
@@ -206,24 +230,18 @@ GRAPHQL;
 
         if (!empty($checkData['errors'])) {
             throw new \Exception(
-                'Shopify webhook query failed: ' .
-                    json_encode($checkData['errors'])
+                "Shopify webhook query failed for {$label}: " . json_encode($checkData['errors'])
             );
         }
 
-        $existingWebhooks =
-            $checkData['data']['webhookSubscriptions']['nodes'] ?? [];
+        $existingWebhooks = $checkData['data']['webhookSubscriptions']['nodes'] ?? [];
 
         foreach ($existingWebhooks as $webhook) {
-            if (
-                $webhook['topic'] === 'PRODUCTS_UPDATE' &&
-                $webhook['uri'] === $webhookUrl
-            ) {
+            if ($webhook['topic'] === $topic && $webhook['uri'] === $webhookUrl) {
                 return [
                     'success' => true,
                     'created' => false,
-                    'message' =>
-                    'Product update webhook already exists.',
+                    'message' => "{$label} webhook already exists.",
                     'webhook_id' => $webhook['id'],
                     'uri' => $webhook['uri'],
                 ];
@@ -244,7 +262,6 @@ mutation webhookSubscriptionCreate(
             topic
             uri
         }
-
         userErrors {
             field
             message
@@ -260,10 +277,8 @@ GRAPHQL;
             "https://{$shop->shop_domain}/admin/api/2026-07/graphql.json",
             [
                 'query' => $mutation,
-
                 'variables' => [
-                    'topic' => 'PRODUCTS_UPDATE',
-
+                    'topic' => $topic,
                     'webhookSubscription' => [
                         'uri' => $webhookUrl,
                     ],
@@ -273,8 +288,7 @@ GRAPHQL;
 
         if (!$response->successful()) {
             throw new \Exception(
-                'Failed to create Shopify webhook: ' .
-                    $response->body()
+                "Failed to create Shopify webhook for {$label}: " . $response->body()
             );
         }
 
@@ -282,37 +296,30 @@ GRAPHQL;
 
         if (!empty($data['errors'])) {
             throw new \Exception(
-                'Shopify webhook creation failed: ' .
-                    json_encode($data['errors'])
+                "Shopify webhook creation failed for {$label}: " . json_encode($data['errors'])
             );
         }
 
-        $result =
-            $data['data']['webhookSubscriptionCreate'] ?? null;
+        $result = $data['data']['webhookSubscriptionCreate'] ?? null;
 
         if (!$result) {
             throw new \Exception(
-                'Invalid Shopify webhook creation response.'
+                "Invalid Shopify webhook creation response for {$label}."
             );
         }
 
         if (!empty($result['userErrors'])) {
             throw new \Exception(
-                'Shopify webhook user errors: ' .
-                    json_encode($result['userErrors'])
+                "Shopify webhook user errors for {$label}: " . json_encode($result['userErrors'])
             );
         }
 
         return [
             'success' => true,
             'created' => true,
-            'message' =>
-            'Product update webhook created successfully.',
-            'webhook_id' =>
-            $result['webhookSubscription']['id'] ?? null,
-            'uri' =>
-            $result['webhookSubscription']['uri']
-                ?? $webhookUrl,
+            'message' => "{$label} webhook created successfully.",
+            'webhook_id' => $result['webhookSubscription']['id'] ?? null,
+            'uri' => $result['webhookSubscription']['uri'] ?? $webhookUrl,
         ];
     }
 }

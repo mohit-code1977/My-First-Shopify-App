@@ -61,3 +61,6 @@ Route::middleware(['shopify.auth'])->group(function () {
 
 Route::post('/webhooks/products', [ShopifyWebhookController::class, 'productsUpdate'])
     ->name('shopify.webhooks.products');
+
+Route::post('/webhooks/inventory-levels', [ShopifyWebhookController::class, 'inventoryLevelsUpdate'])
+    ->name('shopify.webhooks.inventory_levels');

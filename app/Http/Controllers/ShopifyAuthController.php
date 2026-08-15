@@ -9,14 +9,12 @@ use App\Models\Shop;
 use App\Services\ShopifyService;
 use Illuminate\Support\Facades\Log;
 
-class ShopifyAuthController extends Controller
-{
+class ShopifyAuthController extends Controller {
     public function __construct(
         private ShopifyService $shopifyService
     ) {}
 
-    public function install(Request $request)
-    {
+    public function install(Request $request) {
         $shop = $request->query('shop');
 
         if (!$shop) {
@@ -35,6 +33,7 @@ class ShopifyAuthController extends Controller
         $scopes = env('SHOPIFY_SCOPES');
         $apiKey = env('SHOPIFY_API_KEY');
 
+            
         $redirectUri = rtrim(env('SHOPIFY_APP_URL'), '/')
             . env('SHOPIFY_REDIRECT_URI');
 
@@ -56,8 +55,7 @@ class ShopifyAuthController extends Controller
         return redirect($installUrl);
     }
 
-    public function callback(Request $request)
-    {
+    public function callback(Request $request) {
         $shop = $request->query('shop');
         $code = $request->query('code');
         $hmac = $request->query('hmac');
@@ -174,11 +172,20 @@ class ShopifyAuthController extends Controller
             ]
         );
 
-        // Register Shopify product update webhook
+        // Register Shopify webhooks
         try {
             $this->shopifyService->registerProductUpdateWebhook($shopModel);
         } catch (\Throwable $e) {
-            Log::error('Shopify webhook registration failed', [
+            Log::error('Shopify products/update webhook registration failed', [
+                'shop' => $shop,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        try {
+            $this->shopifyService->registerInventoryLevelUpdateWebhook($shopModel);
+        } catch (\Throwable $e) {
+            Log::error('Shopify inventory_levels/update webhook registration failed', [
                 'shop' => $shop,
                 'error' => $e->getMessage(),
             ]);

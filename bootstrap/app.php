@@ -15,6 +15,7 @@ return Application::configure(basePath: dirname(__DIR__))
 
         $middleware->validateCsrfTokens(except: [
             'webhooks/products',
+            'webhooks/inventory-levels',
             'api/zoho/connect',
         ]);
 

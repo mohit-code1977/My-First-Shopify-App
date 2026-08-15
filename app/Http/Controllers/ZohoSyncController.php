@@ -175,6 +175,9 @@ query GetProducts($cursor: String) {
                             sku
                             price
                             inventoryQuantity
+                            inventoryItem {
+                                id
+                            }
 
                             image {
                                 url
@@ -247,6 +250,9 @@ GRAPHQL;
 
                         'shopify_variant_id' =>
                         $variant['id'],
+
+                        'shopify_inventory_item_id' =>
+                        $variant['inventoryItem']['id'] ?? null,
 
                         'title' =>
                         $variant['title']
@@ -397,6 +403,9 @@ query GetVariant($id: ID!) {
         sku
         price
         inventoryQuantity
+        inventoryItem {
+            id
+        }
 
         image {
             url
@@ -536,6 +545,10 @@ GRAPHQL;
         $variant->inventory_quantity =
             $shopifyVariant['inventoryQuantity']
             ?? 0;
+
+        if (!empty($shopifyVariant['inventoryItem']['id'])) {
+            $variant->shopify_inventory_item_id = $shopifyVariant['inventoryItem']['id'];
+        }
 
         $variant->save();
 

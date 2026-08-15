@@ -355,6 +355,48 @@ class ZohoService
         return null;
     }
 
+    /**
+     * Find existing Zoho item by SKU.
+     */
+    public function findItemBySku(string $sku): ?array
+    {
+        $trimmedSku = trim($sku);
+        if ($trimmedSku === '') {
+            return null;
+        }
+
+        // 1. Try querying Zoho API with sku filter
+        try {
+            $response = $this->makeRequest('GET', '/books/v3/items', [
+                'sku' => $trimmedSku,
+            ]);
+
+            $items = $response['items'] ?? [];
+            foreach ($items as $item) {
+                if (!empty($item['sku']) && strcasecmp(trim($item['sku']), $trimmedSku) === 0) {
+                    return $item;
+                }
+            }
+        } catch (\Throwable $e) {
+            Log::warning("Zoho API SKU search filter failed for SKU '{$trimmedSku}': " . $e->getMessage());
+        }
+
+        // 2. Fallback search across items list
+        try {
+            $items = $this->getItems();
+            foreach ($items as $item) {
+                if (!empty($item['sku']) && strcasecmp(trim($item['sku']), $trimmedSku) === 0) {
+                    return $item;
+                }
+            }
+        } catch (\Throwable $e) {
+            Log::error("Zoho getItems fallback SKU search failed for SKU '{$trimmedSku}': " . $e->getMessage());
+            throw $e;
+        }
+
+        return null;
+    }
+
 
     // Create a Zoho Books item from a Shopify product variant
     public function createItem(ProductVariant $variant): array {
@@ -372,11 +414,40 @@ class ZohoService
         $existingInZoho = $this->findItemByShopifyVariantId($variant->shopify_variant_id);
         if ($existingInZoho && !empty($existingInZoho['item_id'])) {
             $zohoItemId = (string) $existingInZoho['item_id'];
+            Log::info("createItem: Found existing Zoho item {$zohoItemId} by custom field cf_shopify_variant_id for variant ID {$variant->id}.");
             $variant->update([
                 'zoho_item_id' => $zohoItemId,
             ]);
 
             return $this->updateItem($variant);
+        }
+
+        // Duplicate protection by SKU: check if an item with this SKU already exists in Zoho
+        if (!empty(trim($variant->sku ?? ''))) {
+            try {
+                $skuMatch = $this->findItemBySku($variant->sku);
+                if ($skuMatch && !empty($skuMatch['item_id'])) {
+                    $matchedZohoId = (string) $skuMatch['item_id'];
+
+                    $alreadyLinked = ProductVariant::where('zoho_item_id', $matchedZohoId)
+                        ->where('id', '!=', $variant->id)
+                        ->exists();
+
+                    if ($alreadyLinked) {
+                        Log::warning("createItem: Zoho item {$matchedZohoId} matches SKU '{$variant->sku}', but is already linked to another local variant. Proceeding with new item creation.");
+                    } else {
+                        Log::info("createItem: Found existing Zoho item {$matchedZohoId} matching SKU '{$variant->sku}' for variant ID {$variant->id}. Linking existing item.");
+                        $variant->update([
+                            'zoho_item_id' => $matchedZohoId,
+                        ]);
+                        return $this->updateItem($variant);
+                    }
+                } else {
+                    Log::info("createItem: No matching Zoho item found by SKU '{$variant->sku}' for variant ID {$variant->id}. Creating new Zoho item.");
+                }
+            } catch (\Throwable $e) {
+                Log::error("createItem: Zoho SKU lookup failed for SKU '{$variant->sku}' on variant ID {$variant->id}: " . $e->getMessage());
+            }
         }
 
         // Get the parent Shopify product
@@ -456,6 +527,21 @@ class ZohoService
             'rate' => (float) $variant->price,
             'product_type' => 'goods',
         ];
+
+        // Include custom field for Shopify Variant ID if configured
+        try {
+            $shopifyVariantFieldId = $this->getShopifyVariantFieldId();
+            if ($shopifyVariantFieldId) {
+                $data['custom_fields'] = [
+                    [
+                        'customfield_id' => $shopifyVariantFieldId,
+                        'value' => $variant->shopify_variant_id,
+                    ],
+                ];
+            }
+        } catch (\Throwable $e) {
+            Log::warning("Could not append custom field to updateItem for variant ID {$variant->id}: " . $e->getMessage());
+        }
 
         // Include SKU only when Shopify has one
         if (!empty($variant->sku)) {
@@ -623,10 +709,39 @@ class ZohoService
         $zohoItem = $this->findItemByShopifyVariantId($variant->shopify_variant_id);
 
         if ($zohoItem && !empty($zohoItem['item_id'])) {
+            Log::info("syncItem: Found matching Zoho item {$zohoItem['item_id']} by custom field cf_shopify_variant_id for variant ID {$variant->id}.");
             $variant->update([
                 'zoho_item_id' => (string) $zohoItem['item_id'],
             ]);
         }
+
+        // Search Zoho by SKU if local mapping is still missing and variant has a non-empty SKU
+        if (!$variant->zoho_item_id && !empty(trim($variant->sku ?? ''))) {
+            try {
+                $skuMatch = $this->findItemBySku($variant->sku);
+                if ($skuMatch && !empty($skuMatch['item_id'])) {
+                    $matchedZohoId = (string) $skuMatch['item_id'];
+
+                    $alreadyLinked = ProductVariant::where('zoho_item_id', $matchedZohoId)
+                        ->where('id', '!=', $variant->id)
+                        ->exists();
+
+                    if ($alreadyLinked) {
+                        Log::warning("syncItem: Found Zoho item {$matchedZohoId} matching SKU '{$variant->sku}', but it is already linked to another local variant. Skipping SKU linking for variant ID {$variant->id}.");
+                    } else {
+                        Log::info("syncItem: Found matching Zoho item {$matchedZohoId} by SKU '{$variant->sku}' for variant ID {$variant->id}. Linking existing Zoho item.");
+                        $variant->update([
+                            'zoho_item_id' => $matchedZohoId,
+                        ]);
+                        $zohoItem = $skuMatch;
+                    }
+                } else {
+                    Log::info("syncItem: No matching Zoho item found by SKU '{$variant->sku}' for variant ID {$variant->id}. Proceeding with new item creation.");
+                }
+            } catch (\Throwable $e) {
+                Log::error("syncItem: Zoho SKU lookup failed for SKU '{$variant->sku}' on variant ID {$variant->id}: " . $e->getMessage());
+            }
+}
 
         /*
     |--------------------------------------------------------------------------
@@ -860,8 +975,87 @@ class ZohoService
     }
 
 
-    private function getSyncHash(ProductVariant $variant): string
-    {
+    /**
+     * Synchronize inventory quantity from Shopify to Zoho Books / Inventory.
+     */
+    public function syncInventory(ProductVariant $variant, ?int $newShopifyQuantity = null): array {
+        if (!$variant->zoho_item_id) {
+            Log::warning("syncInventory: Variant ID {$variant->id} is not linked to a Zoho item. Skipping inventory sync.");
+            return [
+                'success' => false,
+                'skipped' => true,
+                'message' => 'Variant is not linked to a Zoho item.',
+            ];
+        }
+
+        $targetQuantity = $newShopifyQuantity ?? (int) $variant->inventory_quantity;
+
+        $zohoItem = $this->getItem($variant->zoho_item_id);
+
+        if (!$zohoItem) {
+            Log::error("syncInventory: Zoho item ID {$variant->zoho_item_id} not found for variant ID {$variant->id}.");
+            return [
+                'success' => false,
+                'message' => "Zoho item ID {$variant->zoho_item_id} not found.",
+            ];
+        }
+
+        $currentZohoQuantity = (int) (
+            $zohoItem['actual_available_stock'] ??
+            $zohoItem['stock_on_hand'] ??
+            $zohoItem['available_stock'] ??
+            0
+        );
+
+        $delta = $targetQuantity - $currentZohoQuantity;
+
+        Log::info("syncInventory: Variant ID {$variant->id} (Zoho Item: {$variant->zoho_item_id}): Shopify Qty = {$targetQuantity}, Zoho Qty = {$currentZohoQuantity}, Delta = {$delta}");
+
+        if ($delta === 0) {
+            Log::info("syncInventory: Stock is already in sync ({$targetQuantity}) for variant ID {$variant->id}. No adjustment needed.");
+            return [
+                'success' => true,
+                'adjusted' => false,
+                'shopify_quantity' => $targetQuantity,
+                'zoho_quantity' => $currentZohoQuantity,
+                'delta' => 0,
+                'message' => 'Inventory is already in sync.',
+            ];
+        }
+
+        $payload = [
+            'date' => now()->format('Y-m-d'),
+            'reason' => 'Shopify Inventory Sync',
+            'adjustment_type' => 'quantity',
+            'line_items' => [
+                [
+                    'item_id' => $variant->zoho_item_id,
+                    'quantity_adjusted' => $delta,
+                ],
+            ],
+        ];
+
+        try {
+            $response = $this->makeRequest('POST', '/books/v3/inventoryadjustments', $payload);
+
+            Log::info("syncInventory: Successfully created Zoho inventory adjustment for variant ID {$variant->id}. Delta: {$delta}");
+
+            return [
+                'success' => true,
+                'adjusted' => true,
+                'shopify_quantity' => $targetQuantity,
+                'zoho_quantity' => $currentZohoQuantity,
+                'delta' => $delta,
+                'zoho_response' => $response,
+                'message' => 'Inventory adjustment created successfully.',
+            ];
+        } catch (\Throwable $e) {
+            Log::error("syncInventory: Failed to create Zoho inventory adjustment for variant ID {$variant->id} (Delta: {$delta}): " . $e->getMessage());
+            throw $e;
+        }
+    }
+
+    private function getSyncHash(ProductVariant $variant): string {
         return hash('sha256', json_encode([
             'title' => $variant->title,
             'sku' => $variant->sku,
