@@ -12,7 +12,7 @@ use App\Http\Controllers\ShopifyWebhookController;
 
 
 Route::get('/', function (Illuminate\Http\Request $request) {
-    return redirect()->route('zoho.sync', $request->query());
+    return redirect()->route('zoho.products', $request->query());
 });
 
 Route::get('/dashboard', function () {
@@ -32,8 +32,17 @@ Route::get('/auth/callback', [ShopifyAuthController::class, 'callback']);
 
 Route::get('/zoho/callback', [ZohoAuthController::class, 'callback']);
 
-Route::get('/zoho/sync', [ZohoSyncController::class, 'index'])
+Route::get('/zoho/products', [ZohoSyncController::class, 'products'])
+    ->name('zoho.products');
+
+Route::get('/zoho/sync', [ZohoSyncController::class, 'sync'])
     ->name('zoho.sync');
+
+Route::get('/zoho/orders', [ZohoSyncController::class, 'orders'])
+    ->name('zoho.orders');
+
+Route::get('/zoho/customers', [ZohoSyncController::class, 'customers'])
+    ->name('zoho.customers');
 
 Route::get('/zoho/sync/history', [ZohoSyncController::class, 'history'])
     ->name('zoho.sync.history');
@@ -44,6 +53,8 @@ Route::get('/zoho/settings', [ZohoSyncController::class, 'settings'])
 Route::middleware(['shopify.auth'])->group(function () {
     Route::post('/api/zoho/connect', [ZohoAuthController::class, 'initiate']);
     Route::get('/api/zoho/sync', [ZohoSyncController::class, 'data']);
+    Route::get('/api/zoho/orders', [ZohoSyncController::class, 'ordersData']);
+    Route::get('/api/zoho/customers', [ZohoSyncController::class, 'customersData']);
     Route::get('/api/zoho/sync/history', [ZohoSyncController::class, 'historyData']);
     Route::get('/api/zoho/settings', [ZohoSyncController::class, 'settingsData']);
 
@@ -55,6 +66,18 @@ Route::middleware(['shopify.auth'])->group(function () {
     Route::post('/zoho/sync-all', [ZohoSyncController::class, 'syncAll'])
         ->name('zoho.sync.all');
 
+    Route::post('/zoho/sync-inventory', [ZohoSyncController::class, 'syncZohoInventory'])
+        ->name('zoho.sync.inventory');
+
+    Route::post('/zoho/sync-customer', [ZohoSyncController::class, 'syncCustomer'])
+        ->name('zoho.sync.customer');
+
+    Route::post('/zoho/sync-order', [ZohoSyncController::class, 'syncOrder'])
+        ->name('zoho.sync.order');
+
+    Route::post('/zoho/sync-invoice', [ZohoSyncController::class, 'syncInvoice'])
+        ->name('zoho.sync.invoice');
+
     Route::post('/zoho/settings/disconnect', [ZohoSyncController::class, 'disconnect'])
         ->name('zoho.settings.disconnect');
 });
@@ -64,3 +87,11 @@ Route::post('/webhooks/products', [ShopifyWebhookController::class, 'productsUpd
 
 Route::post('/webhooks/inventory-levels', [ShopifyWebhookController::class, 'inventoryLevelsUpdate'])
     ->name('shopify.webhooks.inventory_levels');
+
+Route::post('/webhooks/customers', [ShopifyWebhookController::class, 'customersUpdate'])
+    ->name('shopify.webhooks.customers');
+
+Route::post('/webhooks/orders', [ShopifyWebhookController::class, 'ordersUpdate'])
+    ->name('shopify.webhooks.orders');
+
+

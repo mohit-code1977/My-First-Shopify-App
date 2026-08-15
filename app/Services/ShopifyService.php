@@ -322,4 +322,197 @@ GRAPHQL;
             'uri' => $result['webhookSubscription']['uri'] ?? $webhookUrl,
         ];
     }
+
+    /**
+     * Retrieve the primary/active Shopify location ID for inventory updates.
+     */
+    public function getPrimaryLocationId(Shop $shop): string
+    {
+        $accessToken = $this->getValidAccessToken($shop);
+
+        $query = <<<'GRAPHQL'
+query GetPrimaryLocation {
+    locations(first: 10) {
+        nodes {
+            id
+            name
+            isPrimary
+            isActive
+        }
+    }
 }
+GRAPHQL;
+
+        $response = Http::withHeaders([
+            'X-Shopify-Access-Token' => $accessToken,
+            'Content-Type' => 'application/json',
+        ])->post(
+            "https://{$shop->shop_domain}/admin/api/2026-07/graphql.json",
+            [
+                'query' => $query,
+            ]
+        );
+
+        if (!$response->successful()) {
+            throw new \Exception('Failed to fetch Shopify locations: ' . $response->body());
+        }
+
+        $data = $response->json();
+        $locations = $data['data']['locations']['nodes'] ?? [];
+
+        if (empty($locations)) {
+            throw new \Exception('No active Shopify locations found.');
+        }
+
+        foreach ($locations as $loc) {
+            if (!empty($loc['isPrimary']) && !empty($loc['isActive'])) {
+                return (string) $loc['id'];
+            }
+        }
+
+        return (string) $locations[0]['id'];
+    }
+
+    /**
+     * Update inventory quantity on Shopify for a specific InventoryItem ID.
+     * Clamps quantity to max(0, $quantity) to prevent overselling.
+     */
+    public function setInventoryQuantity(
+        Shop $shop,
+        string $inventoryItemId,
+        int $quantity,
+        ?string $locationId = null
+    ): array {
+        $accessToken = $this->getValidAccessToken($shop);
+
+        $safeQuantity = max(0, $quantity);
+        if ($safeQuantity !== $quantity) {
+            Log::warning("setInventoryQuantity: Overselling prevented. Quantity {$quantity} clamped to 0 for item {$inventoryItemId}.");
+        }
+
+        $formattedInventoryItemId = str_starts_with($inventoryItemId, 'gid://')
+            ? $inventoryItemId
+            : "gid://shopify/InventoryItem/{$inventoryItemId}";
+
+        $targetLocationId = $locationId ?? $this->getPrimaryLocationId($shop);
+        $formattedLocationId = str_starts_with($targetLocationId, 'gid://')
+            ? $targetLocationId
+            : "gid://shopify/Location/{$targetLocationId}";
+
+        $mutation = <<<'GRAPHQL'
+mutation inventorySetQuantities($input: InventorySetQuantitiesInput!) {
+    inventorySetQuantities(input: $input) {
+        inventoryAdjustmentGroup {
+            id
+        }
+        userErrors {
+            field
+            message
+        }
+    }
+}
+GRAPHQL;
+
+        $response = Http::withHeaders([
+            'X-Shopify-Access-Token' => $accessToken,
+            'Content-Type' => 'application/json',
+        ])->post(
+            "https://{$shop->shop_domain}/admin/api/2026-07/graphql.json",
+            [
+                'query' => $mutation,
+                'variables' => [
+                    'input' => [
+                        'reason' => 'correction',
+                        'name' => 'available',
+                        'ignoreCompareQuantity' => true,
+                        'quantities' => [
+                            [
+                                'inventoryItemId' => $formattedInventoryItemId,
+                                'locationId' => $formattedLocationId,
+                                'quantity' => $safeQuantity,
+                            ],
+                        ],
+                    ],
+                ],
+            ]
+        );
+
+        if (!$response->successful()) {
+            throw new \Exception('Shopify inventory set quantities API request failed: ' . $response->body());
+        }
+
+        $data = $response->json();
+
+        if (!empty($data['errors'])) {
+            throw new \Exception('Shopify GraphQL inventory update failed: ' . json_encode($data['errors']));
+        }
+
+        $result = $data['data']['inventorySetQuantities'] ?? [];
+        if (!empty($result['userErrors'])) {
+            throw new \Exception('Shopify inventory update user errors: ' . json_encode($result['userErrors']));
+        }
+
+        return [
+            'success' => true,
+            'shopify_inventory_item_id' => $formattedInventoryItemId,
+            'location_id' => $formattedLocationId,
+            'quantity' => $safeQuantity,
+            'response' => $data,
+        ];
+    }
+
+    /**
+     * Register customers/create and customers/update webhooks.
+     */
+    public function registerCustomerUpdateWebhook(Shop $shop): array
+    {
+        return $this->registerWebhookSubscription(
+            $shop,
+            'CUSTOMERS_UPDATE',
+            '/webhooks/customers',
+            'Customer update'
+        );
+    }
+
+    /**
+     * Register orders/create webhook.
+     */
+    public function registerOrderCreateWebhook(Shop $shop): array
+    {
+        return $this->registerWebhookSubscription(
+            $shop,
+            'ORDERS_CREATE',
+            '/webhooks/orders',
+            'Order create'
+        );
+    }
+
+    /**
+     * Register orders/updated webhook.
+     */
+    public function registerOrderUpdateWebhook(Shop $shop): array
+    {
+        return $this->registerWebhookSubscription(
+            $shop,
+            'ORDERS_UPDATED',
+            '/webhooks/orders',
+            'Order update'
+        );
+    }
+
+    /**
+     * Register all order-related webhooks (orders/create & orders/updated).
+     */
+    public function registerOrderWebhooks(Shop $shop): array
+    {
+        $createResult = $this->registerOrderCreateWebhook($shop);
+        $updateResult = $this->registerOrderUpdateWebhook($shop);
+
+        return [
+            'success' => ($createResult['success'] ?? false) && ($updateResult['success'] ?? false),
+            'create' => $createResult,
+            'update' => $updateResult,
+        ];
+    }
+}
+

@@ -25,6 +25,21 @@ class Shop extends Model
         return $this->hasMany(Product::class);
     }
 
+    public function customers()
+    {
+        return $this->hasMany(Customer::class);
+    }
+
+    public function orders()
+    {
+        return $this->hasMany(Order::class);
+    }
+
+    public function invoices()
+    {
+        return $this->hasMany(Invoice::class);
+    }
+
     public function zohoConnection()
     {
         return $this->hasOne(ZohoConnection::class)->where('is_active', true);

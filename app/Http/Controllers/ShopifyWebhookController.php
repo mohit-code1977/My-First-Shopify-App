@@ -2,6 +2,8 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Customer;
+use App\Models\Order;
 use App\Models\Product;
 use App\Models\ProductVariant;
 use App\Models\Shop;
@@ -453,4 +455,326 @@ class ShopifyWebhookController extends Controller {
             'summary' => $summary,
         ], 200);
     }
+
+    /**
+     * Handle Shopify customers/create and customers/update webhooks.
+     */
+    public function customersUpdate(Request $request)
+    {
+        Log::info('Shopify customers/update webhook received', [
+            'shop' => $request->header('X-Shopify-Shop-Domain'),
+            'webhook_id' => $request->header('X-Shopify-Webhook-Id'),
+            'topic' => $request->header('X-Shopify-Topic'),
+            'payload' => $request->getContent(),
+        ]);
+
+        $hmacHeader = $request->header('X-Shopify-Hmac-SHA256');
+
+        if (empty($hmacHeader)) {
+            return response()->json(['error' => 'Missing HMAC signature.'], 401);
+        }
+
+        $secret = config('services.shopify.api_secret') ?? env('SHOPIFY_API_SECRET');
+
+        if (empty($secret)) {
+            return response()->json(['error' => 'Shopify API secret not configured.'], 500);
+        }
+
+        $calculatedHmac = base64_encode(hash_hmac('sha256', $request->getContent(), $secret, true));
+
+        if (!hash_equals($calculatedHmac, $hmacHeader)) {
+            return response()->json(['error' => 'Invalid HMAC signature.'], 401);
+        }
+
+        $shopDomain = $request->header('X-Shopify-Shop-Domain');
+
+        if (empty($shopDomain) || !is_string($shopDomain) || !preg_match('/^[a-zA-Z0-9][a-zA-Z0-9\-]*\.myshopify\.com$/', $shopDomain)) {
+            return response()->json(['error' => 'Invalid Shopify shop domain.'], 400);
+        }
+
+        $shop = Shop::where('shop_domain', $shopDomain)->first();
+
+        if (!$shop) {
+            return response()->json(['error' => 'Shop not found.'], 404);
+        }
+
+        $webhookId = $request->header('X-Shopify-Webhook-Id');
+
+        if (!empty($webhookId)) {
+            $alreadyProcessed = ShopifyProcessedWebhook::where('webhook_id', $webhookId)
+                ->where('shop_domain', $shopDomain)
+                ->exists();
+
+            if ($alreadyProcessed) {
+                Log::info("customersUpdate: Webhook ID {$webhookId} has already been processed for shop {$shopDomain}. Skipping.");
+                return response()->json(['message' => 'Webhook already processed.'], 200);
+            }
+
+            ShopifyProcessedWebhook::create([
+                'webhook_id' => $webhookId,
+                'shop_domain' => $shopDomain,
+                'topic' => $request->header('X-Shopify-Topic') ?? 'customers/update',
+            ]);
+        }
+
+        $payload = json_decode($request->getContent(), true);
+
+        if (empty($payload) || !is_array($payload) || empty($payload['id'])) {
+            return response()->json(['error' => 'Invalid customer payload.'], 400);
+        }
+
+        $rawCustomerId = (string) $payload['id'];
+        $shopifyCustomerId = str_starts_with($rawCustomerId, 'gid://')
+            ? $rawCustomerId
+            : "gid://shopify/Customer/{$rawCustomerId}";
+
+        $defaultAddr = $payload['default_address'] ?? ($payload['addresses'][0] ?? null);
+        $billingAddr = $payload['billing_address'] ?? $defaultAddr;
+        $shippingAddr = $payload['shipping_address'] ?? $defaultAddr;
+
+        $customer = Customer::updateOrCreate(
+            [
+                'shop_id' => $shop->id,
+                'shopify_customer_id' => $shopifyCustomerId,
+            ],
+            [
+                'first_name' => $payload['first_name'] ?? null,
+                'last_name' => $payload['last_name'] ?? null,
+                'email' => $payload['email'] ?? null,
+                'phone' => $payload['phone'] ?? ($defaultAddr['phone'] ?? null),
+                'billing_address' => $billingAddr,
+                'shipping_address' => $shippingAddr,
+            ]
+        );
+
+        $synced = false;
+        $syncError = null;
+
+        if ($shop->zohoConnection) {
+            try {
+                $zohoService = new ZohoService($shop);
+                $zohoService->syncCustomer($customer);
+                $synced = true;
+            } catch (\Throwable $e) {
+                Log::error("customersUpdate: Zoho customer sync failed for customer ID {$customer->id}: " . $e->getMessage());
+                $syncError = $e->getMessage();
+            }
+        }
+
+        return response()->json([
+            'message' => 'Customer update webhook processed successfully.',
+            'customer_id' => $customer->id,
+            'shopify_customer_id' => $customer->shopify_customer_id,
+            'zoho_synced' => $synced,
+            'error' => $syncError,
+        ], 200);
+    }
+
+    /**
+     * Handle Shopify orders/create and orders/updated webhooks.
+     */
+    public function ordersUpdate(Request $request)
+    {
+        Log::info('Shopify orders/update webhook received', [
+            'shop' => $request->header('X-Shopify-Shop-Domain'),
+            'webhook_id' => $request->header('X-Shopify-Webhook-Id'),
+            'topic' => $request->header('X-Shopify-Topic'),
+            'payload' => $request->getContent(),
+        ]);
+
+        $hmacHeader = $request->header('X-Shopify-Hmac-SHA256');
+
+        if (empty($hmacHeader)) {
+            return response()->json(['error' => 'Missing HMAC signature.'], 401);
+        }
+
+        $secret = config('services.shopify.api_secret') ?? env('SHOPIFY_API_SECRET');
+
+        if (empty($secret)) {
+            return response()->json(['error' => 'Shopify API secret not configured.'], 500);
+        }
+
+        $calculatedHmac = base64_encode(hash_hmac('sha256', $request->getContent(), $secret, true));
+
+        if (!hash_equals($calculatedHmac, $hmacHeader)) {
+            return response()->json(['error' => 'Invalid HMAC signature.'], 401);
+        }
+
+        $shopDomain = $request->header('X-Shopify-Shop-Domain');
+
+        if (empty($shopDomain) || !is_string($shopDomain) || !preg_match('/^[a-zA-Z0-9][a-zA-Z0-9\-]*\.myshopify\.com$/', $shopDomain)) {
+            return response()->json(['error' => 'Invalid Shopify shop domain.'], 400);
+        }
+
+        $shop = Shop::where('shop_domain', $shopDomain)->first();
+
+        if (!$shop) {
+            return response()->json(['error' => 'Shop not found.'], 404);
+        }
+
+        $webhookId = $request->header('X-Shopify-Webhook-Id');
+
+        if (!empty($webhookId)) {
+            $alreadyProcessed = ShopifyProcessedWebhook::where('webhook_id', $webhookId)
+                ->where('shop_domain', $shopDomain)
+                ->exists();
+
+            if ($alreadyProcessed) {
+                Log::info("ordersUpdate: Webhook ID {$webhookId} has already been processed for shop {$shopDomain}. Skipping.");
+                return response()->json(['message' => 'Webhook already processed.'], 200);
+            }
+
+            ShopifyProcessedWebhook::create([
+                'webhook_id' => $webhookId,
+                'shop_domain' => $shopDomain,
+                'topic' => $request->header('X-Shopify-Topic') ?? 'orders/updated',
+            ]);
+        }
+
+        $payload = json_decode($request->getContent(), true);
+
+        if (empty($payload) || !is_array($payload) || empty($payload['id'])) {
+            return response()->json(['error' => 'Invalid order payload.'], 400);
+        }
+
+        $rawOrderId = (string) $payload['id'];
+        $shopifyOrderId = str_starts_with($rawOrderId, 'gid://')
+            ? $rawOrderId
+            : "gid://shopify/Order/{$rawOrderId}";
+
+        $orderNumber = $payload['name'] ?? (!empty($payload['order_number']) ? "#{$payload['order_number']}" : null);
+
+        // Resolve or create Customer record if present
+        $customerId = null;
+        if (!empty($payload['customer']) && is_array($payload['customer']) && !empty($payload['customer']['id'])) {
+            $custData = $payload['customer'];
+            $rawCustId = (string) $custData['id'];
+            $shopifyCustId = str_starts_with($rawCustId, 'gid://')
+                ? $rawCustId
+                : "gid://shopify/Customer/{$rawCustId}";
+
+            $defaultAddr = $custData['default_address'] ?? ($custData['addresses'][0] ?? null);
+            $billingAddr = $payload['billing_address'] ?? $defaultAddr;
+            $shippingAddr = $payload['shipping_address'] ?? $defaultAddr;
+
+            $customer = Customer::updateOrCreate(
+                [
+                    'shop_id' => $shop->id,
+                    'shopify_customer_id' => $shopifyCustId,
+                ],
+                [
+                    'first_name' => $custData['first_name'] ?? null,
+                    'last_name' => $custData['last_name'] ?? null,
+                    'email' => $custData['email'] ?? ($payload['email'] ?? null),
+                    'phone' => $custData['phone'] ?? ($payload['phone'] ?? ($defaultAddr['phone'] ?? null)),
+                    'billing_address' => $billingAddr,
+                    'shipping_address' => $shippingAddr,
+                ]
+            );
+
+            $customerId = $customer->id;
+
+            // Sync customer to Zoho if needed
+            if ($shop->zohoConnection) {
+                try {
+                    $zohoService = new ZohoService($shop);
+                    $zohoService->syncCustomer($customer);
+                } catch (\Throwable $e) {
+                    Log::warning("ordersUpdate: Customer sync pre-step failed for order customer ID {$customer->id}: " . $e->getMessage());
+                }
+            }
+        }
+
+        // Parse line items
+        $lineItems = [];
+        if (!empty($payload['line_items']) && is_array($payload['line_items'])) {
+            foreach ($payload['line_items'] as $item) {
+                $lineItems[] = [
+                    'line_item_id' => $item['id'] ?? null,
+                    'product_id' => $item['product_id'] ?? null,
+                    'variant_id' => $item['variant_id'] ?? null,
+                    'sku' => $item['sku'] ?? null,
+                    'title' => $item['title'] ?? ($item['name'] ?? null),
+                    'name' => $item['name'] ?? ($item['title'] ?? null),
+                    'quantity' => (int) ($item['quantity'] ?? 1),
+                    'price' => (float) ($item['price'] ?? 0.00),
+                    'total_discount' => (float) ($item['total_discount'] ?? 0.00),
+                ];
+            }
+        }
+
+        $discountTotal = (float) ($payload['total_discounts'] ?? 0.00);
+        $shippingTotal = (float) ($payload['total_shipping_price_set']['shop_money']['amount'] ?? ($payload['total_shipping_price'] ?? 0.00));
+        $taxTotal = (float) ($payload['total_tax'] ?? 0.00);
+        $totalPrice = (float) ($payload['total_price'] ?? 0.00);
+        $subtotal = (float) ($payload['subtotal_price'] ?? ($totalPrice - $taxTotal - $shippingTotal + $discountTotal));
+
+        $couponCode = !empty($payload['discount_codes'][0]['code']) ? $payload['discount_codes'][0]['code'] : null;
+
+        $order = Order::updateOrCreate(
+            [
+                'shop_id' => $shop->id,
+                'shopify_order_id' => $shopifyOrderId,
+            ],
+            [
+                'customer_id' => $customerId,
+                'order_number' => $orderNumber,
+                'order_date' => !empty($payload['created_at']) ? date('Y-m-d H:i:s', strtotime($payload['created_at'])) : now(),
+                'currency' => $payload['currency'] ?? 'USD',
+                'subtotal' => $subtotal,
+                'discount_total' => $discountTotal,
+                'shipping_total' => $shippingTotal,
+                'tax_total' => $taxTotal,
+                'total_price' => $totalPrice,
+                'financial_status' => $payload['financial_status'] ?? null,
+                'fulfillment_status' => $payload['fulfillment_status'] ?? null,
+                'line_items' => $lineItems,
+                'notes' => $payload['note'] ?? null,
+                'coupon_code' => $couponCode,
+            ]
+        );
+
+        $synced = false;
+        $syncError = null;
+
+        if ($shop->zohoConnection) {
+            try {
+                $zohoService = new ZohoService($shop);
+                $result = $zohoService->syncOrder($order);
+                $synced = true;
+
+                try {
+                    $zohoService->syncInvoice($order);
+                } catch (\Throwable $invEx) {
+                    Log::warning("ordersUpdate: Zoho invoice auto-sync warning for order ID {$order->id}: " . $invEx->getMessage());
+                }
+            } catch (\Throwable $e) {
+                Log::error("ordersUpdate: Zoho order sync failed for order ID {$order->id}: " . $e->getMessage());
+                $syncError = $e->getMessage();
+            }
+        }
+
+        $topic = $request->header('X-Shopify-Topic') ?? 'orders/updated';
+        $isCreate = str_contains(strtolower($topic), 'create');
+        $msgTopic = $isCreate ? 'create' : 'update';
+
+        return response()->json([
+            'message' => "Order {$msgTopic} webhook processed successfully.",
+            'order_id' => $order->id,
+            'shopify_order_id' => $order->shopify_order_id,
+            'zoho_sales_order_id' => $order->zoho_sales_order_id,
+            'zoho_synced' => $synced,
+            'error' => $syncError,
+        ], 200);
+    }
+
+    /**
+     * Alias method for Shopify orders/create webhooks.
+     */
+    public function ordersCreate(Request $request)
+    {
+        return $this->ordersUpdate($request);
+    }
 }
+
+

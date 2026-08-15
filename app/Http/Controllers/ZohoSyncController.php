@@ -12,6 +12,9 @@ use App\Services\ShopifyService;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Http\Request;
 use App\Models\ZohoConnection;
+use App\Models\Customer;
+use App\Models\Invoice;
+use App\Models\Order;
 use App\Models\Product;
 use Illuminate\Support\Facades\Log;
 
@@ -21,26 +24,179 @@ class ZohoSyncController extends Controller
         private ShopifyService $shopifyService
     ) {}
 
-    public function index(Request $request)
+    private function resolveShopContext(Request $request): array
     {
-        $shopDomain = $request->query('shop');
+        $shopDomain = $request->query('shop') ?? $request->header('X-Shop-Domain');
         $host = $request->query('host');
+        $shop = null;
 
-        return Inertia::render(
-            'Zoho/Sync',
-            [
-                'shop' => [
-                    'shop_domain' => $shopDomain,
-                ],
-                'variants' => [],
-                'failedCount' => 0,
-                'zohoConnected' => false,
-                'host' => $host,
-            ]
-        );
+        if ($shopDomain) {
+            $shop = Shop::where('shop_domain', $shopDomain)->first();
+        }
+
+        if (!$shop) {
+            $shop = Shop::whereHas('products')->first()
+                ?? Shop::whereNotNull('access_token')->latest()->first()
+                ?? Shop::first();
+            if ($shop) {
+                $shopDomain = $shop->shop_domain;
+            }
+        }
+
+        $zohoConnected = $shop ? ($shop->zohoConnection !== null) : false;
+
+        return [
+            'shop' => [
+                'id' => $shop?->id,
+                'shop_domain' => $shopDomain ?: ($shop?->shop_domain ?? 'Unknown store'),
+            ],
+            'zohoConnected' => $zohoConnected,
+            'host' => $host,
+        ];
     }
 
-    public function data(Request $request): JsonResponse
+    private function resolveShopModel(Request $request): ?Shop
+    {
+        $shop = $request->attributes->get('shop');
+
+        if (!$shop) {
+            $shopDomain = $request->query('shop') ?? $request->header('X-Shop-Domain');
+            if ($shopDomain) {
+                $shop = Shop::where('shop_domain', $shopDomain)->first();
+            }
+        }
+
+        if (!$shop) {
+            $shop = Shop::whereHas('products')->first()
+                ?? Shop::whereNotNull('access_token')->latest()->first()
+                ?? Shop::first();
+        }
+
+        return $shop;
+    }
+
+    private function getVariantsForShop(Shop $shop): array
+    {
+        $shopifyVariants = [];
+        try {
+            $shopifyVariants = $this->fetchShopifyCatalog($shop);
+        } catch (\Throwable $e) {
+            Log::error('Shopify catalog fetch failed.', [
+                'shop_id' => $shop->id,
+                'message' => $e->getMessage(),
+            ]);
+        }
+
+        if (!empty($shopifyVariants)) {
+            $variantIds = collect($shopifyVariants)
+                ->pluck('shopify_variant_id')
+                ->filter()
+                ->values();
+
+            $localMappings = ProductVariant::query()
+                ->whereIn('shopify_variant_id', $variantIds)
+                ->whereHas('product', function ($query) use ($shop) {
+                    $query->where('shop_id', $shop->id);
+                })
+                ->get([
+                    'id',
+                    'product_id',
+                    'shopify_variant_id',
+                    'zoho_item_id',
+                    'zoho_sync_hash',
+                    'zoho_synced_at',
+                ])
+                ->keyBy('shopify_variant_id');
+
+            return collect($shopifyVariants)
+                ->map(function (array $variant) use ($localMappings) {
+                    $mapping = $localMappings->get($variant['shopify_variant_id']);
+
+                    return array_merge($variant, [
+                        'id' => $variant['shopify_variant_id'],
+                        'zoho_item_id' => $mapping?->zoho_item_id,
+                        'zoho_sync_hash' => $mapping?->zoho_sync_hash,
+                        'zoho_synced_at' => $mapping?->zoho_synced_at,
+                    ]);
+                })
+                ->values()
+                ->toArray();
+        }
+
+        $dbVariants = ProductVariant::with(['product'])
+            ->whereHas('product', function ($query) use ($shop) {
+                $query->where('shop_id', $shop->id);
+            })
+            ->get();
+
+        return $dbVariants->map(function ($v) {
+            return [
+                'id' => $v->shopify_variant_id,
+                'shopify_variant_id' => $v->shopify_variant_id,
+                'shopify_inventory_item_id' => $v->shopify_inventory_item_id,
+                'title' => $v->title ?: 'Default Title',
+                'sku' => $v->sku,
+                'price' => (string) $v->price,
+                'inventory_quantity' => $v->inventory_quantity ?? 0,
+                'zoho_item_id' => $v->zoho_item_id,
+                'zoho_sync_hash' => $v->zoho_sync_hash,
+                'zoho_synced_at' => $v->zoho_synced_at,
+                'product' => [
+                    'id' => $v->product?->shopify_product_id,
+                    'title' => $v->product?->title ?: 'Untitled Product',
+                    'handle' => $v->product?->handle,
+                    'image_url' => $v->product?->image_url,
+                ],
+            ];
+        })->values()->toArray();
+    }
+
+    public function index(Request $request)
+    {
+        return redirect()->route('zoho.products', $request->query());
+    }
+
+    public function products(Request $request)
+    {
+        $context = $this->resolveShopContext($request);
+        $shopModel = $this->resolveShopModel($request);
+        $variants = $shopModel ? $this->getVariantsForShop($shopModel) : [];
+
+        return Inertia::render('Zoho/Products', array_merge($context, [
+            'variants' => $variants,
+            'failedCount' => 0,
+        ]));
+    }
+
+    public function sync(Request $request)
+    {
+        $context = $this->resolveShopContext($request);
+
+        return Inertia::render('Zoho/Sync', array_merge($context, [
+            'variants' => [],
+            'failedCount' => 0,
+        ]));
+    }
+
+    public function orders(Request $request)
+    {
+        $context = $this->resolveShopContext($request);
+
+        return Inertia::render('Zoho/Orders', array_merge($context, [
+            'orders' => [],
+        ]));
+    }
+
+    public function customers(Request $request)
+    {
+        $context = $this->resolveShopContext($request);
+
+        return Inertia::render('Zoho/Customers', array_merge($context, [
+            'customers' => [],
+        ]));
+    }
+
+    public function customersData(Request $request): JsonResponse
     {
         $shop = $request->attributes->get('shop');
 
@@ -51,80 +207,73 @@ class ZohoSyncController extends Controller
             ], 404);
         }
 
-        try {
-            $shopifyVariants =
-                $this->fetchShopifyCatalog($shop);
-        } catch (\Throwable $e) {
-            Log::error(
-                'Shopify catalog fetch failed.',
-                [
-                    'shop_id' => $shop->id,
-                    'message' => $e->getMessage(),
-                ]
-            );
+        $customers = Customer::where('shop_id', $shop->id)
+            ->latest()
+            ->take(50)
+            ->get();
 
-            $shopifyVariants = [];
+        $zohoConnection = $shop->zohoConnection;
+
+        return response()->json([
+            'success' => true,
+            'shop' => [
+                'id' => $shop->id,
+                'shop_domain' => $shop->shop_domain,
+            ],
+            'customers' => $customers,
+            'zohoConnected' => $zohoConnection !== null,
+        ]);
+    }
+
+    public function ordersData(Request $request): JsonResponse
+    {
+        $shop = $request->attributes->get('shop');
+
+        if (!$shop) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No Shopify shop installed.',
+            ], 404);
         }
 
-        $variantIds = collect($shopifyVariants)
-            ->pluck('shopify_variant_id')
-            ->filter()
-            ->values();
+        $orders = Order::with(['customer', 'invoice'])
+            ->where('shop_id', $shop->id)
+            ->latest()
+            ->take(50)
+            ->get();
 
-        $localMappings = ProductVariant::query()
-            ->whereIn(
-                'shopify_variant_id',
-                $variantIds
-            )
-            ->whereHas(
-                'product',
-                function ($query) use ($shop) {
-                    $query->where(
-                        'shop_id',
-                        $shop->id
-                    );
-                }
-            )
-            ->get([
-                'id',
-                'product_id',
-                'shopify_variant_id',
-                'zoho_item_id',
-                'zoho_sync_hash',
-                'zoho_synced_at',
-            ])
-            ->keyBy('shopify_variant_id');
+        $zohoConnection = $shop->zohoConnection;
 
-        $variants = collect($shopifyVariants)
-            ->map(function (array $variant) use (
-                $localMappings
-            ) {
-                $mapping =
-                    $localMappings->get(
-                        $variant['shopify_variant_id']
-                    );
+        return response()->json([
+            'success' => true,
+            'shop' => [
+                'id' => $shop->id,
+                'shop_domain' => $shop->shop_domain,
+            ],
+            'orders' => $orders,
+            'zohoConnected' => $zohoConnection !== null,
+        ]);
+    }
 
-                return array_merge(
-                    $variant,
-                    [
-                        'id' =>
-                        $variant['shopify_variant_id'],
+    public function data(Request $request): JsonResponse
+    {
+        $shop = $this->resolveShopModel($request);
 
-                        'zoho_item_id' =>
-                        $mapping?->zoho_item_id,
+        if (!$shop) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No Shopify shop installed.',
+            ], 404);
+        }
 
-                        'zoho_sync_hash' =>
-                        $mapping?->zoho_sync_hash,
+        $variants = $this->getVariantsForShop($shop);
+        $zohoConnection = $shop->zohoConnection;
 
-                        'zoho_synced_at' =>
-                        $mapping?->zoho_synced_at,
-                    ]
-                );
-            })
-            ->values();
-
-        $zohoConnection =
-            $shop->zohoConnection;
+        $orders = Order::with(['customer', 'invoice'])
+            ->where('shop_id', $shop->id)
+            ->latest()
+            ->take(50)
+            ->get();
 
         return response()->json([
             'success' => true,
@@ -133,6 +282,7 @@ class ZohoSyncController extends Controller
                 'shop_domain' => $shop->shop_domain,
             ],
             'variants' => $variants,
+            'orders' => $orders,
             'zohoConnected' => $zohoConnection !== null,
         ]);
     }
@@ -382,6 +532,209 @@ GRAPHQL;
                 'success' => false,
                 'message' => $e->getMessage(),
             ], $status);
+        }
+    }
+
+    public function syncZohoInventory(Request $request): JsonResponse
+    {
+        $shop = $request->attributes->get('shop');
+
+        if (!$shop) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No Shopify shop installed.',
+            ], 404);
+        }
+
+        if (!$shop->zohoConnection) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Zoho is not connected.',
+            ], 409);
+        }
+
+        $validated = $request->validate([
+            'variant_id' => ['required', 'integer'],
+            'location_id' => ['nullable', 'string'],
+        ]);
+
+        $variant = ProductVariant::where('id', $validated['variant_id'])
+            ->whereHas('product', function ($query) use ($shop) {
+                $query->where('shop_id', $shop->id);
+            })
+            ->first();
+
+        if (!$variant) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Product variant not found.',
+            ], 404);
+        }
+
+        try {
+            $zohoService = new ZohoService($shop);
+            $result = $zohoService->syncZohoInventoryToShopify($variant, $validated['location_id'] ?? null);
+
+            return response()->json([
+                'success' => true,
+                'message' => $result['message'] ?? 'Zoho inventory synchronized to Shopify successfully.',
+                'data' => $result,
+            ]);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    public function syncCustomer(Request $request): JsonResponse
+    {
+        $shop = $request->attributes->get('shop');
+
+        if (!$shop) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No Shopify shop installed.',
+            ], 404);
+        }
+
+        if (!$shop->zohoConnection) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Zoho is not connected.',
+            ], 409);
+        }
+
+        $validated = $request->validate([
+            'customer_id' => ['required', 'integer'],
+        ]);
+
+        $customer = Customer::where('id', $validated['customer_id'])
+            ->where('shop_id', $shop->id)
+            ->first();
+
+        if (!$customer) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Customer not found.',
+            ], 404);
+        }
+
+        try {
+            $zohoService = new ZohoService($shop);
+            $result = $zohoService->syncCustomer($customer);
+
+            return response()->json([
+                'success' => true,
+                'message' => $result['message'] ?? 'Customer synchronized to Zoho successfully.',
+                'data' => $result,
+            ]);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    public function syncOrder(Request $request): JsonResponse
+    {
+        $shop = $request->attributes->get('shop');
+
+        if (!$shop) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No Shopify shop installed.',
+            ], 404);
+        }
+
+        if (!$shop->zohoConnection) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Zoho is not connected.',
+            ], 409);
+        }
+
+        $validated = $request->validate([
+            'order_id' => ['required', 'integer'],
+        ]);
+
+        $order = Order::where('id', $validated['order_id'])
+            ->where('shop_id', $shop->id)
+            ->first();
+
+        if (!$order) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Order not found.',
+            ], 404);
+        }
+
+        try {
+            $zohoService = new ZohoService($shop);
+            $result = $zohoService->syncOrder($order);
+
+            return response()->json([
+                'success' => true,
+                'message' => $result['message'] ?? 'Sales Order synchronized to Zoho successfully.',
+                'data' => $result,
+            ]);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    public function syncInvoice(Request $request): JsonResponse
+    {
+        $shop = $request->attributes->get('shop');
+
+        if (!$shop) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No Shopify shop installed.',
+            ], 404);
+        }
+
+        if (!$shop->zohoConnection) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Zoho is not connected.',
+            ], 409);
+        }
+
+        $validated = $request->validate([
+            'order_id' => ['required', 'integer'],
+        ]);
+
+        $order = Order::where('id', $validated['order_id'])
+            ->where('shop_id', $shop->id)
+            ->first();
+
+        if (!$order) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Order not found.',
+            ], 404);
+        }
+
+        try {
+            $zohoService = new ZohoService($shop);
+            $result = $zohoService->syncInvoice($order);
+
+            return response()->json([
+                'success' => true,
+                'message' => $result['message'] ?? 'Invoice synchronized to Zoho successfully.',
+                'data' => $result,
+            ]);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+            ], 500);
         }
     }
 
@@ -694,12 +1047,9 @@ GRAPHQL;
 
     public function history(Request $request)
     {
-        $shopDomain = $request->query('shop');
+        $context = $this->resolveShopContext($request);
 
-        return Inertia::render('Zoho/History', [
-            'shop' => [
-                'shop_domain' => $shopDomain,
-            ],
+        return Inertia::render('Zoho/History', array_merge($context, [
             'histories' => [
                 'data' => [],
                 'total' => 0,
@@ -708,12 +1058,11 @@ GRAPHQL;
                 'links' => [],
             ],
             'pendingProducts' => 0,
-            'zohoConnected' => false,
             'filters' => [
                 'search' => (string) $request->query('search', ''),
                 'status' => (string) $request->query('status', 'all'),
             ],
-        ]);
+        ]));
     }
 
     public function historyData(Request $request): JsonResponse
@@ -801,16 +1150,11 @@ GRAPHQL;
 
     public function settings(Request $request)
     {
-        $shopDomain = $request->query('shop');
-        $host = $request->query('host');
+        $context = $this->resolveShopContext($request);
 
-        return Inertia::render('Zoho/Settings', [
-            'shop' => [
-                'shop_domain' => $shopDomain,
-            ],
+        return Inertia::render('Zoho/Settings', array_merge($context, [
             'zohoConnection' => null,
-            'host' => $host,
-        ]);
+        ]));
     }
 
     public function settingsData(Request $request): JsonResponse
