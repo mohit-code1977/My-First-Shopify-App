@@ -322,20 +322,37 @@ class ZohoAuthController extends Controller {
 
         /*
         |--------------------------------------------------------------------------
-        | Return to Shopify Embedded App Root
+        | Return Standalone HTML for Popup Auto-Close & Window Opener Notification
         |--------------------------------------------------------------------------
         */
 
         $decodedHost = base64_decode(strtr($host, '-_', '+/'));
-
         $adminUrl = 'https://' . $decodedHost . '/apps/zoho-books-integration-20';
-
         $query = http_build_query([
             'shop' => $shopModel->shop_domain,
             'host' => $host,
         ]);
+        $redirectUrl = $adminUrl . '?' . $query;
 
-        return redirect()->away($adminUrl . '?' . $query);
+        $html = '<!DOCTYPE html>' .
+            '<html><head><title>Zoho Connection Complete</title></head>' .
+            '<body style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background-color: #f6f6f7; color: #202223;">' .
+            '<div style="text-align: center; background: #ffffff; padding: 36px 48px; border-radius: 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.1); font-family: sans-serif;">' .
+            '<div style="font-size: 48px; color: #108043; margin-bottom: 12px;">✓</div>' .
+            '<h2 style="color: #1a1d20; margin: 0 0 8px 0; font-size: 20px;">Connected to Zoho Books</h2>' .
+            '<p style="color: #616a75; font-size: 14px; margin: 0;">Closing popup and updating your store...</p>' .
+            '</div>' .
+            '<script>' .
+            'if (window.opener) {' .
+            '  try { window.opener.postMessage({ type: "ZOHO_CONNECTED_SUCCESS" }, "*"); } catch(e) {}' .
+            '  window.close();' .
+            '} else {' .
+            '  window.location.href = ' . json_encode($redirectUrl) . ';' .
+            '}' .
+            '</script>' .
+            '</body></html>';
+
+        return response($html, 200)->header('Content-Type', 'text/html');
     }
 
     /**
