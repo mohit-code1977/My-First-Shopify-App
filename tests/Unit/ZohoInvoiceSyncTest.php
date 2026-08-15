@@ -300,4 +300,113 @@ class ZohoInvoiceSyncTest extends TestCase {
             'action' => 'create',
         ]);
     }
+
+    public function test_sync_invoice_creates_sales_order_first_if_missing() {
+        $orderWithoutSO = Order::create([
+            'shop_id' => $this->shop->id,
+            'customer_id' => $this->customer->id,
+            'shopify_order_id' => 'gid://shopify/Order/9988',
+            'order_number' => '#INV-9988',
+            'zoho_sales_order_id' => null,
+            'zoho_sales_order_number' => null,
+            'order_date' => now(),
+            'currency' => 'USD',
+            'subtotal' => '100.00',
+            'discount_total' => '0.00',
+            'shipping_total' => '0.00',
+            'tax_total' => '0.00',
+            'total_price' => '100.00',
+            'line_items' => [
+                [
+                    'variant_id' => 'gid://shopify/ProductVariant/5001',
+                    'sku' => 'SKU-INV-01',
+                    'name' => 'Standard Edition',
+                    'quantity' => 1,
+                    'price' => 100.00,
+                ],
+            ],
+        ]);
+
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/salesorders*' => function (Request $request) {
+                if ($request->method() === 'GET') {
+                    return Http::response(['code' => 0, 'salesorders' => []], 200);
+                }
+                if ($request->method() === 'POST') {
+                    return Http::response([
+                        'code' => 0,
+                        'salesorder' => [
+                            'salesorder_id' => 'zoho_so_new_9988',
+                            'salesorder_number' => 'SO-09988',
+                        ],
+                    ], 201);
+                }
+                return Http::response(['code' => 0], 200);
+            },
+            'https://www.zohoapis.com/books/v3/invoices*' => function (Request $request) {
+                if ($request->method() === 'GET') {
+                    return Http::response(['code' => 0, 'invoices' => []], 200);
+                }
+                if ($request->method() === 'POST') {
+                    return Http::response([
+                        'code' => 0,
+                        'invoice' => [
+                            'invoice_id' => 'zoho_inv_new_9988',
+                            'invoice_number' => 'INV-09988',
+                        ],
+                    ], 201);
+                }
+                return Http::response(['code' => 0], 200);
+            },
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncInvoice($orderWithoutSO);
+
+        $this->assertTrue($result['success']);
+        $orderWithoutSO->refresh();
+        $this->assertEquals('zoho_so_new_9988', $orderWithoutSO->zoho_sales_order_id);
+        $this->assertEquals('SO-09988', $orderWithoutSO->zoho_sales_order_number);
+
+        Http::assertSent(function (Request $request) {
+            return $request->method() === 'POST' &&
+                str_contains($request->url(), '/books/v3/invoices') &&
+                ($request->data()['salesorder_id'] ?? null) === 'zoho_so_new_9988';
+        });
+    }
+
+    public function test_sales_order_failure_prevents_invoice_creation() {
+        $failedOrder = Order::create([
+            'shop_id' => $this->shop->id,
+            'customer_id' => $this->customer->id,
+            'shopify_order_id' => 'gid://shopify/Order/9999',
+            'order_number' => '#FAIL-9999',
+            'zoho_sales_order_id' => null,
+            'line_items' => [
+                [
+                    'variant_id' => 'gid://shopify/ProductVariant/88888',
+                    'sku' => 'UNKNOWN-SKU',
+                    'name' => 'Unknown Item',
+                    'quantity' => 1,
+                    'price' => 50.00,
+                ],
+            ],
+        ]);
+
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/items*' => Http::response(['code' => 0, 'items' => []], 200),
+        ]);
+
+        try {
+            $zohoService = new ZohoService($this->shop);
+            $zohoService->syncInvoice($failedOrder);
+            $this->fail("Expected Exception was not thrown.");
+        } catch (\Throwable $e) {
+            $this->assertStringContainsString("Unmapped Shopify product variant/SKU", $e->getMessage());
+        }
+
+        $this->assertDatabaseMissing('invoices', [
+            'order_id' => $failedOrder->id,
+        ]);
+    }
 }

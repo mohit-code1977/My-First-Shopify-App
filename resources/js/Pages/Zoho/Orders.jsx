@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import ZohoLayout from "@/Layouts/ZohoLayout";
 
 const ORDERS_DATA_URL = "/api/zoho/orders";
+const SYNC_ORDER_URL = "/zoho/sync-order";
 const SYNC_INVOICE_URL = "/zoho/sync-invoice";
 
 export default function Orders({
@@ -17,6 +18,7 @@ export default function Orders({
     const [search, setSearch] = useState("");
     const [filterStatus, setFilterStatus] = useState("all");
     const [syncingOrderId, setSyncingOrderId] = useState(null);
+    const [syncType, setSyncType] = useState(null);
     const [notification, setNotification] = useState(null);
 
     const loadData = async () => {
@@ -47,6 +49,59 @@ export default function Orders({
         loadData();
     }, []);
 
+    const handleSyncOrder = async (orderId) => {
+        if (!connectedState) {
+            setNotification({
+                type: "error",
+                message:
+                    "Zoho is not connected. Please connect in Settings first.",
+            });
+            return;
+        }
+
+        setSyncingOrderId(orderId);
+        setSyncType("order");
+        setNotification(null);
+
+        try {
+            const token = await window.shopify?.idToken();
+            const response = await fetch(SYNC_ORDER_URL, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Accept: "application/json",
+                    Authorization: token ? `Bearer ${token}` : "",
+                },
+                body: JSON.stringify({ order_id: orderId }),
+            });
+
+            const data = await response.json();
+
+            if (response.ok && data.success) {
+                setNotification({
+                    type: "success",
+                    message:
+                        data.message ||
+                        "Sales Order synchronized successfully.",
+                });
+                await loadData();
+            } else {
+                setNotification({
+                    type: "error",
+                    message: data.message || "Sales Order creation failed.",
+                });
+            }
+        } catch (error) {
+            setNotification({
+                type: "error",
+                message: "Network error during Sales Order sync.",
+            });
+        } finally {
+            setSyncingOrderId(null);
+            setSyncType(null);
+        }
+    };
+
     const handleSyncInvoice = async (orderId) => {
         if (!connectedState) {
             setNotification({
@@ -58,6 +113,7 @@ export default function Orders({
         }
 
         setSyncingOrderId(orderId);
+        setSyncType("invoice");
         setNotification(null);
 
         try {
@@ -95,6 +151,7 @@ export default function Orders({
             });
         } finally {
             setSyncingOrderId(null);
+            setSyncType(null);
         }
     };
 
@@ -522,32 +579,72 @@ export default function Orders({
                                                     textAlign: "right",
                                                 }}
                                             >
-                                                <button
-                                                    type="button"
-                                                    onClick={() =>
-                                                        handleSyncInvoice(o.id)
-                                                    }
-                                                    disabled={isSyncing}
+                                                <div
                                                     style={{
-                                                        padding: "6px 14px",
-                                                        borderRadius: "6px",
-                                                        border: "1px solid #c9cccf",
-                                                        backgroundColor:
-                                                            "#ffffff",
-                                                        fontSize: "12px",
-                                                        fontWeight: 600,
-                                                        color: "#202223",
-                                                        cursor: isSyncing
-                                                            ? "wait"
-                                                            : "pointer",
+                                                        display: "flex",
+                                                        gap: "6px",
+                                                        justifyContent:
+                                                            "flex-end",
                                                     }}
                                                 >
-                                                    {isSyncing
-                                                        ? "Syncing..."
-                                                        : hasInvoice
-                                                          ? "Sync Again"
-                                                          : "Sync Invoice"}
-                                                </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() =>
+                                                            handleSyncOrder(o.id)
+                                                        }
+                                                        disabled={isSyncing}
+                                                        style={{
+                                                            padding: "6px 12px",
+                                                            borderRadius: "6px",
+                                                            border: "1px solid #c9cccf",
+                                                            backgroundColor:
+                                                                "#ffffff",
+                                                            fontSize: "12px",
+                                                            fontWeight: 600,
+                                                            color: "#202223",
+                                                            cursor: isSyncing
+                                                                ? "wait"
+                                                                : "pointer",
+                                                        }}
+                                                    >
+                                                        {isSyncing &&
+                                                        syncType === "order"
+                                                            ? "Syncing..."
+                                                            : o.zoho_sales_order_id ||
+                                                                o.zoho_sales_order_number
+                                                              ? "Sync Order"
+                                                              : "Sync Order"}
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() =>
+                                                            handleSyncInvoice(
+                                                                o.id,
+                                                            )
+                                                        }
+                                                        disabled={isSyncing}
+                                                        style={{
+                                                            padding: "6px 12px",
+                                                            borderRadius: "6px",
+                                                            border: "1px solid #005bd3",
+                                                            backgroundColor:
+                                                                "#005bd3",
+                                                            fontSize: "12px",
+                                                            fontWeight: 600,
+                                                            color: "#ffffff",
+                                                            cursor: isSyncing
+                                                                ? "wait"
+                                                                : "pointer",
+                                                        }}
+                                                    >
+                                                        {isSyncing &&
+                                                        syncType === "invoice"
+                                                            ? "Syncing..."
+                                                            : hasInvoice
+                                                              ? "Sync Again"
+                                                              : "Sync Invoice"}
+                                                    </button>
+                                                </div>
                                             </td>
                                         </tr>
                                     );

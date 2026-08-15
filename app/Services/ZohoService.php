@@ -1708,6 +1708,16 @@ class ZohoService
             throw new \Exception("Order #{$order->id} does not belong to shop {$this->shop->shop_domain}");
         }
 
+        // 0. Ensure Sales Order is created & reconciled in Zoho Books first
+        if (empty($order->zoho_sales_order_id)) {
+            $this->syncOrder($order);
+            $order->refresh();
+        }
+
+        if (empty($order->zoho_sales_order_id)) {
+            throw new \Exception("Cannot create invoice for order #{$order->order_number}: Sales Order creation failed or incomplete.");
+        }
+
         // 1. Resolve & Sync Customer
         $customer = $order->customer;
         if (!$customer && $order->customer_id) {
