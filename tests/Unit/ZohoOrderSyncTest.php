@@ -546,4 +546,47 @@ class ZohoOrderSyncTest extends TestCase {
             'shopify_order_id' => 'gid://shopify/Order/8003',
         ]);
     }
+
+    public function test_fetch_orders_success() {
+        Http::fake([
+            'https://order-test.myshopify.com/admin/api/2026-07/graphql.json*' => Http::response([
+                'data' => [
+                    'orders' => [
+                        'nodes' => [
+                            [
+                                'id' => 'gid://shopify/Order/8001',
+                                'name' => '#1001',
+                                'totalPriceSet' => ['shopMoney' => ['amount' => '100.00']],
+                                'customer' => [
+                                    'id' => 'gid://shopify/Customer/2001',
+                                    'firstName' => 'Jane',
+                                    'lastName' => 'Doe',
+                                    'email' => 'jane@example.com',
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
+            ], 200),
+        ]);
+
+        $shopifyService = new \App\Services\ShopifyService();
+        $orders = $shopifyService->fetchOrders($this->shop);
+        $this->assertCount(1, $orders);
+        $this->assertEquals('#1001', $orders[0]['name']);
+        $this->assertNotNull($orders[0]['customer']);
+        $this->assertNull($orders[0]['customer']['phone']);
+    }
+
+    public function test_fetch_orders_failure_throws_exception() {
+        Http::fake([
+            'https://order-test.myshopify.com/admin/api/2026-07/graphql.json*' => Http::response([
+                'errors' => '[API] Access denied',
+            ], 403),
+        ]);
+
+        $shopifyService = new \App\Services\ShopifyService();
+        $this->expectException(\Exception::class);
+        $shopifyService->fetchOrders($this->shop);
+    }
 }

@@ -181,24 +181,138 @@ class ZohoSyncController extends Controller
     public function orders(Request $request)
     {
         $context = $this->resolveShopContext($request);
+        $shopModel = $this->resolveShopModel($request);
+        $orders = [];
+
+        if ($shopModel) {
+            $orders = Order::with(['customer', 'invoice'])
+                ->where('shop_id', $shopModel->id)
+                ->latest()
+                ->take(50)
+                ->get();
+
+            if ($orders->isEmpty()) {
+                try {
+                    $shopifyService = app(\App\Services\ShopifyService::class);
+                    $rawOrders = $shopifyService->fetchOrders($shopModel);
+
+                    foreach ($rawOrders as $raw) {
+                        $customerId = null;
+                        if (!empty($raw['customer'])) {
+                            $rawCust = $raw['customer'];
+                            $custObj = Customer::updateOrCreate(
+                                [
+                                    'shop_id' => $shopModel->id,
+                                    'shopify_customer_id' => (string) $rawCust['id'],
+                                ],
+                                [
+                                    'first_name' => $rawCust['first_name'] ?? '',
+                                    'last_name' => $rawCust['last_name'] ?? '',
+                                    'email' => $rawCust['email'] ?? '',
+                                    'phone' => $rawCust['phone'] ?? null,
+                                    'billing_address' => $rawCust['default_address'] ?? [],
+                                    'shipping_address' => $rawCust['default_address'] ?? [],
+                                ]
+                            );
+                            $customerId = $custObj->id;
+                        }
+
+                        Order::updateOrCreate(
+                            [
+                                'shop_id' => $shopModel->id,
+                                'shopify_order_id' => (string) $raw['id'],
+                            ],
+                            [
+                                'customer_id' => $customerId,
+                                'order_number' => (string) ($raw['order_number'] ?? $raw['name'] ?? $raw['id']),
+                                'financial_status' => $raw['financial_status'] ?? 'pending',
+                                'fulfillment_status' => $raw['fulfillment_status'] ?? 'unfulfilled',
+                                'subtotal' => $raw['subtotal_price'] ?? 0.00,
+                                'discount_total' => $raw['total_discounts'] ?? 0.00,
+                                'shipping_total' => !empty($raw['shipping_lines']) ? array_sum(array_column($raw['shipping_lines'], 'price')) : 0.00,
+                                'tax_total' => $raw['total_tax'] ?? 0.00,
+                                'total_price' => $raw['total_price'] ?? 0.00,
+                                'currency' => $raw['currency'] ?? 'USD',
+                                'line_items' => $raw['line_items'] ?? [],
+                                'notes' => $raw['note'] ?? null,
+                                'order_date' => !empty($raw['created_at']) ? \Carbon\Carbon::parse($raw['created_at']) : now(),
+                            ]
+                        );
+                    }
+
+                    $orders = Order::with(['customer', 'invoice'])
+                        ->where('shop_id', $shopModel->id)
+                        ->latest()
+                        ->take(50)
+                        ->get();
+                } catch (\Exception $e) {
+                    Log::warning('Could not fetch existing Shopify orders for view', [
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+            }
+        }
 
         return Inertia::render('Zoho/Orders', array_merge($context, [
-            'orders' => [],
+            'orders' => $orders,
         ]));
     }
 
     public function customers(Request $request)
     {
         $context = $this->resolveShopContext($request);
+        $shopModel = $this->resolveShopModel($request);
+        $customers = [];
+
+        if ($shopModel) {
+            $customers = Customer::where('shop_id', $shopModel->id)
+                ->latest()
+                ->take(50)
+                ->get();
+
+            if ($customers->isEmpty()) {
+                try {
+                    $shopifyService = app(\App\Services\ShopifyService::class);
+                    $rawCustomers = $shopifyService->fetchCustomers($shopModel);
+
+                    foreach ($rawCustomers as $raw) {
+                        $defaultAddr = $raw['default_address'] ?? [];
+                        Customer::updateOrCreate(
+                            [
+                                'shop_id' => $shopModel->id,
+                                'shopify_customer_id' => (string) $raw['id'],
+                            ],
+                            [
+                                'first_name' => $raw['first_name'] ?? '',
+                                'last_name' => $raw['last_name'] ?? '',
+                                'email' => $raw['email'] ?? '',
+                                'phone' => $raw['phone'] ?? $defaultAddr['phone'] ?? null,
+                                'billing_address' => $defaultAddr,
+                                'shipping_address' => $defaultAddr,
+                            ]
+                        );
+                    }
+
+                    $customers = Customer::where('shop_id', $shopModel->id)
+                        ->latest()
+                        ->take(50)
+                        ->get();
+                } catch (\Exception $e) {
+                    Log::warning('Could not fetch existing Shopify customers for view', [
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+            }
+        }
 
         return Inertia::render('Zoho/Customers', array_merge($context, [
-            'customers' => [],
+            'customers' => $customers,
         ]));
     }
 
     public function customersData(Request $request): JsonResponse
     {
-        $shop = $request->attributes->get('shop');
+        $shop = $request->attributes->get('shop') ?? $this->resolveShopModel($request);
 
         if (!$shop) {
             return response()->json([
@@ -211,6 +325,40 @@ class ZohoSyncController extends Controller
             ->latest()
             ->take(50)
             ->get();
+
+        if ($customers->isEmpty() || $request->boolean('refresh')) {
+            try {
+                $shopifyService = app(\App\Services\ShopifyService::class);
+                $rawCustomers = $shopifyService->fetchCustomers($shop);
+
+                foreach ($rawCustomers as $raw) {
+                    $defaultAddr = $raw['default_address'] ?? [];
+                    Customer::updateOrCreate(
+                        [
+                            'shop_id' => $shop->id,
+                            'shopify_customer_id' => (string) $raw['id'],
+                        ],
+                        [
+                            'first_name' => $raw['first_name'] ?? '',
+                            'last_name' => $raw['last_name'] ?? '',
+                            'email' => $raw['email'] ?? '',
+                            'phone' => $raw['phone'] ?? $defaultAddr['phone'] ?? null,
+                            'billing_address' => $defaultAddr,
+                            'shipping_address' => $defaultAddr,
+                        ]
+                    );
+                }
+
+                $customers = Customer::where('shop_id', $shop->id)
+                    ->latest()
+                    ->take(50)
+                    ->get();
+            } catch (\Exception $e) {
+                Log::warning('Could not fetch existing Shopify customers for list view', [
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
 
         $zohoConnection = $shop->zohoConnection;
 
@@ -227,7 +375,7 @@ class ZohoSyncController extends Controller
 
     public function ordersData(Request $request): JsonResponse
     {
-        $shop = $request->attributes->get('shop');
+        $shop = $request->attributes->get('shop') ?? $this->resolveShopModel($request);
 
         if (!$shop) {
             return response()->json([
@@ -241,6 +389,67 @@ class ZohoSyncController extends Controller
             ->latest()
             ->take(50)
             ->get();
+
+        if ($orders->isEmpty() || $request->boolean('refresh')) {
+            try {
+                $shopifyService = app(\App\Services\ShopifyService::class);
+                $rawOrders = $shopifyService->fetchOrders($shop);
+
+                foreach ($rawOrders as $raw) {
+                    $customerId = null;
+                    if (!empty($raw['customer'])) {
+                        $rawCust = $raw['customer'];
+                        $custObj = Customer::updateOrCreate(
+                            [
+                                'shop_id' => $shop->id,
+                                'shopify_customer_id' => (string) $rawCust['id'],
+                            ],
+                            [
+                                'first_name' => $rawCust['first_name'] ?? '',
+                                'last_name' => $rawCust['last_name'] ?? '',
+                                'email' => $rawCust['email'] ?? '',
+                                'phone' => $rawCust['phone'] ?? null,
+                                'billing_address' => $rawCust['default_address'] ?? [],
+                                'shipping_address' => $rawCust['default_address'] ?? [],
+                            ]
+                        );
+                        $customerId = $custObj->id;
+                    }
+
+                    Order::updateOrCreate(
+                        [
+                            'shop_id' => $shop->id,
+                            'shopify_order_id' => (string) $raw['id'],
+                        ],
+                        [
+                            'customer_id' => $customerId,
+                            'order_number' => (string) ($raw['order_number'] ?? $raw['name'] ?? $raw['id']),
+                            'financial_status' => $raw['financial_status'] ?? 'pending',
+                            'fulfillment_status' => $raw['fulfillment_status'] ?? 'unfulfilled',
+                            'subtotal' => $raw['subtotal_price'] ?? 0.00,
+                            'discount_total' => $raw['total_discounts'] ?? 0.00,
+                            'shipping_total' => !empty($raw['shipping_lines']) ? array_sum(array_column($raw['shipping_lines'], 'price')) : 0.00,
+                            'tax_total' => $raw['total_tax'] ?? 0.00,
+                            'total_price' => $raw['total_price'] ?? 0.00,
+                            'currency' => $raw['currency'] ?? 'USD',
+                            'line_items' => $raw['line_items'] ?? [],
+                            'notes' => $raw['note'] ?? null,
+                            'order_date' => !empty($raw['created_at']) ? \Carbon\Carbon::parse($raw['created_at']) : now(),
+                        ]
+                    );
+                }
+
+                $orders = Order::with(['customer', 'invoice'])
+                    ->where('shop_id', $shop->id)
+                    ->latest()
+                    ->take(50)
+                    ->get();
+            } catch (\Exception $e) {
+                Log::warning('Could not fetch existing Shopify orders for list view', [
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
 
         $zohoConnection = $shop->zohoConnection;
 

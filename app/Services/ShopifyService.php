@@ -10,12 +10,10 @@ class ShopifyService
 {
     public function getValidAccessToken(Shop $shop): string
     {
-        if (
-            $shop->access_token &&
-            $shop->access_token_expires_at &&
-            now()->lt($shop->access_token_expires_at)
-        ) {
-            return $shop->access_token;
+        if ($shop->access_token) {
+            if (!$shop->access_token_expires_at || now()->lt($shop->access_token_expires_at)) {
+                return $shop->access_token;
+            }
         }
 
         if ($shop->refresh_token) {
@@ -459,6 +457,211 @@ GRAPHQL;
             'quantity' => $safeQuantity,
             'response' => $data,
         ];
+    }
+
+    /**
+     * Fetch orders from Shopify Admin GraphQL API.
+     */
+    public function fetchOrders(Shop $shop, int $limit = 50): array
+    {
+        $token = $this->getValidAccessToken($shop);
+
+        $query = <<<'GRAPHQL'
+query fetchOrders($first: Int!) {
+    orders(first: $first, sortKey: CREATED_AT, reverse: true) {
+        nodes {
+            id
+            name
+            createdAt
+            currencyCode
+            subtotalPriceSet { shopMoney { amount } }
+            totalDiscountsSet { shopMoney { amount } }
+            totalTaxSet { shopMoney { amount } }
+            totalPriceSet { shopMoney { amount } }
+            displayFinancialStatus
+            displayFulfillmentStatus
+            note
+            customer {
+                id
+                firstName
+                lastName
+                email
+                defaultAddress {
+                    address1
+                    city
+                    province
+                    zip
+                    country
+                }
+            }
+            lineItems(first: 50) {
+                nodes {
+                    id
+                    title
+                    quantity
+                    originalUnitPriceSet { shopMoney { amount } }
+                    variant {
+                        id
+                        sku
+                    }
+                }
+            }
+        }
+    }
+}
+GRAPHQL;
+
+        $response = Http::withHeaders([
+            'X-Shopify-Access-Token' => $token,
+            'Content-Type' => 'application/json',
+        ])->post("https://{$shop->shop_domain}/admin/api/2026-07/graphql.json", [
+            'query' => $query,
+            'variables' => ['first' => $limit],
+        ]);
+
+        if (!$response->successful()) {
+            Log::error('Failed to fetch Shopify orders via GraphQL', [
+                'shop' => $shop->shop_domain,
+                'status' => $response->status(),
+                'body' => $response->body(),
+            ]);
+
+            if ($response->status() === 403) {
+                $shop->update(['scope' => null]);
+            }
+
+            throw new \Exception("Failed to fetch Shopify orders (HTTP {$response->status()}): {$response->body()}");
+        }
+
+        $data = $response->json();
+        if (!empty($data['errors'])) {
+            Log::error('GraphQL errors fetching orders', ['errors' => $data['errors']]);
+            throw new \Exception('GraphQL errors fetching orders: ' . json_encode($data['errors']));
+        }
+
+        $nodes = $data['data']['orders']['nodes'] ?? [];
+        $orders = [];
+
+        foreach ($nodes as $node) {
+            $numericId = preg_replace('/[^0-9]/', '', $node['id'] ?? '');
+            $custNode = $node['customer'] ?? null;
+            $customer = null;
+            if ($custNode) {
+                $custNumericId = preg_replace('/[^0-9]/', '', $custNode['id'] ?? '');
+                $customer = [
+                    'id' => $custNumericId,
+                    'first_name' => $custNode['firstName'] ?? '',
+                    'last_name' => $custNode['lastName'] ?? '',
+                    'email' => $custNode['email'] ?? '',
+                    'phone' => $custNode['phone'] ?? null,
+                    'default_address' => $custNode['defaultAddress'] ?? [],
+                ];
+            }
+
+            $lineItems = [];
+            foreach ($node['lineItems']['nodes'] ?? [] as $li) {
+                $lineItems[] = [
+                    'id' => preg_replace('/[^0-9]/', '', $li['id'] ?? ''),
+                    'title' => $li['title'] ?? '',
+                    'quantity' => $li['quantity'] ?? 1,
+                    'price' => $li['originalUnitPriceSet']['shopMoney']['amount'] ?? '0.00',
+                    'sku' => $li['variant']['sku'] ?? '',
+                    'variant_id' => !empty($li['variant']['id']) ? preg_replace('/[^0-9]/', '', $li['variant']['id']) : null,
+                ];
+            }
+
+            $orders[] = [
+                'id' => $numericId,
+                'name' => $node['name'] ?? "#{$numericId}",
+                'order_number' => $numericId,
+                'created_at' => $node['createdAt'] ?? null,
+                'currency' => $node['currencyCode'] ?? 'USD',
+                'subtotal_price' => $node['subtotalPriceSet']['shopMoney']['amount'] ?? '0.00',
+                'total_discounts' => $node['totalDiscountsSet']['shopMoney']['amount'] ?? '0.00',
+                'total_tax' => $node['totalTaxSet']['shopMoney']['amount'] ?? '0.00',
+                'total_price' => $node['totalPriceSet']['shopMoney']['amount'] ?? '0.00',
+                'financial_status' => strtolower($node['displayFinancialStatus'] ?? 'pending'),
+                'fulfillment_status' => strtolower($node['displayFulfillmentStatus'] ?? 'unfulfilled'),
+                'note' => $node['note'] ?? null,
+                'customer' => $customer,
+                'line_items' => $lineItems,
+            ];
+        }
+
+        return $orders;
+    }
+
+    /**
+     * Fetch customers from Shopify Admin GraphQL API.
+     */
+    public function fetchCustomers(Shop $shop, int $limit = 50): array
+    {
+        $token = $this->getValidAccessToken($shop);
+
+        $query = <<<'GRAPHQL'
+query fetchCustomers($first: Int!) {
+    customers(first: $first) {
+        nodes {
+            id
+            firstName
+            lastName
+            email
+            defaultAddress {
+                address1
+                city
+                province
+                zip
+                country
+            }
+        }
+    }
+}
+GRAPHQL;
+
+        $response = Http::withHeaders([
+            'X-Shopify-Access-Token' => $token,
+            'Content-Type' => 'application/json',
+        ])->post("https://{$shop->shop_domain}/admin/api/2026-07/graphql.json", [
+            'query' => $query,
+            'variables' => ['first' => $limit],
+        ]);
+
+        if (!$response->successful()) {
+            Log::error('Failed to fetch Shopify customers via GraphQL', [
+                'shop' => $shop->shop_domain,
+                'status' => $response->status(),
+                'body' => $response->body(),
+            ]);
+
+            if ($response->status() === 403) {
+                $shop->update(['scope' => null]);
+            }
+
+            throw new \Exception("Failed to fetch Shopify customers (HTTP {$response->status()}): {$response->body()}");
+        }
+
+        $data = $response->json();
+        if (!empty($data['errors'])) {
+            Log::error('GraphQL errors fetching customers', ['errors' => $data['errors']]);
+            throw new \Exception('GraphQL errors fetching customers: ' . json_encode($data['errors']));
+        }
+
+        $nodes = $data['data']['customers']['nodes'] ?? [];
+        $customers = [];
+
+        foreach ($nodes as $node) {
+            $numericId = preg_replace('/[^0-9]/', '', $node['id'] ?? '');
+            $customers[] = [
+                'id' => $numericId,
+                'first_name' => $node['firstName'] ?? '',
+                'last_name' => $node['lastName'] ?? '',
+                'email' => $node['email'] ?? '',
+                'phone' => $node['phone'] ?? null,
+                'default_address' => $node['defaultAddress'] ?? [],
+            ];
+        }
+
+        return $customers;
     }
 
     /**

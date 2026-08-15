@@ -13,7 +13,8 @@ class ShopifyAuthenticate
 {
     public function __construct(
         private ShopifyService $shopifyService
-    ) {}
+    ) {
+    }
 
     public function handle(
         Request $request,
@@ -176,24 +177,28 @@ class ShopifyAuthenticate
 
             /*
             |--------------------------------------------------------------------------
-            | Exchange App Bridge ID token only when necessary
+            | Exchange App Bridge ID token when necessary or when scopes missing
             |--------------------------------------------------------------------------
-            |
-            | If we don't have a valid stored Shopify token,
-            | exchange the current App Bridge token.
-            |
             */
+
+            $hasRequiredScopes = $shop && $shop->scope &&
+                str_contains($shop->scope, 'read_orders') &&
+                str_contains($shop->scope, 'read_customers');
 
             if (
                 !$shop ||
                 !$shop->access_token ||
-                !$shop->access_token_expires_at ||
-                now()->gte($shop->access_token_expires_at)
+                !$hasRequiredScopes ||
+                ($shop->access_token_expires_at && now()->gte($shop->access_token_expires_at))
             ) {
-                $shop = $this->shopifyService->exchangeToken(
-                    $shopDomain,
-                    $token
-                );
+                try {
+                    $shop = $this->shopifyService->exchangeToken(
+                        $shopDomain,
+                        $token
+                    );
+                } catch (\Throwable $e) {
+                    Log::warning('Token exchange in middleware failed', ['error' => $e->getMessage()]);
+                }
             }
 
             /*

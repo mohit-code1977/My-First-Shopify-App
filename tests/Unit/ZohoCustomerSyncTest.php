@@ -397,4 +397,41 @@ class ZohoCustomerSyncTest extends TestCase {
             'shopify_customer_id' => 'gid://shopify/Customer/9003',
         ]);
     }
+
+    public function test_fetch_customers_success() {
+        Http::fake([
+            'https://customer-test.myshopify.com/admin/api/2026-07/graphql.json*' => Http::response([
+                'data' => [
+                    'customers' => [
+                        'nodes' => [
+                            [
+                                'id' => 'gid://shopify/Customer/1001',
+                                'firstName' => 'John',
+                                'lastName' => 'Doe',
+                                'email' => 'john@example.com',
+                            ],
+                        ],
+                    ],
+                ],
+            ], 200),
+        ]);
+
+        $shopifyService = new \App\Services\ShopifyService();
+        $customers = $shopifyService->fetchCustomers($this->shop);
+        $this->assertCount(1, $customers);
+        $this->assertEquals('John', $customers[0]['first_name']);
+        $this->assertNull($customers[0]['phone']);
+    }
+
+    public function test_fetch_customers_failure_throws_exception() {
+        Http::fake([
+            'https://customer-test.myshopify.com/admin/api/2026-07/graphql.json*' => Http::response([
+                'errors' => '[API] Access denied',
+            ], 403),
+        ]);
+
+        $shopifyService = new \App\Services\ShopifyService();
+        $this->expectException(\Exception::class);
+        $shopifyService->fetchCustomers($this->shop);
+    }
 }

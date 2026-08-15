@@ -28,6 +28,7 @@ Route::middleware('auth')->group(function () {
 
 require __DIR__ . '/auth.php';
 Route::get('/install', [ShopifyAuthController::class, 'install']);
+Route::get('/auth/install', [ShopifyAuthController::class, 'install']);
 Route::get('/auth/callback', [ShopifyAuthController::class, 'callback']);
 
 Route::get('/zoho/callback', [ZohoAuthController::class, 'callback']);
