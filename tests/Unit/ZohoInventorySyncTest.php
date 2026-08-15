@@ -680,4 +680,141 @@ class ZohoInventorySyncTest extends TestCase {
                 $request->data()['line_items'][0]['quantity_adjusted'] === 35;
         });
     }
+
+    public function test_sync_zoho_inventory_to_shopify_success()
+    {
+        $product = Product::create([
+            'shop_id' => $this->shop->id,
+            'shopify_product_id' => 'gid://shopify/Product/800',
+            'title' => 'Zoho to Shopify Sync Product',
+            'handle' => 'zoho-to-shopify-sync-product',
+        ]);
+
+        $variant = ProductVariant::create([
+            'product_id' => $product->id,
+            'shopify_variant_id' => 'gid://shopify/ProductVariant/8001',
+            'shopify_inventory_item_id' => 'gid://shopify/InventoryItem/90008',
+            'title' => 'Default',
+            'price' => '100.00',
+            'inventory_quantity' => 10,
+            'zoho_item_id' => 'zoho_item_800',
+        ]);
+
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/items/zoho_item_800*' => Http::response([
+                'code' => 0,
+                'item' => [
+                    'item_id' => 'zoho_item_800',
+                    'actual_available_stock' => 50,
+                ],
+            ], 200),
+            "https://{$this->shop->shop_domain}/admin/api/2026-07/graphql.json" => Http::response([
+                'data' => [
+                    'locations' => [
+                        'nodes' => [
+                            [
+                                'id' => 'gid://shopify/Location/888',
+                                'name' => 'Primary Location',
+                                'isPrimary' => true,
+                                'isActive' => true,
+                            ],
+                        ],
+                    ],
+                    'inventorySetQuantities' => [
+                        'inventoryAdjustmentGroup' => ['id' => 'adj_group_123'],
+                        'userErrors' => [],
+                    ],
+                ],
+            ], 200),
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncZohoInventoryToShopify($variant);
+
+        $this->assertTrue($result['success']);
+        $this->assertEquals(50, $result['zoho_quantity']);
+        $this->assertEquals(50, $result['shopify_quantity']);
+        $this->assertEquals(50, $variant->fresh()->inventory_quantity);
+    }
+
+    public function test_sync_zoho_inventory_to_shopify_prevents_overselling_by_clamping_negative_stock()
+    {
+        $product = Product::create([
+            'shop_id' => $this->shop->id,
+            'shopify_product_id' => 'gid://shopify/Product/801',
+            'title' => 'Negative Stock Product',
+            'handle' => 'negative-stock-product',
+        ]);
+
+        $variant = ProductVariant::create([
+            'product_id' => $product->id,
+            'shopify_variant_id' => 'gid://shopify/ProductVariant/8011',
+            'shopify_inventory_item_id' => 'gid://shopify/InventoryItem/90009',
+            'title' => 'Default',
+            'price' => '50.00',
+            'inventory_quantity' => 5,
+            'zoho_item_id' => 'zoho_item_801',
+        ]);
+
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/items/zoho_item_801*' => Http::response([
+                'code' => 0,
+                'item' => [
+                    'item_id' => 'zoho_item_801',
+                    'actual_available_stock' => -10, // Negative stock in Zoho
+                ],
+            ], 200),
+            "https://{$this->shop->shop_domain}/admin/api/2026-07/graphql.json" => Http::response([
+                'data' => [
+                    'locations' => [
+                        'nodes' => [
+                            [
+                                'id' => 'gid://shopify/Location/888',
+                                'name' => 'Primary Location',
+                                'isPrimary' => true,
+                                'isActive' => true,
+                            ],
+                        ],
+                    ],
+                    'inventorySetQuantities' => [
+                        'inventoryAdjustmentGroup' => ['id' => 'adj_group_456'],
+                        'userErrors' => [],
+                    ],
+                ],
+            ], 200),
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncZohoInventoryToShopify($variant);
+
+        $this->assertTrue($result['success']);
+        $this->assertEquals(-10, $result['zoho_quantity']);
+        $this->assertEquals(0, $result['shopify_quantity']); // Clamped to 0 to prevent overselling
+        $this->assertEquals(0, $variant->fresh()->inventory_quantity);
+    }
+
+    public function test_sync_zoho_inventory_to_shopify_skipped_when_unmapped()
+    {
+        $product = Product::create([
+            'shop_id' => $this->shop->id,
+            'shopify_product_id' => 'gid://shopify/Product/802',
+            'title' => 'Unmapped Product',
+            'handle' => 'unmapped-product',
+        ]);
+
+        $variant = ProductVariant::create([
+            'product_id' => $product->id,
+            'shopify_variant_id' => 'gid://shopify/ProductVariant/8021',
+            'title' => 'Default',
+            'price' => '10.00',
+            'inventory_quantity' => 5,
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncZohoInventoryToShopify($variant);
+
+        $this->assertFalse($result['success']);
+        $this->assertTrue($result['skipped']);
+    }
 }
+
