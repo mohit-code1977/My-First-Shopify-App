@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Head } from "@inertiajs/react";
+import ZohoLayout from "@/Layouts/ZohoLayout";
 
 export default function Settings({ shop, zohoConnection, host }) {
     const [shopData, setShopData] = useState(shop || {});
@@ -81,44 +81,14 @@ export default function Settings({ shop, zohoConnection, host }) {
     };
 
     return (
-        <>
-            <Head title="Settings" />
-
-            <div className="zoho-page">
-                {/* HEADER */}
-
-                <header className="zoho-header">
-                    <div className="zoho-header-left">
-                        <div className="zoho-brand-mark">Z</div>
-
-                        <div>
-                            <div className="zoho-header-title">
-                                Zoho Books Integration
-                            </div>
-
-                            <div className="zoho-header-subtitle">
-                                Shopify Store:{" "}
-                                {shopData?.shop_domain || "Unknown store"}
-                            </div>
-                        </div>
-                    </div>
-
-                    <div
-                        className={
-                            connected
-                                ? "connection-badge"
-                                : "connection-badge disconnected"
-                        }
-                    >
-                        <span className="connection-dot" />
-
-                        {connected ? "Connected" : "Not Connected"}
-                    </div>
-                </header>
-
-                {/* CONTENT */}
-
-                <main className="zoho-content">
+        <ZohoLayout
+            title="Settings | Zoho Books Integration"
+            shop={shopData}
+            zohoConnected={connected}
+            host={host}
+            activePage="settings"
+        >
+            <main className="zoho-content" style={{ padding: 0 }}>
                     <section className="page-intro">
                         <div>
                             <span className="eyebrow">CONFIGURATION</span>
@@ -316,10 +286,20 @@ export default function Settings({ shop, zohoConnection, host }) {
                                                         response.ok &&
                                                         data.redirect_url
                                                     ) {
-                                                        window.open(
+                                                        const width = 600;
+                                                        const height = 700;
+                                                        const left = Math.max(0, Math.floor((window.screen.width - width) / 2));
+                                                        const top = Math.max(0, Math.floor((window.screen.height - height) / 2));
+
+                                                        const popup = window.open(
                                                             data.redirect_url,
-                                                            "_top",
+                                                            "ZohoOAuthPopup",
+                                                            `width=${width},height=${height},left=${left},top=${top},scrollbars=yes,status=yes,resizable=yes`
                                                         );
+
+                                                        if (!popup || popup.closed || typeof popup.closed === "undefined") {
+                                                            window.open(data.redirect_url, "_top");
+                                                        }
                                                     } else {
                                                         alert(
                                                             data.error ||
@@ -418,8 +398,6 @@ export default function Settings({ shop, zohoConnection, host }) {
                         </section>
                     </div>
                 </main>
-            </div>
-
             {showDisconnectModal && (
                 <div className="confirm-modal-overlay">
                     <div className="confirm-modal">
@@ -460,6 +438,6 @@ export default function Settings({ shop, zohoConnection, host }) {
                     </div>
                 </div>
             )}
-        </>
+        </ZohoLayout>
     );
 }

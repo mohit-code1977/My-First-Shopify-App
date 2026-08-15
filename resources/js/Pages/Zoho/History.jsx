@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Head } from "@inertiajs/react";
+import ZohoLayout from "@/Layouts/ZohoLayout";
 
 export default function History({
     shop,
@@ -7,6 +7,7 @@ export default function History({
     zohoConnected = false,
     pendingProducts = 0,
     filters = {},
+    host = "",
 }) {
     const [shopData, setShopData] = useState(shop || {});
     const [historiesState, setHistoriesState] = useState(histories || { data: [], total: 0 });
@@ -202,48 +203,14 @@ export default function History({
     */
 
     return (
-        <>
-            <Head title="Activity Logs" />
-
-            <div className="zoho-page">
-                {/* =====================================================
-                    HEADER
-                ====================================================== */}
-
-                <header className="zoho-header">
-                    <div className="zoho-header-left">
-                        <div className="zoho-brand-mark">Z</div>
-
-                        <div>
-                            <div className="zoho-header-title">
-                                Zoho Books Integration
-                            </div>
-
-                            <div className="zoho-header-subtitle">
-                                Shopify Store:{" "}
-                                {shopData?.shop_domain || "Unknown store"}
-                            </div>
-                        </div>
-                    </div>
-
-                    <div
-                        className={
-                            zohoConn
-                                ? "connection-badge"
-                                : "connection-badge disconnected"
-                        }
-                    >
-                        <span className="connection-dot" />
-
-                        {zohoConn ? "Connected" : "Not Connected"}
-                    </div>
-                </header>
-
-                {/* =====================================================
-                    CONTENT
-                ====================================================== */}
-
-                <main className="zoho-content">
+        <ZohoLayout
+            title="Sync History | Zoho Books Integration"
+            shop={shopData}
+            zohoConnected={zohoConn}
+            host={host}
+            activePage="history"
+        >
+            <main className="zoho-content" style={{ padding: 0 }}>
                     {/* PAGE HEADER */}
 
                     <section className="page-intro history-page-intro">
@@ -652,7 +619,6 @@ export default function History({
                         </div>
                     )}
                 </main>
-            </div>
-        </>
+        </ZohoLayout>
     );
 }
