@@ -176,20 +176,11 @@ class ShopifyAuthController extends Controller
             ]
         );
 
-        // Register Shopify webhooks
+        // Register all Shopify webhooks
         try {
-            $this->shopifyService->registerProductUpdateWebhook($shopModel);
+            $this->shopifyService->registerAllWebhooks($shopModel);
         } catch (\Throwable $e) {
-            Log::error('Shopify products/update webhook registration failed', [
-                'shop' => $shop,
-                'error' => $e->getMessage(),
-            ]);
-        }
-
-        try {
-            $this->shopifyService->registerInventoryLevelUpdateWebhook($shopModel);
-        } catch (\Throwable $e) {
-            Log::error('Shopify inventory_levels/update webhook registration failed', [
+            Log::error('Shopify webhooks registration failed', [
                 'shop' => $shop,
                 'error' => $e->getMessage(),
             ]);

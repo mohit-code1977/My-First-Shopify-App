@@ -10,7 +10,9 @@ export default function History({
     host = "",
 }) {
     const [shopData, setShopData] = useState(shop || {});
-    const [historiesState, setHistoriesState] = useState(histories || { data: [], total: 0 });
+    const [historiesState, setHistoriesState] = useState(
+        histories || { data: [], total: 0 },
+    );
     const [zohoConn, setZohoConn] = useState(zohoConnected);
     const [pendingCount, setPendingCount] = useState(pendingProducts);
     const [loading, setLoading] = useState(true);
@@ -20,7 +22,11 @@ export default function History({
     const [search, setSearch] = useState(filters.search || "");
     const [statusFilter, setStatusFilter] = useState(filters.status || "all");
 
-    const loadData = async (page = 1, searchQuery = search, statusVal = statusFilter) => {
+    const loadData = async (
+        page = 1,
+        searchQuery = search,
+        statusVal = statusFilter,
+    ) => {
         setLoading(true);
         try {
             const token = await window.shopify?.idToken();
@@ -33,13 +39,18 @@ export default function History({
                 search: searchQuery,
                 status: statusVal,
             });
-            const response = await fetch(`/api/zoho/sync/history?${params.toString()}`, { headers });
+            const response = await fetch(
+                `/api/zoho/sync/history?${params.toString()}`,
+                { headers },
+            );
             const data = await response.json();
             if (response.ok && data.success) {
                 if (data.shop) setShopData(data.shop);
                 if (data.histories) setHistoriesState(data.histories);
-                if (typeof data.zohoConnected === "boolean") setZohoConn(data.zohoConnected);
-                if (typeof data.pendingProducts === "number") setPendingCount(data.pendingProducts);
+                if (typeof data.zohoConnected === "boolean")
+                    setZohoConn(data.zohoConnected);
+                if (typeof data.pendingProducts === "number")
+                    setPendingCount(data.pendingProducts);
             }
         } catch (error) {
             console.error("Failed to load history data:", error);
@@ -104,17 +115,44 @@ export default function History({
         };
     };
 
-    const getProductTitle = (history) =>
-        history?.product_variant?.product?.title ||
-        history?.product_title ||
-        "Unknown Product";
+    const getProductTitle = (history) => {
+        if (history?.payment) {
+            return `Payment #${history.payment.payment_reference || history.payment.shopify_transaction_id || history.payment.id}`;
+        }
+        if (history?.invoice) {
+            return `Invoice #${history.invoice.zoho_invoice_id || history.invoice.id}`;
+        }
+        if (history?.order) {
+            return `Order ${history.order.name || `#${history.order.order_number}`}`;
+        }
+        return (
+            history?.product_variant?.product?.title ||
+            history?.product_title ||
+            "Item Sync"
+        );
+    };
 
-    const getVariantTitle = (history) =>
-        history?.product_variant?.title ||
-        history?.variant_title ||
-        "Default Variant";
+    const getVariantTitle = (history) => {
+        if (history?.payment) {
+            const orderName = history.order?.name || (history.order?.order_number ? `#${history.order.order_number}` : `Order #${history.payment.order_id}`);
+            return `${orderName} • $${parseFloat(history.payment.amount || 0).toFixed(2)}`;
+        }
+        if (history?.invoice || history?.order) {
+            const cust = history.order?.customer;
+            return cust ? `Customer: ${cust.first_name} ${cust.last_name}` : "Guest Customer";
+        }
+        return (
+            history?.product_variant?.title ||
+            history?.variant_title ||
+            "Default Variant"
+        );
+    };
 
     const getZohoId = (history) =>
+        history?.zoho_payment_id ??
+        history?.payment?.zoho_payment_id ??
+        history?.zoho_invoice_id ??
+        history?.invoice?.zoho_invoice_id ??
         history?.zoho_item_id ??
         history?.product_variant?.zoho_item_id ??
         history?.zoho_id ??
@@ -145,11 +183,6 @@ export default function History({
     |--------------------------------------------------------------------------
     | Dynamic page metrics
     |--------------------------------------------------------------------------
-    |
-    | "Total Records" comes from the paginator.
-    | Other metrics are based on the currently loaded page only.
-    | We don't pretend the frontend knows the complete DB totals.
-    |--------------------------------------------------------------------------
     */
 
     const metrics = useMemo(() => {
@@ -175,32 +208,14 @@ export default function History({
 
     const hasActiveFilters = Boolean(search.trim()) || statusFilter !== "all";
 
-    /*
-    |--------------------------------------------------------------------------
-    | Reset filters
-    |--------------------------------------------------------------------------
-    */
-
     const clearFilters = () => {
         setSearch("");
         setStatusFilter("all");
     };
 
-    /*
-    |--------------------------------------------------------------------------
-    | Refresh
-    |--------------------------------------------------------------------------
-    */
-
     const refreshPage = () => {
         loadData(historiesState?.current_page || 1, search, statusFilter);
     };
-
-    /*
-    |--------------------------------------------------------------------------
-    | Render
-    |--------------------------------------------------------------------------
-    */
 
     return (
         <ZohoLayout
@@ -211,414 +226,326 @@ export default function History({
             activePage="history"
         >
             <main className="zoho-content" style={{ padding: 0 }}>
-                    {/* PAGE HEADER */}
+                {/* PAGE HEADER */}
 
-                    <section className="page-intro history-page-intro">
+                <section className="page-intro history-page-intro">
+                    <div>
+                        <span className="eyebrow">ACTIVITY</span>
+
+                        <h1>Activity Logs</h1>
+
+                        <p>
+                            Monitor Shopify to Zoho Books synchronization activity and results.
+                        </p>
+                    </div>
+
+                    <button
+                        type="button"
+                        className="history-refresh-btn"
+                        onClick={refreshPage}
+                    >
+                        <span>↻</span>
+                        Refresh
+                    </button>
+                </section>
+
+                {/* METRICS */}
+
+                <section className="history-metrics">
+                    <div className="history-metric-card">
+                        <div className="history-metric-icon neutral">#</div>
+
                         <div>
-                            <span className="eyebrow">ACTIVITY</span>
+                            <span>Total Records</span>
+                            <strong>{metrics.total}</strong>
+                        </div>
+                    </div>
 
-                            <h1>Activity Logs</h1>
+                    <div className="history-metric-card">
+                        <div className="history-metric-icon success">✓</div>
+
+                        <div>
+                            <span>Synced Items</span>
+                            <strong>{metrics.success}</strong>
+                        </div>
+                    </div>
+
+                    <div className="history-metric-card">
+                        <div className="history-metric-icon warning">!</div>
+
+                        <div>
+                            <span>Pending Catalog</span>
+                            <strong>{metrics.pending}</strong>
+                        </div>
+                    </div>
+
+                    <div className="history-metric-card">
+                        <div className="history-metric-icon error">✕</div>
+
+                        <div>
+                            <span>Failed Logs</span>
+                            <strong>{metrics.failed}</strong>
+                        </div>
+                    </div>
+                </section>
+
+                {/* FILTERS */}
+
+                <section className="history-filters-card">
+                    <div className="history-search-group">
+                        <input
+                            type="text"
+                            className="history-search-input"
+                            placeholder="Search by title, SKU, order #, payment reference, or Zoho ID..."
+                            value={search}
+                            onChange={(e) => setSearch(e.target.value)}
+                        />
+
+                        {search && (
+                            <button
+                                type="button"
+                                className="history-search-clear"
+                                onClick={() => setSearch("")}
+                            >
+                                ✕
+                            </button>
+                        )}
+                    </div>
+
+                    <div className="history-filter-chips">
+                        {[
+                            { label: "All", value: "all" },
+                            { label: "Synced", value: "synced" },
+                            { label: "Pending", value: "pending" },
+                            { label: "Failed", value: "failed" },
+                        ].map((chip) => (
+                            <button
+                                key={chip.value}
+                                type="button"
+                                className={`history-chip ${
+                                    statusFilter === chip.value ? "active" : ""
+                                }`}
+                                onClick={() => setStatusFilter(chip.value)}
+                            >
+                                {chip.label}
+                            </button>
+                        ))}
+                    </div>
+                </section>
+
+                {/* TABLE */}
+
+                <section className="history-table-section">
+                    {loading && historyData.length === 0 ? (
+                        <div style={{ textAlign: "center", padding: "40px", color: "#616a75" }}>
+                            Loading sync history...
+                        </div>
+                    ) : historyData.length === 0 ? (
+                        <div className="empty-history-card">
+                            <div className="empty-history-icon">📋</div>
+
+                            <strong>No synchronization logs found</strong>
 
                             <p>
-                                Monitor Shopify to Zoho Books synchronization
-                                activity and results.
+                                {hasActiveFilters
+                                    ? "Try changing your search or status filter."
+                                    : "Your synchronization activity will appear here."}
                             </p>
-                        </div>
-
-                        <button
-                            type="button"
-                            className="history-refresh-btn"
-                            onClick={refreshPage}
-                        >
-                            <span>↻</span>
-                            Refresh
-                        </button>
-                    </section>
-
-                    {/* =================================================
-                        METRICS
-                    ================================================== */}
-
-                    <section className="history-metrics">
-                        <div className="history-metric-card">
-                            <div className="history-metric-icon neutral">#</div>
-
-                            <div>
-                                <span>Total Records</span>
-
-                                <strong>{metrics.total}</strong>
-                            </div>
-                        </div>
-
-                        <div className="history-metric-card">
-                            <div className="history-metric-icon success">✓</div>
-
-                            <div>
-                                <span>Success on Page</span>
-
-                                <strong className="metric-success">
-                                    {metrics.success}
-                                </strong>
-                            </div>
-                        </div>
-
-                        <div className="history-metric-card">
-                            <div className="history-metric-icon danger">!</div>
-
-                            <div>
-                                <span>Failed on Page</span>
-
-                                <strong className="metric-danger">
-                                    {metrics.failed}
-                                </strong>
-                            </div>
-                        </div>
-
-                        <div className="history-metric-card">
-                            <div className="history-metric-icon warning">○</div>
-
-                            <div>
-                                <span>Pending Variants</span>
-
-                                <strong className="metric-warning">
-                                    {metrics.pending}
-                                </strong>
-                            </div>
-                        </div>
-                    </section>
-
-                    {/* =================================================
-                        ACTIVITY CARD
-                    ================================================== */}
-
-                    <section className="history-card modern-history-card">
-                        {/* CARD HEADER */}
-
-                        <div className="modern-history-header">
-                            <div>
-                                <h2>Synchronization Activity</h2>
-
-                                <p>
-                                    {historyData.length}{" "}
-                                    {historyData.length === 1
-                                        ? "record"
-                                        : "records"}{" "}
-                                    currently displayed
-                                </p>
-                            </div>
 
                             {hasActiveFilters && (
                                 <button
                                     type="button"
-                                    className="clear-history-filter-btn"
+                                    className="empty-clear-btn"
                                     onClick={clearFilters}
                                 >
                                     Clear filters
                                 </button>
                             )}
                         </div>
+                    ) : (
+                        <div className="table-wrapper history-modern-table-wrapper">
+                            <table className="history-table modern-history-table">
+                                <thead>
+                                    <tr>
+                                        <th>ITEM / REFERENCE</th>
 
-                        {/* =================================================
-                            FILTER TOOLBAR
-                        ================================================== */}
+                                        <th>ACTION</th>
 
-                        <div className="history-filter-toolbar">
-                            <div className="history-search-wrap">
-                                <span className="history-search-icon">⌕</span>
+                                        <th>STATUS</th>
 
-                                <input
-                                    type="text"
-                                    className="history-search-input"
-                                    placeholder="Search product, SKU, Zoho ID or message..."
-                                    value={search}
-                                    onChange={(event) =>
-                                        setSearch(event.target.value)
-                                    }
-                                />
+                                        <th>ZOHO REFERENCE</th>
 
-                                {search && (
-                                    <button
-                                        type="button"
-                                        className="history-search-clear"
-                                        onClick={() => setSearch("")}
-                                        aria-label="Clear search"
-                                    >
-                                        ×
-                                    </button>
-                                )}
-                            </div>
+                                        <th>MESSAGE</th>
 
-                            <select
-                                className="history-status-select"
-                                value={statusFilter}
-                                onChange={(event) =>
-                                    setStatusFilter(event.target.value)
-                                }
-                            >
-                                <option value="all">All Status</option>
+                                        <th>DATE</th>
+                                    </tr>
+                                </thead>
 
-                                <option value="success">Success</option>
+                                <tbody>
+                                    {historyData.map((history) => {
+                                        const productTitle =
+                                            getProductTitle(history);
 
-                                <option value="failed">Failed</option>
+                                        const variantTitle =
+                                            getVariantTitle(history);
 
-                                <option value="pending">Pending</option>
+                                        const status = getStatus(history);
 
-                                <option value="skipped">Skipped</option>
-                            </select>
-                        </div>
+                                        const action = getAction(history);
 
-                        {/* =================================================
-                            FILTER SUMMARY
-                        ================================================== */}
+                                        const zohoId = getZohoId(history);
 
-                        <div className="history-filter-summary">
-                            <span>
-                                {hasActiveFilters
-                                    ? "Filtered activity"
-                                    : "All synchronization activity"}
-                            </span>
+                                        const message =
+                                            history?.message || "No message";
 
-                            {hasActiveFilters && (
-                                <span className="history-active-filter">
-                                    Active filters
-                                </span>
-                            )}
-                        </div>
+                                        const date = formatDate(
+                                            history?.created_at,
+                                        );
 
-                        {/* =================================================
-                            EMPTY
-                        ================================================== */}
+                                        return (
+                                            <tr key={history.id}>
+                                                {/* ITEM */}
 
-                        {historyData.length === 0 ? (
-                            <div className="empty-state modern-history-empty">
-                                <div className="empty-state-icon">↻</div>
+                                                <td>
+                                                    <div className="product-cell history-product-cell">
+                                                        <div className="product-avatar history-product-avatar">
+                                                            {productTitle
+                                                                .charAt(0)
+                                                                .toUpperCase()}
+                                                        </div>
 
-                                <strong>
-                                    {hasActiveFilters
-                                        ? "No matching activity"
-                                        : "No synchronization history"}
-                                </strong>
-
-                                <p>
-                                    {hasActiveFilters
-                                        ? "Try changing your search or status filter."
-                                        : "Your synchronization activity will appear here."}
-                                </p>
-
-                                {hasActiveFilters && (
-                                    <button
-                                        type="button"
-                                        className="empty-clear-btn"
-                                        onClick={clearFilters}
-                                    >
-                                        Clear filters
-                                    </button>
-                                )}
-                            </div>
-                        ) : (
-                            <div className="table-wrapper history-modern-table-wrapper">
-                                <table className="history-table modern-history-table">
-                                    <thead>
-                                        <tr>
-                                            <th>PRODUCT</th>
-
-                                            <th>ACTION</th>
-
-                                            <th>STATUS</th>
-
-                                            <th>ZOHO ITEM</th>
-
-                                            <th>MESSAGE</th>
-
-                                            <th>DATE</th>
-                                        </tr>
-                                    </thead>
-
-                                    <tbody>
-                                        {historyData.map((history) => {
-                                            const productTitle =
-                                                getProductTitle(history);
-
-                                            const variantTitle =
-                                                getVariantTitle(history);
-
-                                            const status = getStatus(history);
-
-                                            const action = getAction(history);
-
-                                            const zohoId = getZohoId(history);
-
-                                            const message =
-                                                history?.message ||
-                                                "No message";
-
-                                            const date = formatDate(
-                                                history?.created_at,
-                                            );
-
-                                            return (
-                                                <tr key={history.id}>
-                                                    {/* PRODUCT */}
-
-                                                    <td>
-                                                        <div className="product-cell history-product-cell">
-                                                            <div className="product-avatar history-product-avatar">
-                                                                {productTitle
-                                                                    .charAt(0)
-                                                                    .toUpperCase()}
+                                                        <div className="history-product-info">
+                                                            <div className="product-name">
+                                                                {productTitle}
                                                             </div>
 
-                                                            <div className="history-product-info">
-                                                                <div className="product-name">
-                                                                    {
-                                                                        productTitle
-                                                                    }
-                                                                </div>
-
-                                                                <div className="variant-name">
-                                                                    {
-                                                                        variantTitle
-                                                                    }
-                                                                </div>
+                                                            <div className="variant-name">
+                                                                {variantTitle}
                                                             </div>
                                                         </div>
-                                                    </td>
+                                                    </div>
+                                                </td>
 
-                                                    {/* ACTION */}
+                                                {/* ACTION */}
 
-                                                    <td>
+                                                <td>
+                                                    <span
+                                                        className={`history-action ${action}`}
+                                                    >
+                                                        {formatLabel(action)}
+                                                    </span>
+                                                </td>
+
+                                                {/* STATUS */}
+
+                                                <td>
+                                                    <span
+                                                        className={`status ${status}`}
+                                                    >
+                                                        <span className="status-dot" />
+
+                                                        {formatLabel(status)}
+                                                    </span>
+                                                </td>
+
+                                                {/* ZOHO ID */}
+
+                                                <td>
+                                                    {zohoId ? (
                                                         <span
-                                                            className={`history-action ${action}`}
+                                                            className="zoho-id history-zoho-id"
+                                                            title={String(zohoId)}
                                                         >
-                                                            {formatLabel(
-                                                                action,
-                                                            )}
+                                                            {zohoId}
                                                         </span>
-                                                    </td>
-
-                                                    {/* STATUS */}
-
-                                                    <td>
-                                                        <span
-                                                            className={`status ${status}`}
-                                                        >
-                                                            <span className="status-dot" />
-
-                                                            {formatLabel(
-                                                                status,
-                                                            )}
+                                                    ) : (
+                                                        <span className="zoho-id empty">
+                                                            Not Created
                                                         </span>
-                                                    </td>
+                                                    )}
+                                                </td>
 
-                                                    {/* ZOHO ID */}
+                                                {/* MESSAGE */}
 
-                                                    <td>
-                                                        {zohoId ? (
-                                                            <span
-                                                                className="zoho-id history-zoho-id"
-                                                                title={String(
-                                                                    zohoId,
-                                                                )}
-                                                            >
-                                                                {zohoId}
-                                                            </span>
-                                                        ) : (
-                                                            <span className="empty-id">
-                                                                —
-                                                            </span>
-                                                        )}
-                                                    </td>
+                                                <td>
+                                                    <div
+                                                        className="history-message"
+                                                        title={message}
+                                                    >
+                                                        {message}
+                                                    </div>
+                                                </td>
 
-                                                    {/* MESSAGE */}
+                                                {/* DATE */}
 
-                                                    <td>
-                                                        <span
-                                                            className={
-                                                                status ===
-                                                                "failed"
-                                                                    ? "history-message failed-message"
-                                                                    : "history-message"
-                                                            }
-                                                            title={message}
-                                                        >
-                                                            {message}
-                                                        </span>
-                                                    </td>
+                                                <td>
+                                                    <div className="history-date">
+                                                        {date.date}
+                                                    </div>
 
-                                                    {/* DATE */}
-
-                                                    <td>
-                                                        <div className="history-date">
-                                                            {date.date}
-                                                        </div>
-
-                                                        <div className="history-time">
-                                                            {date.time}
-                                                        </div>
-                                                    </td>
-                                                </tr>
-                                            );
-                                        })}
-                                    </tbody>
-                                </table>
-                            </div>
-                        )}
-                    </section>
-
-                    {/* =================================================
-                        PAGINATION
-                    ================================================== */}
-
-                    {historiesState?.last_page > 1 && (
-                        <div className="history-pagination">
-                            <div className="history-pagination-info">
-                                Page <strong>{historiesState.current_page}</strong>{" "}
-                                of <strong>{historiesState.last_page}</strong>
-                            </div>
-
-                            <div className="pagination">
-                                {historiesState.links.map((link, index) => (
-                                    <button
-                                        key={index}
-                                        type="button"
-                                        disabled={!link.url}
-                                        className={
-                                            link.active
-                                                ? "pagination-btn active"
-                                                : "pagination-btn"
-                                        }
-                                        onClick={() => {
-                                            if (!link.url) {
-                                                return;
-                                            }
-
-                                            try {
-                                                const url = new URL(
-                                                    link.url,
-                                                    window.location.origin,
-                                                );
-                                                const pageParam =
-                                                    url.searchParams.get(
-                                                        "page",
-                                                    ) || 1;
-                                                loadData(
-                                                    pageParam,
-                                                    search,
-                                                    statusFilter,
-                                                );
-                                            } catch {
-                                                loadData(1, search, statusFilter);
-                                            }
-                                        }}
-                                        dangerouslySetInnerHTML={{
-                                            __html: link.label,
-                                        }}
-                                    />
-                                ))}
-                            </div>
+                                                    <div className="history-time">
+                                                        {date.time}
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
                         </div>
                     )}
-                </main>
+                </section>
+
+                {/* PAGINATION */}
+
+                {historiesState?.last_page > 1 && (
+                    <div className="history-pagination">
+                        <div className="history-pagination-info">
+                            Page <strong>{historiesState.current_page}</strong>{" "}
+                            of <strong>{historiesState.last_page}</strong>
+                        </div>
+
+                        <div className="pagination">
+                            {historiesState.links.map((link, index) => (
+                                <button
+                                    key={index}
+                                    type="button"
+                                    disabled={!link.url}
+                                    className={
+                                        link.active
+                                            ? "pagination-btn active"
+                                            : "pagination-btn"
+                                    }
+                                    onClick={() => {
+                                        if (!link.url) {
+                                            return;
+                                        }
+
+                                        try {
+                                            const url = new URL(
+                                                link.url,
+                                                window.location.origin,
+                                            );
+                                            const pageParam =
+                                                url.searchParams.get("page") || 1;
+                                            loadData(
+                                                pageParam,
+                                                search,
+                                                statusFilter,
+                                            );
+                                        } catch {
+                                            loadData(1, search, statusFilter);
+                                        }
+                                    }}
+                                    dangerouslySetInnerHTML={{
+                                        __html: link.label,
+                                    }}
+                                />
+                            ))}
+                        </div>
+                    </div>
+                )}
+            </main>
         </ZohoLayout>
     );
 }

@@ -15,6 +15,22 @@ api_version = "2026-07"
 topics = ["products/update"]
 uri = "/webhooks/products"
 
+[[webhooks.subscriptions]]
+topics = ["inventory_levels/update"]
+uri = "/webhooks/inventory-levels"
+
+[[webhooks.subscriptions]]
+topics = ["customers/update"]
+uri = "/webhooks/customers"
+
+[[webhooks.subscriptions]]
+topics = ["orders/create", "orders/updated"]
+uri = "/webhooks/orders"
+
+[[webhooks.subscriptions]]
+topics = ["order_transactions/create"]
+uri = "/webhooks/order-transactions"
+
 [access.admin]
 direct_api_mode = "offline"
 embedded_app_direct_api_access = true

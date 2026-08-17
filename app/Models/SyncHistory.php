@@ -10,10 +10,12 @@ class SyncHistory extends Model {
         'product_variant_id',
         'order_id',
         'invoice_id',
+        'payment_id',
         'action',
         'status',
         'zoho_item_id',
         'zoho_invoice_id',
+        'zoho_payment_id',
         'message',
         'synced_at',
     ];
@@ -36,5 +38,9 @@ class SyncHistory extends Model {
 
     public function invoice() {
         return $this->belongsTo(Invoice::class);
+    }
+
+    public function payment() {
+        return $this->belongsTo(Payment::class);
     }
 }

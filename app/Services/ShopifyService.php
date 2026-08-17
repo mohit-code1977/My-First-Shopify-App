@@ -2,6 +2,8 @@
 
 namespace App\Services;
 
+use App\Models\Customer;
+use App\Models\Order;
 use App\Models\Shop;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -233,17 +235,86 @@ GRAPHQL;
         }
 
         $existingWebhooks = $checkData['data']['webhookSubscriptions']['nodes'] ?? [];
+        $existingWebhookToUpdate = null;
 
         foreach ($existingWebhooks as $webhook) {
-            if ($webhook['topic'] === $topic && $webhook['uri'] === $webhookUrl) {
-                return [
-                    'success' => true,
-                    'created' => false,
-                    'message' => "{$label} webhook already exists.",
-                    'webhook_id' => $webhook['id'],
-                    'uri' => $webhook['uri'],
-                ];
+            if ($webhook['topic'] === $topic) {
+                if ($webhook['uri'] === $webhookUrl) {
+                    return [
+                        'success' => true,
+                        'created' => false,
+                        'message' => "{$label} webhook already exists.",
+                        'webhook_id' => $webhook['id'],
+                        'uri' => $webhook['uri'],
+                    ];
+                }
+                $existingWebhookToUpdate = $webhook;
+                break;
             }
+        }
+
+        if ($existingWebhookToUpdate) {
+            $updateMutation = <<<'GRAPHQL'
+mutation webhookSubscriptionUpdate(
+    $id: ID!,
+    $webhookSubscription: WebhookSubscriptionInput!
+) {
+    webhookSubscriptionUpdate(
+        id: $id,
+        webhookSubscription: $webhookSubscription
+    ) {
+        webhookSubscription {
+            id
+            topic
+            uri
+        }
+        userErrors {
+            field
+            message
+        }
+    }
+}
+GRAPHQL;
+
+            $updateResponse = Http::withHeaders([
+                'X-Shopify-Access-Token' => $accessToken,
+                'Content-Type' => 'application/json',
+            ])->post(
+                "https://{$shop->shop_domain}/admin/api/2026-07/graphql.json",
+                [
+                    'query' => $updateMutation,
+                    'variables' => [
+                        'id' => $existingWebhookToUpdate['id'],
+                        'webhookSubscription' => [
+                            'uri' => $webhookUrl,
+                        ],
+                    ],
+                ]
+            );
+
+            if (!$updateResponse->successful()) {
+                throw new \Exception(
+                    "Failed to update Shopify webhook for {$label}: " . $updateResponse->body()
+                );
+            }
+
+            $updateData = $updateResponse->json();
+            $updateResult = $updateData['data']['webhookSubscriptionUpdate'] ?? null;
+
+            if (!$updateResult || !empty($updateResult['userErrors'])) {
+                throw new \Exception(
+                    "Shopify webhook update errors for {$label}: " . json_encode($updateResult['userErrors'] ?? [])
+                );
+            }
+
+            return [
+                'success' => true,
+                'created' => false,
+                'updated' => true,
+                'message' => "{$label} webhook updated successfully.",
+                'webhook_id' => $updateResult['webhookSubscription']['id'] ?? null,
+                'uri' => $updateResult['webhookSubscription']['uri'] ?? $webhookUrl,
+            ];
         }
 
         $mutation = <<<'GRAPHQL'
@@ -592,6 +663,181 @@ GRAPHQL;
     }
 
     /**
+     * Fetch a single order by ID from Shopify Admin GraphQL API and sync it locally & to Zoho.
+     */
+    public function fetchAndSyncOrder(Shop $shop, string $orderId): ?Order
+    {
+        $token = $this->getValidAccessToken($shop);
+        $numericId = preg_replace('/[^0-9]/', '', $orderId);
+        $gid = str_starts_with($orderId, 'gid://')
+            ? $orderId
+            : "gid://shopify/Order/{$numericId}";
+
+        if (empty($numericId)) {
+            return null;
+        }
+
+        $query = <<<'GRAPHQL'
+query fetchSingleOrder($id: ID!) {
+    order(id: $id) {
+        id
+        name
+        createdAt
+        currencyCode
+        subtotalPriceSet { shopMoney { amount } }
+        totalDiscountsSet { shopMoney { amount } }
+        totalTaxSet { shopMoney { amount } }
+        totalPriceSet { shopMoney { amount } }
+        displayFinancialStatus
+        displayFulfillmentStatus
+        note
+        customer {
+            id
+            firstName
+            lastName
+            email
+            phone
+            defaultAddress {
+                address1
+                city
+                province
+                zip
+                country
+            }
+        }
+        lineItems(first: 50) {
+            nodes {
+                id
+                title
+                quantity
+                originalUnitPriceSet { shopMoney { amount } }
+                variant {
+                    id
+                    sku
+                }
+            }
+        }
+    }
+}
+GRAPHQL;
+
+        $response = Http::withHeaders([
+            'X-Shopify-Access-Token' => $token,
+            'Content-Type' => 'application/json',
+        ])->post("https://{$shop->shop_domain}/admin/api/2026-07/graphql.json", [
+            'query' => $query,
+            'variables' => ['id' => $gid],
+        ]);
+
+        if (!$response->successful()) {
+            Log::error("Failed to fetch Shopify order {$gid} via GraphQL", [
+                'shop' => $shop->shop_domain,
+                'status' => $response->status(),
+                'body' => $response->body(),
+            ]);
+            return null;
+        }
+
+        $data = $response->json();
+        $node = $data['data']['order'] ?? null;
+
+        if (!$node) {
+            Log::warning("Shopify order {$gid} not found in GraphQL response.");
+            return null;
+        }
+
+        $custNode = $node['customer'] ?? null;
+        $customerId = null;
+        if ($custNode) {
+            $rawCustId = (string) ($custNode['id'] ?? '');
+            $shopifyCustId = str_starts_with($rawCustId, 'gid://')
+                ? $rawCustId
+                : "gid://shopify/Customer/" . preg_replace('/[^0-9]/', '', $rawCustId);
+
+            $defaultAddr = $custNode['defaultAddress'] ?? [];
+            $customer = Customer::updateOrCreate(
+                [
+                    'shop_id' => $shop->id,
+                    'shopify_customer_id' => $shopifyCustId,
+                ],
+                [
+                    'first_name' => $custNode['firstName'] ?? null,
+                    'last_name' => $custNode['lastName'] ?? null,
+                    'email' => $custNode['email'] ?? null,
+                    'phone' => $custNode['phone'] ?? ($defaultAddr['phone'] ?? null),
+                    'billing_address' => $defaultAddr,
+                    'shipping_address' => $defaultAddr,
+                ]
+            );
+
+            $customerId = $customer->id;
+
+            if ($shop->zohoConnection) {
+                try {
+                    $zohoService = new ZohoService($shop);
+                    $zohoService->syncCustomer($customer);
+                } catch (\Throwable $e) {
+                    Log::warning("fetchAndSyncOrder: Customer sync pre-step failed for order customer ID {$customer->id}: " . $e->getMessage());
+                }
+            }
+        }
+
+        $lineItems = [];
+        foreach ($node['lineItems']['nodes'] ?? [] as $li) {
+            $lineItems[] = [
+                'line_item_id' => preg_replace('/[^0-9]/', '', $li['id'] ?? ''),
+                'title' => $li['title'] ?? '',
+                'quantity' => (int) ($li['quantity'] ?? 1),
+                'price' => (float) ($li['originalUnitPriceSet']['shopMoney']['amount'] ?? 0.00),
+                'sku' => $li['variant']['sku'] ?? '',
+                'variant_id' => !empty($li['variant']['id']) ? preg_replace('/[^0-9]/', '', $li['variant']['id']) : null,
+            ];
+        }
+
+        $subtotal = (float) ($node['subtotalPriceSet']['shopMoney']['amount'] ?? 0.00);
+        $discountTotal = (float) ($node['totalDiscountsSet']['shopMoney']['amount'] ?? 0.00);
+        $taxTotal = (float) ($node['totalTaxSet']['shopMoney']['amount'] ?? 0.00);
+        $totalPrice = (float) ($node['totalPriceSet']['shopMoney']['amount'] ?? 0.00);
+
+        $order = Order::updateOrCreate(
+            [
+                'shop_id' => $shop->id,
+                'shopify_order_id' => $gid,
+            ],
+            [
+                'customer_id' => $customerId,
+                'order_number' => $node['name'] ?? "#{$numericId}",
+                'order_date' => !empty($node['createdAt']) ? date('Y-m-d H:i:s', strtotime($node['createdAt'])) : now(),
+                'currency' => $node['currencyCode'] ?? 'USD',
+                'subtotal' => $subtotal,
+                'discount_total' => $discountTotal,
+                'tax_total' => $taxTotal,
+                'total_price' => $totalPrice,
+                'financial_status' => strtolower($node['displayFinancialStatus'] ?? 'pending'),
+                'fulfillment_status' => strtolower($node['displayFulfillmentStatus'] ?? 'unfulfilled'),
+                'line_items' => $lineItems,
+                'notes' => $node['note'] ?? null,
+            ]
+        );
+
+        if ($shop->zohoConnection) {
+            try {
+                $zohoService = new ZohoService($shop);
+                $zohoService->syncOrder($order);
+                try {
+                    $zohoService->syncInvoice($order);
+                } catch (\Throwable $invEx) {
+                    Log::warning("fetchAndSyncOrder: Zoho invoice auto-sync warning for order ID {$order->id}: " . $invEx->getMessage());
+                }
+            } catch (\Throwable $e) {
+                Log::error("fetchAndSyncOrder: Zoho order sync failed for order ID {$order->id}: " . $e->getMessage());
+            }
+        }
+
+        return $order->fresh();
+    }
+
+    /**
      * Fetch customers from Shopify Admin GraphQL API.
      */
     public function fetchCustomers(Shop $shop, int $limit = 50): array
@@ -704,17 +950,60 @@ GRAPHQL;
     }
 
     /**
-     * Register all order-related webhooks (orders/create & orders/updated).
+     * Register order_transactions/create webhook.
+     */
+    public function registerOrderTransactionCreateWebhook(Shop $shop): array
+    {
+        return $this->registerWebhookSubscription(
+            $shop,
+            'ORDER_TRANSACTIONS_CREATE',
+            '/webhooks/order-transactions',
+            'Order transaction create'
+        );
+    }
+
+    /**
+     * Register all order-related webhooks (orders/create, orders/updated, order_transactions/create).
      */
     public function registerOrderWebhooks(Shop $shop): array
     {
         $createResult = $this->registerOrderCreateWebhook($shop);
         $updateResult = $this->registerOrderUpdateWebhook($shop);
+        $txnResult = $this->registerOrderTransactionCreateWebhook($shop);
 
         return [
-            'success' => ($createResult['success'] ?? false) && ($updateResult['success'] ?? false),
+            'success' => ($createResult['success'] ?? false) && ($updateResult['success'] ?? false) && ($txnResult['success'] ?? false),
             'create' => $createResult,
             'update' => $updateResult,
+            'transaction' => $txnResult,
+        ];
+    }
+
+    /**
+     * Register all required Shopify webhooks for the application.
+     */
+    public function registerAllWebhooks(Shop $shop): array
+    {
+        $productResult = $this->registerProductUpdateWebhook($shop);
+        $inventoryResult = $this->registerInventoryLevelUpdateWebhook($shop);
+        $customerResult = $this->registerCustomerUpdateWebhook($shop);
+        $orderCreateResult = $this->registerOrderCreateWebhook($shop);
+        $orderUpdateResult = $this->registerOrderUpdateWebhook($shop);
+        $txnResult = $this->registerOrderTransactionCreateWebhook($shop);
+
+        return [
+            'success' => ($productResult['success'] ?? false)
+                && ($inventoryResult['success'] ?? false)
+                && ($customerResult['success'] ?? false)
+                && ($orderCreateResult['success'] ?? false)
+                && ($orderUpdateResult['success'] ?? false)
+                && ($txnResult['success'] ?? false),
+            'product' => $productResult,
+            'inventory' => $inventoryResult,
+            'customer' => $customerResult,
+            'order_create' => $orderCreateResult,
+            'order_update' => $orderUpdateResult,
+            'transaction' => $txnResult,
         ];
     }
 }

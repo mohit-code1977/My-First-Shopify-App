@@ -79,6 +79,12 @@ Route::middleware(['shopify.auth'])->group(function () {
     Route::post('/zoho/sync-invoice', [ZohoSyncController::class, 'syncInvoice'])
         ->name('zoho.sync.invoice');
 
+    Route::post('/zoho/sync-payment', [ZohoSyncController::class, 'syncPayment'])
+        ->name('zoho.sync.payment');
+
+    Route::post('/zoho/settings/payment-gateways', [ZohoSyncController::class, 'savePaymentSettings'])
+        ->name('zoho.settings.payment-gateways');
+
     Route::post('/zoho/settings/disconnect', [ZohoSyncController::class, 'disconnect'])
         ->name('zoho.settings.disconnect');
 });
@@ -94,5 +100,8 @@ Route::post('/webhooks/customers', [ShopifyWebhookController::class, 'customersU
 
 Route::post('/webhooks/orders', [ShopifyWebhookController::class, 'ordersUpdate'])
     ->name('shopify.webhooks.orders');
+
+Route::post('/webhooks/order-transactions', [ShopifyWebhookController::class, 'orderTransactionsCreate'])
+    ->name('shopify.webhooks.order_transactions');
 
 

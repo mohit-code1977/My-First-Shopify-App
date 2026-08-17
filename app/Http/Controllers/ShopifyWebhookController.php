@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Customer;
 use App\Models\Order;
+use App\Models\Payment;
 use App\Models\Product;
 use App\Models\ProductVariant;
 use App\Models\Shop;
@@ -774,6 +775,270 @@ class ShopifyWebhookController extends Controller {
     public function ordersCreate(Request $request)
     {
         return $this->ordersUpdate($request);
+    }
+
+    /**
+     * Handle Shopify order_transactions/create webhook.
+     */
+    public function orderTransactionsCreate(Request $request)
+    {
+        Log::info('Shopify order_transactions/create webhook received', [
+            'shop' => $request->header('X-Shopify-Shop-Domain'),
+            'webhook_id' => $request->header('X-Shopify-Webhook-Id'),
+            'topic' => $request->header('X-Shopify-Topic'),
+            'payload' => $request->getContent(),
+        ]);
+
+        /*
+        |--------------------------------------------------------------------------
+        | 1. Verify HMAC Signature
+        |--------------------------------------------------------------------------
+        */
+        $hmacHeader = $request->header('X-Shopify-Hmac-SHA256');
+
+        if (empty($hmacHeader)) {
+            return response()->json(['error' => 'Missing HMAC signature.'], 401);
+        }
+
+        $secret = config('services.shopify.api_secret') ?? env('SHOPIFY_API_SECRET');
+
+        if (empty($secret)) {
+            return response()->json(['error' => 'Shopify API secret not configured.'], 500);
+        }
+
+        $calculatedHmac = base64_encode(hash_hmac('sha256', $request->getContent(), $secret, true));
+
+        if (!hash_equals($calculatedHmac, $hmacHeader)) {
+            return response()->json(['error' => 'Invalid HMAC signature.'], 401);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | 2. Validate Shop Domain & Resolve Tenant
+        |--------------------------------------------------------------------------
+        */
+        $shopDomain = $request->header('X-Shopify-Shop-Domain');
+
+        if (empty($shopDomain) || !is_string($shopDomain) || !preg_match('/^[a-zA-Z0-9][a-zA-Z0-9\-]*\.myshopify\.com$/', $shopDomain)) {
+            return response()->json(['error' => 'Invalid Shopify shop domain.'], 400);
+        }
+
+        $shop = Shop::where('shop_domain', $shopDomain)->first();
+
+        if (!$shop) {
+            return response()->json(['error' => 'Shop not found.'], 404);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | 3. Check Persistent Webhook Idempotency (Layer 1)
+        |--------------------------------------------------------------------------
+        */
+        $webhookId = $request->header('X-Shopify-Webhook-Id');
+
+        if (!empty($webhookId)) {
+            $alreadyProcessed = ShopifyProcessedWebhook::where('webhook_id', $webhookId)
+                ->where('shop_domain', $shopDomain)
+                ->exists();
+
+            if ($alreadyProcessed) {
+                Log::info("orderTransactionsCreate: Webhook ID {$webhookId} has already been processed for shop {$shopDomain}. Skipping.");
+                return response()->json(['message' => 'Webhook already processed.'], 200);
+            }
+
+            ShopifyProcessedWebhook::create([
+                'webhook_id' => $webhookId,
+                'shop_domain' => $shopDomain,
+                'topic' => $request->header('X-Shopify-Topic') ?? 'order_transactions/create',
+            ]);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | 4. Validate JSON Payload
+        |--------------------------------------------------------------------------
+        */
+        $payload = json_decode($request->getContent(), true);
+
+        if (empty($payload) || !is_array($payload) || (empty($payload['id']) && empty($payload['admin_graphql_api_id']))) {
+            return response()->json(['error' => 'Invalid order transaction payload.'], 400);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | 5. Extract & Normalize Transaction Data
+        |--------------------------------------------------------------------------
+        */
+        $rawTxnId = (string) ($payload['admin_graphql_api_id'] ?? $payload['id']);
+        $shopifyTxnId = str_starts_with($rawTxnId, 'gid://')
+            ? $rawTxnId
+            : "gid://shopify/OrderTransaction/{$rawTxnId}";
+
+        $rawOrderId = !empty($payload['order_id'])
+            ? (string) $payload['order_id']
+            : (!empty($payload['order']['id']) ? (string) $payload['order']['id'] : null);
+
+        $shopifyOrderId = null;
+        $numericOrderId = null;
+
+        if ($rawOrderId) {
+            $numericOrderId = preg_replace('/^gid:\/\/shopify\/Order\//', '', $rawOrderId);
+            $shopifyOrderId = str_starts_with($rawOrderId, 'gid://')
+                ? $rawOrderId
+                : "gid://shopify/Order/{$rawOrderId}";
+        }
+
+        $kind = strtolower(trim((string) ($payload['kind'] ?? '')));
+        $status = strtolower(trim((string) ($payload['status'] ?? '')));
+        $amount = (float) ($payload['amount'] ?? 0.00);
+        $currency = strtoupper(trim((string) ($payload['currency'] ?? 'USD')));
+        $gateway = $payload['gateway'] ?? 'shopify_payments';
+        $processedAtStr = $payload['processed_at'] ?? ($payload['created_at'] ?? null);
+        $paymentDate = !empty($processedAtStr) ? date('Y-m-d H:i:s', strtotime($processedAtStr)) : now();
+
+        /*
+        |--------------------------------------------------------------------------
+        | 6. Transaction Qualification Rules
+        |--------------------------------------------------------------------------
+        */
+        // Only SUCCESS status and 'sale' or 'capture' kinds qualify for payment recording
+        $qualifyingKinds = ['sale', 'capture'];
+
+        if ($status !== 'success' || !in_array($kind, $qualifyingKinds, true)) {
+            Log::info("orderTransactionsCreate: Transaction ID {$shopifyTxnId} with status '{$status}' and kind '{$kind}' does not qualify for Zoho customer payment. Skipping.");
+            return response()->json([
+                'message' => 'Transaction not eligible for payment synchronization.',
+                'shopify_transaction_id' => $shopifyTxnId,
+                'status' => $status,
+                'kind' => $kind,
+            ], 200);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | 7. Locate Local Order
+        |--------------------------------------------------------------------------
+        */
+        $orderCandidates = array_values(array_unique(array_filter([
+            $shopifyOrderId,
+            $rawOrderId,
+            $numericOrderId,
+            $numericOrderId ? "gid://shopify/Order/{$numericOrderId}" : null,
+        ])));
+
+        $order = null;
+        if (!empty($orderCandidates)) {
+            $order = Order::where('shop_id', $shop->id)
+                ->whereIn('shopify_order_id', $orderCandidates)
+                ->first();
+        }
+
+        if (!$order) {
+            try {
+                $shopifyService = new \App\Services\ShopifyService();
+                $targetOrderId = $shopifyOrderId ?? $rawOrderId;
+                if ($targetOrderId) {
+                    $order = $shopifyService->fetchAndSyncOrder($shop, $targetOrderId);
+                }
+            } catch (\Throwable $e) {
+                Log::warning("orderTransactionsCreate: Failed on-the-fly order fetch/sync for order {$rawOrderId}: " . $e->getMessage());
+            }
+
+            if (!$order && !empty($orderCandidates)) {
+                $order = Order::where('shop_id', $shop->id)
+                    ->whereIn('shopify_order_id', $orderCandidates)
+                    ->first();
+            }
+        }
+
+        if (!$order) {
+            Log::warning("orderTransactionsCreate: Local order not found for transaction {$shopifyTxnId} (Order ID: {$rawOrderId}).");
+            return response()->json([
+                'message' => 'Order not found locally for transaction. Payment sync deferred.',
+                'shopify_transaction_id' => $shopifyTxnId,
+                'shopify_order_id' => $shopifyOrderId,
+            ], 200);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | 8. Locate Local Invoice & Ensure Zoho Invoice Mapping
+        |--------------------------------------------------------------------------
+        */
+        $invoice = $order->invoice;
+
+        if (!$invoice && $shop->zohoConnection) {
+            try {
+                $zohoService = new ZohoService($shop);
+                $zohoService->syncInvoice($order);
+                $order->refresh();
+                $invoice = $order->invoice;
+            } catch (\Throwable $e) {
+                Log::warning("orderTransactionsCreate: Auto invoice sync attempt failed for order ID {$order->id}: " . $e->getMessage());
+            }
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | 9. Create or Update Local Payment (Layer 2 Idempotency)
+        |--------------------------------------------------------------------------
+        */
+        $numericTxnId = preg_replace('/^gid:\/\/shopify\/OrderTransaction\//', '', $shopifyTxnId);
+        $paymentReference = "TXN-{$numericTxnId}";
+
+        $payment = Payment::updateOrCreate(
+            [
+                'shop_id' => $shop->id,
+                'shopify_transaction_id' => $shopifyTxnId,
+            ],
+            [
+                'order_id' => $order->id,
+                'invoice_id' => $invoice?->id,
+                'shopify_order_id' => $order->shopify_order_id,
+                'payment_reference' => $paymentReference,
+                'amount' => $amount,
+                'currency' => $currency ?: ($order->currency ?? 'USD'),
+                'payment_date' => $paymentDate,
+                'payment_method' => $gateway,
+                'status' => Payment::STATUS_PAID,
+                'sync_status' => Payment::SYNC_STATUS_PENDING,
+                'gateway_data' => [
+                    'id' => $payload['id'] ?? null,
+                    'kind' => $kind,
+                    'status' => $status,
+                    'gateway' => $gateway,
+                    'test' => $payload['test'] ?? false,
+                ],
+            ]
+        );
+
+        /*
+        |--------------------------------------------------------------------------
+        | 10. Call Zoho Customer Payment Sync Service
+        |--------------------------------------------------------------------------
+        */
+        $synced = false;
+        $syncError = null;
+
+        if ($shop->zohoConnection) {
+            try {
+                $zohoService = new ZohoService($shop);
+                $result = $zohoService->syncPayment($payment);
+                $synced = true;
+            } catch (\Throwable $e) {
+                Log::error("orderTransactionsCreate: Zoho payment sync failed for payment ID {$payment->id}: " . $e->getMessage());
+                $syncError = $e->getMessage();
+            }
+        }
+
+        return response()->json([
+            'message' => 'Order transaction webhook processed successfully.',
+            'payment_id' => $payment->id,
+            'shopify_transaction_id' => $payment->shopify_transaction_id,
+            'zoho_payment_id' => $payment->zoho_payment_id,
+            'zoho_synced' => $synced,
+            'error' => $syncError,
+        ], 200);
     }
 }
 

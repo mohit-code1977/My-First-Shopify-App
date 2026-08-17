@@ -11,12 +11,14 @@ class Shop extends Model
         'access_token',
         'refresh_token',
         'scope',
+        'payment_gateway_settings',
         'access_token_expires_at',
     ];
 
     protected $casts = [
         'access_token' => 'encrypted',
         'refresh_token' => 'encrypted',
+        'payment_gateway_settings' => 'array',
         'access_token_expires_at' => 'datetime',
     ];
 
@@ -38,6 +40,11 @@ class Shop extends Model
     public function invoices()
     {
         return $this->hasMany(Invoice::class);
+    }
+
+    public function payments()
+    {
+        return $this->hasMany(Payment::class);
     }
 
     public function zohoConnection()

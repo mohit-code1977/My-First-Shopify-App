@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Customer;
 use App\Models\Invoice;
 use App\Models\Order;
+use App\Models\Payment;
 use App\Models\ProductVariant;
 use App\Models\Shop;
 use App\Models\ZohoConnection;
@@ -1930,6 +1931,391 @@ class ZohoService
             'sku' => $variant->sku,
             'price' => $variant->price,
         ]));
+    }
+
+    /**
+     * Fetch bank/deposit accounts from Zoho Books API v3.
+     */
+    public function fetchAccounts(): array {
+        try {
+            $accessToken = $this->getAccessToken();
+            $response = Http::withHeaders([
+                'Authorization' => "Zoho-oauthtoken {$accessToken}",
+            ])->get("{$this->connection->api_url}/books/v3/bankaccounts", [
+                'organization_id' => $this->connection->organization_id,
+            ]);
+
+            if ($response->successful()) {
+                $data = $response->json();
+                if (($data['code'] ?? -1) === 0 && !empty($data['bankaccounts']) && is_array($data['bankaccounts'])) {
+                    return array_map(function ($acc) {
+                        return [
+                            'account_id' => (string) ($acc['account_id'] ?? ''),
+                            'account_name' => (string) ($acc['account_name'] ?? 'Account ' . ($acc['account_id'] ?? '')),
+                            'account_type' => (string) ($acc['account_type'] ?? 'bank'),
+                        ];
+                    }, $data['bankaccounts']);
+                }
+            }
+        } catch (\Throwable $e) {
+            Log::warning('Failed to fetch Zoho bank accounts: ' . $e->getMessage());
+        }
+
+        return [
+            ['account_id' => 'undeposited_funds', 'account_name' => 'Undeposited Funds', 'account_type' => 'cash'],
+            ['account_id' => 'petty_cash', 'account_name' => 'Petty Cash', 'account_type' => 'cash'],
+            ['account_id' => 'primary_bank_account', 'account_name' => 'Primary Bank Account', 'account_type' => 'bank'],
+        ];
+    }
+
+    /**
+     * Resolve Shopify gateway to Zoho payment mode and deposit account.
+     */
+    public function getPaymentGatewayMapping(?string $gateway): array
+    {
+        $rawGateway = strtolower(trim((string) $gateway));
+
+        if ($this->shop && !empty($this->shop->payment_gateway_settings)) {
+            $shopSettings = $this->shop->payment_gateway_settings;
+            if (isset($shopSettings[$rawGateway]) && is_array($shopSettings[$rawGateway])) {
+                $custom = $shopSettings[$rawGateway];
+                if (!empty($custom['payment_mode'])) {
+                    return [
+                        'payment_mode' => strtolower(trim((string) $custom['payment_mode'])),
+                        'account_id' => !empty($custom['account_id']) ? (string) $custom['account_id'] : null,
+                    ];
+                }
+            }
+        }
+
+        $configured = config("services.zoho.payment_gateways.{$rawGateway}");
+        if (is_array($configured) && !empty($configured['payment_mode'])) {
+            $mode = strtolower(trim((string)$configured['payment_mode']));
+            $accountId = !empty($configured['account_id']) ? (string) $configured['account_id'] : null;
+            $requireAccount = !empty($configured['require_account_id']);
+
+            if ($requireAccount && empty($accountId)) {
+                throw new \Exception("Payment account ID is required for gateway '{$gateway}' but could not be resolved.");
+            }
+
+            return [
+                'payment_mode' => $mode,
+                'account_id' => $accountId,
+            ];
+        }
+
+        // Official documented Zoho Books REST API v3 payment_mode values:
+        // 'creditcard', 'paypal', 'cash', 'banktransfer', 'check', 'bankremittance', 'autotransaction', 'others'
+        $defaults = [
+            'shopify_payments' => ['payment_mode' => 'creditcard', 'account_id' => null],
+            'stripe' => ['payment_mode' => 'creditcard', 'account_id' => null],
+            'paypal' => ['payment_mode' => 'paypal', 'account_id' => null],
+            'cash_on_delivery' => ['payment_mode' => 'cash', 'account_id' => null],
+            'cod' => ['payment_mode' => 'cash', 'account_id' => null],
+            'manual' => ['payment_mode' => 'others', 'account_id' => null],
+            'bank_transfer' => ['payment_mode' => 'banktransfer', 'account_id' => null],
+            'wire' => ['payment_mode' => 'banktransfer', 'account_id' => null],
+            'ach' => ['payment_mode' => 'banktransfer', 'account_id' => null],
+            'check' => ['payment_mode' => 'check', 'account_id' => null],
+            'credit_card' => ['payment_mode' => 'creditcard', 'account_id' => null],
+        ];
+
+        if (!empty($rawGateway) && isset($defaults[$rawGateway])) {
+            return $defaults[$rawGateway];
+        }
+
+        if (empty($rawGateway)) {
+            return ['payment_mode' => 'creditcard', 'account_id' => null];
+        }
+
+        throw new \Exception("Unmapped payment gateway '{$gateway}'. Please configure a valid Zoho payment mode and account mapping.");
+    }
+
+    /**
+     * Find an existing Zoho Customer Payment by reference_number (for idempotency and crash recovery).
+     */
+    public function findZohoCustomerPaymentByReferenceNumber(string $refNumber): ?array
+    {
+        $trimmedRef = trim($refNumber);
+        if ($trimmedRef === '') {
+            return null;
+        }
+
+        try {
+            $response = $this->makeRequest('GET', '/books/v3/customerpayments', [
+                'reference_number' => $trimmedRef,
+            ]);
+
+            $payments = $response['customerpayments'] ?? ($response['payments'] ?? []);
+            foreach ($payments as $pay) {
+                if (!empty($pay['reference_number']) && strcasecmp(trim((string)$pay['reference_number']), $trimmedRef) === 0) {
+                    return $pay;
+                }
+            }
+        } catch (\Throwable $e) {
+            Log::warning("findZohoCustomerPaymentByReferenceNumber failed for ref '{$trimmedRef}': " . $e->getMessage());
+        }
+
+        return null;
+    }
+
+    /**
+     * Fetch a Customer Payment from Zoho Books by ID.
+     */
+    public function getCustomerPayment(string $zohoPaymentId): ?array
+    {
+        try {
+            $response = $this->makeRequest('GET', '/books/v3/customerpayments/' . $zohoPaymentId);
+            return $response['payment'] ?? ($response['customerpayment'] ?? null);
+        } catch (\Throwable $e) {
+            if ($this->isItemNotFoundException($e)) {
+                return null;
+            }
+            throw $e;
+        }
+    }
+
+    /**
+     * Create a Customer Payment in Zoho Books.
+     */
+    public function createCustomerPayment(array $payload): array
+    {
+        $response = $this->makeRequest('POST', '/books/v3/customerpayments', $payload);
+        return $response['payment'] ?? ($response['customerpayment'] ?? $response);
+    }
+
+    /**
+     * Synchronize a local Payment to Zoho Books as a Customer Payment.
+     */
+    public function syncPayment(Payment $payment): array
+    {
+        if ($payment->shop_id !== $this->shop->id) {
+            throw new \Exception("Payment #{$payment->id} does not belong to shop {$this->shop->shop_domain}");
+        }
+
+        $payment->unsetRelations();
+        $payment->refresh();
+        if ($payment->sync_status === Payment::SYNC_STATUS_SYNCED && !empty($payment->zoho_payment_id)) {
+            return [
+                'success' => true,
+                'created' => false,
+                'updated' => false,
+                'zoho_payment_id' => $payment->zoho_payment_id,
+                'payment_id' => $payment->id,
+                'message' => 'Payment already synchronized.',
+            ];
+        }
+
+        $payment->update([
+            'sync_status' => Payment::SYNC_STATUS_PROCESSING,
+            'error_message' => null,
+        ]);
+
+        try {
+            // 1. Resolve & Validate Order
+            $order = Order::where('shop_id', $this->shop->id)->find($payment->order_id) ?? $payment->order;
+
+            if (!$order) {
+                throw new \Exception("Cannot sync payment #{$payment->id}: Associated order is missing.");
+            }
+
+            $order->unsetRelations();
+            $order->refresh();
+
+            // 2. Resolve & Validate Invoice
+            $invoice = Invoice::where('shop_id', $this->shop->id)
+                ->where('order_id', $order->id)
+                ->first() ?? $order->invoice;
+
+            if (!$invoice || empty($invoice->zoho_invoice_id)) {
+                $this->syncInvoice($order);
+                $order->unsetRelations();
+                $order->refresh();
+                $invoice = Invoice::where('shop_id', $this->shop->id)
+                    ->where('order_id', $order->id)
+                    ->first() ?? $order->invoice;
+            }
+
+            if (!$invoice || empty($invoice->zoho_invoice_id)) {
+                throw new \Exception("Cannot sync payment #{$payment->id} for order #{$order->order_number}: Zoho Invoice ID is missing.");
+            }
+
+            // 3 & 4. Set payment.invoice_id and payment.zoho_invoice_id from Invoice & persist
+            $payment->invoice_id = $invoice->id;
+            $payment->zoho_invoice_id = $invoice->zoho_invoice_id;
+            $payment->save();
+
+            // 5. Resolve & Re-validate Customer Zoho contact mapping
+            $customer = null;
+            if ($order->customer_id) {
+                $customer = Customer::where('shop_id', $this->shop->id)->find($order->customer_id);
+            }
+            if (!$customer) {
+                $customer = $order->customer;
+            }
+
+            if (!$customer) {
+                throw new \Exception("Cannot sync payment #{$payment->id} for order #{$order->order_number}: Customer record missing.");
+            }
+
+            $customer->unsetRelations();
+            $customer->refresh();
+
+            if (empty($customer->zoho_contact_id)) {
+                $this->syncCustomer($customer);
+                $customer->unsetRelations();
+                $customer->refresh();
+            }
+
+            if (empty($customer->zoho_contact_id)) {
+                throw new \Exception("Cannot sync payment #{$payment->id} for order #{$order->order_number}: Customer sync to Zoho failed.");
+            }
+
+            // 4. Validate Amount & Currency
+            $amount = (float) $payment->amount;
+            if ($amount <= 0.00) {
+                throw new \Exception("Cannot sync payment #{$payment->id}: Invalid payment amount ({$amount}). Amount must be greater than 0.");
+            }
+
+            if (!empty($payment->currency) && !empty($invoice->currency)) {
+                if (strcasecmp(trim($payment->currency), trim($invoice->currency)) !== 0) {
+                    throw new \Exception("Cannot sync payment #{$payment->id}: Currency mismatch (Payment: {$payment->currency}, Invoice: {$invoice->currency}).");
+                }
+            }
+
+            // 5. Over-Allocation & Remaining Balance Validation
+            $alreadyAppliedAmount = (float) Payment::where('invoice_id', $invoice->id)
+                ->where('sync_status', Payment::SYNC_STATUS_SYNCED)
+                ->where('id', '!=', $payment->id)
+                ->sum('amount');
+            $invoiceTotal = (float) $invoice->amount;
+            $remainingBalance = max(0.00, $invoiceTotal - $alreadyAppliedAmount);
+
+            if ($amount > $remainingBalance + 0.001) {
+                throw new \Exception("Cannot sync payment #{$payment->id}: Payment amount ({$amount}) exceeds remaining invoice balance ({$remainingBalance}). Over-allocation is not supported.");
+            }
+
+            // 6. Resolve Payment Gateway Mapping & Account
+            $gatewayMapping = $this->getPaymentGatewayMapping($payment->payment_method);
+            $paymentMode = $gatewayMapping['payment_mode'];
+            $accountId = $gatewayMapping['account_id'] ?? null;
+
+            // 7. Resolve Payment Reference (Deterministic & Clamped to 100 chars)
+            $refNumber = $payment->payment_reference
+                ?? $payment->shopify_transaction_id
+                ?? "PAY-ORD-{$order->id}-{$payment->id}";
+
+            $refNumber = substr(trim((string)$refNumber), 0, 100);
+
+            if (empty($payment->payment_reference)) {
+                $payment->payment_reference = $refNumber;
+            }
+
+            // 8. Idempotency & Crash Recovery: Check existing local or Zoho payment
+            $zohoPaymentId = $payment->zoho_payment_id;
+            $created = false;
+            $updated = false;
+
+            if (empty($zohoPaymentId)) {
+                $existingZohoPayment = $this->findZohoCustomerPaymentByReferenceNumber($refNumber);
+                if ($existingZohoPayment && !empty($existingZohoPayment['payment_id'])) {
+                    $zohoPaymentId = (string) $existingZohoPayment['payment_id'];
+                    $updated = true;
+                    Log::info("syncPayment: Recovered existing Zoho payment ID {$zohoPaymentId} for payment #{$payment->id} via ref {$refNumber}.");
+                }
+            }
+
+            // 9. Create Customer Payment in Zoho if not already present
+            if (empty($zohoPaymentId)) {
+                $paymentDateStr = $payment->payment_date
+                    ? $payment->payment_date->format('Y-m-d')
+                    : date('Y-m-d');
+
+                $payload = [
+                    'customer_id' => $customer->zoho_contact_id,
+                    'payment_mode' => $paymentMode,
+                    'amount' => $amount,
+                    'date' => $paymentDateStr,
+                    'reference_number' => $refNumber,
+                    'invoices' => [
+                        [
+                            'invoice_id' => $invoice->zoho_invoice_id,
+                            'amount_applied' => $amount,
+                        ],
+                    ],
+                ];
+
+                if (!empty($accountId)) {
+                    $payload['account_id'] = $accountId;
+                }
+
+                $zohoResponse = $this->createCustomerPayment($payload);
+                $zohoPaymentId = (string) ($zohoResponse['payment_id'] ?? $zohoResponse['customerpayment_id'] ?? null);
+
+                if (empty($zohoPaymentId)) {
+                    throw new \Exception("Zoho did not return a payment_id when creating Customer Payment.");
+                }
+
+                $created = true;
+            }
+
+            // 10. Persist Local Payment State
+            $payment->update([
+                'invoice_id' => $invoice->id,
+                'zoho_payment_id' => $zohoPaymentId,
+                'zoho_invoice_id' => $invoice->zoho_invoice_id,
+                'payment_reference' => $refNumber,
+                'sync_status' => Payment::SYNC_STATUS_SYNCED,
+                'synced_at' => now(),
+                'error_message' => null,
+            ]);
+
+            // 11. Record Sync History
+            SyncHistory::create([
+                'shop_id' => $this->shop->id,
+                'order_id' => $order->id,
+                'invoice_id' => $invoice->id,
+                'payment_id' => $payment->id,
+                'action' => $created ? 'create' : 'synced',
+                'status' => 'success',
+                'zoho_payment_id' => $zohoPaymentId,
+                'zoho_invoice_id' => $invoice->zoho_invoice_id,
+                'message' => $created ? 'Customer payment created in Zoho Books.' : 'Customer payment synced/reconciled with Zoho Books.',
+                'synced_at' => now(),
+            ]);
+
+            return [
+                'success' => true,
+                'created' => $created,
+                'updated' => $updated,
+                'zoho_payment_id' => $zohoPaymentId,
+                'zoho_invoice_id' => $invoice->zoho_invoice_id,
+                'payment_id' => $payment->id,
+                'order_id' => $order->id,
+                'invoice_id' => $invoice->id,
+                'message' => $created ? 'Payment synchronized successfully.' : 'Payment reconciled successfully.',
+            ];
+
+        } catch (\Throwable $e) {
+            $payment->update([
+                'sync_status' => Payment::SYNC_STATUS_FAILED,
+                'error_message' => $e->getMessage(),
+            ]);
+
+            SyncHistory::create([
+                'shop_id' => $this->shop->id,
+                'order_id' => $payment->order_id ?? null,
+                'invoice_id' => $payment->invoice_id ?? null,
+                'payment_id' => $payment->id,
+                'action' => 'create',
+                'status' => 'failed',
+                'zoho_payment_id' => $payment->zoho_payment_id ?? null,
+                'message' => 'Zoho Payment sync failed: ' . $e->getMessage(),
+                'synced_at' => now(),
+            ]);
+
+            throw $e;
+        }
     }
 }
 

@@ -32,4 +32,8 @@ class Invoice extends Model {
     public function order() {
         return $this->belongsTo(Order::class);
     }
+
+    public function payments() {
+        return $this->hasMany(Payment::class);
+    }
 }

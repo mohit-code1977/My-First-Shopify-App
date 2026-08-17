@@ -15,11 +15,11 @@ use App\Models\ZohoConnection;
 use App\Models\Customer;
 use App\Models\Invoice;
 use App\Models\Order;
+use App\Models\Payment;
 use App\Models\Product;
 use Illuminate\Support\Facades\Log;
 
-class ZohoSyncController extends Controller
-{
+class ZohoSyncController extends Controller { 
     public function __construct(
         private ShopifyService $shopifyService
     ) {}
@@ -185,7 +185,7 @@ class ZohoSyncController extends Controller
         $orders = [];
 
         if ($shopModel) {
-            $orders = Order::with(['customer', 'invoice'])
+            $orders = Order::with(['customer', 'invoice', 'payments'])
                 ->where('shop_id', $shopModel->id)
                 ->latest()
                 ->take(50)
@@ -240,7 +240,7 @@ class ZohoSyncController extends Controller
                         );
                     }
 
-                    $orders = Order::with(['customer', 'invoice'])
+                    $orders = Order::with(['customer', 'invoice', 'payments'])
                         ->where('shop_id', $shopModel->id)
                         ->latest()
                         ->take(50)
@@ -384,7 +384,7 @@ class ZohoSyncController extends Controller
             ], 404);
         }
 
-        $orders = Order::with(['customer', 'invoice'])
+        $orders = Order::with(['customer', 'invoice', 'payments'])
             ->where('shop_id', $shop->id)
             ->latest()
             ->take(50)
@@ -439,7 +439,7 @@ class ZohoSyncController extends Controller
                     );
                 }
 
-                $orders = Order::with(['customer', 'invoice'])
+                $orders = Order::with(['customer', 'invoice', 'payments'])
                     ->where('shop_id', $shop->id)
                     ->latest()
                     ->take(50)
@@ -947,6 +947,94 @@ GRAPHQL;
         }
     }
 
+    public function syncPayment(Request $request): JsonResponse
+    {
+        $shop = $request->attributes->get('shop') ?? $this->resolveShopModel($request);
+
+        if (!$shop) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No Shopify shop installed.',
+            ], 404);
+        }
+
+        if (!$shop->zohoConnection) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Zoho is not connected.',
+            ], 409);
+        }
+
+        $validated = $request->validate([
+            'payment_id' => ['nullable', 'integer'],
+            'order_id' => ['nullable', 'integer'],
+        ]);
+
+        $payment = null;
+
+        if (!empty($validated['payment_id'])) {
+            $payment = Payment::where('id', $validated['payment_id'])
+                ->where('shop_id', $shop->id)
+                ->first();
+        } elseif (!empty($validated['order_id'])) {
+            $order = Order::where('id', $validated['order_id'])
+                ->where('shop_id', $shop->id)
+                ->first();
+
+            if ($order) {
+                $payment = Payment::where('order_id', $order->id)
+                    ->where('shop_id', $shop->id)
+                    ->latest()
+                    ->first();
+
+                if (!$payment && $order->invoice) {
+                    $payment = Payment::create([
+                        'shop_id' => $shop->id,
+                        'order_id' => $order->id,
+                        'invoice_id' => $order->invoice->id,
+                        'shopify_order_id' => $order->shopify_order_id,
+                        'shopify_transaction_id' => "gid://shopify/OrderTransaction/manual_{$order->id}_" . time(),
+                        'payment_reference' => "TXN-MANUAL-{$order->id}",
+                        'amount' => $order->total_price,
+                        'currency' => $order->currency ?? 'USD',
+                        'payment_date' => now(),
+                        'payment_method' => 'shopify_payments',
+                        'status' => Payment::STATUS_PAID,
+                        'sync_status' => Payment::SYNC_STATUS_PENDING,
+                    ]);
+                }
+            }
+        }
+
+        if (!$payment) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Payment record not found for sync.',
+            ], 404);
+        }
+
+        try {
+            $payment->unsetRelations();
+            $payment->refresh();
+
+            $zohoService = new ZohoService($shop);
+            $result = $zohoService->syncPayment($payment);
+
+            return response()->json([
+                'success' => true,
+                'message' => $result['message'] ?? 'Payment synchronized to Zoho successfully.',
+                'data' => $result,
+                'payment' => $payment->fresh(),
+            ]);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+                'payment' => $payment ? $payment->fresh() : null,
+            ], 500);
+        }
+    }
+
 
 
     private function fetchShopifyVariant(
@@ -1276,7 +1364,7 @@ GRAPHQL;
 
     public function historyData(Request $request): JsonResponse
     {
-        $shop = $request->attributes->get('shop');
+        $shop = $request->attributes->get('shop') ?? $this->resolveShopModel($request);
 
         if (!$shop) {
             return response()->json([
@@ -1290,6 +1378,9 @@ GRAPHQL;
 
         $histories = SyncHistory::with([
             'productVariant.product',
+            'order.customer',
+            'invoice',
+            'payment',
         ])
             ->where('shop_id', $shop->id)
             ->when($search !== '', function ($query) use ($search) {
@@ -1298,12 +1389,22 @@ GRAPHQL;
                         ->orWhere('status', 'like', "%{$search}%")
                         ->orWhere('message', 'like', "%{$search}%")
                         ->orWhere('zoho_item_id', 'like', "%{$search}%")
+                        ->orWhere('zoho_invoice_id', 'like', "%{$search}%")
+                        ->orWhere('zoho_payment_id', 'like', "%{$search}%")
                         ->orWhereHas('productVariant', function ($variantQuery) use ($search) {
                             $variantQuery->where('title', 'like', "%{$search}%")
                                 ->orWhere('sku', 'like', "%{$search}%");
                         })
                         ->orWhereHas('productVariant.product', function ($productQuery) use ($search) {
                             $productQuery->where('title', 'like', "%{$search}%");
+                        })
+                        ->orWhereHas('order', function ($orderQuery) use ($search) {
+                            $orderQuery->where('order_number', 'like', "%{$search}%");
+                        })
+                        ->orWhereHas('payment', function ($paymentQuery) use ($search) {
+                            $paymentQuery->where('payment_reference', 'like', "%{$search}%")
+                                ->orWhere('shopify_transaction_id', 'like', "%{$search}%")
+                                ->orWhere('zoho_payment_id', 'like', "%{$search}%");
                         });
                 });
             })
@@ -1368,7 +1469,7 @@ GRAPHQL;
 
     public function settingsData(Request $request): JsonResponse
     {
-        $shop = $request->attributes->get('shop');
+        $shop = $request->attributes->get('shop') ?? $this->resolveShopModel($request);
 
         if (!$shop) {
             return response()->json([
@@ -1378,6 +1479,36 @@ GRAPHQL;
         }
 
         $zohoConnection = $shop->zohoConnection;
+        $zohoAccounts = [];
+        if ($zohoConnection) {
+            try {
+                $zohoService = new ZohoService($shop);
+                $zohoAccounts = $zohoService->fetchAccounts();
+            } catch (\Throwable $e) {
+                Log::warning('Could not fetch Zoho accounts: ' . $e->getMessage());
+            }
+        }
+
+        $defaultGateways = [
+            'shopify_payments' => ['shopify_gateway' => 'shopify_payments', 'gateway_label' => 'Shopify Payments', 'payment_mode' => 'creditcard', 'account_id' => ''],
+            'stripe' => ['shopify_gateway' => 'stripe', 'gateway_label' => 'Stripe', 'payment_mode' => 'creditcard', 'account_id' => ''],
+            'paypal' => ['shopify_gateway' => 'paypal', 'gateway_label' => 'PayPal', 'payment_mode' => 'paypal', 'account_id' => ''],
+            'cash_on_delivery' => ['shopify_gateway' => 'cash_on_delivery', 'gateway_label' => 'Cash on Delivery', 'payment_mode' => 'cash', 'account_id' => ''],
+            'bank_transfer' => ['shopify_gateway' => 'bank_transfer', 'gateway_label' => 'Bank Transfer', 'payment_mode' => 'banktransfer', 'account_id' => ''],
+            'manual' => ['shopify_gateway' => 'manual', 'gateway_label' => 'Manual / Other', 'payment_mode' => 'others', 'account_id' => ''],
+        ];
+
+        $savedSettings = $shop->payment_gateway_settings ?? [];
+        $paymentGatewaySettings = [];
+        foreach ($defaultGateways as $key => $default) {
+            $configured = $savedSettings[$key] ?? [];
+            $paymentGatewaySettings[] = [
+                'shopify_gateway' => $key,
+                'gateway_label' => $default['gateway_label'],
+                'payment_mode' => $configured['payment_mode'] ?? $default['payment_mode'],
+                'account_id' => $configured['account_id'] ?? $default['account_id'],
+            ];
+        }
 
         return response()->json([
             'success' => true,
@@ -1386,7 +1517,46 @@ GRAPHQL;
                 'shop_domain' => $shop->shop_domain,
             ],
             'zohoConnection' => $zohoConnection,
+            'paymentGatewaySettings' => $paymentGatewaySettings,
+            'zohoAccounts' => $zohoAccounts,
             'host' => $request->query('host'),
+        ]);
+    }
+
+    public function savePaymentSettings(Request $request): JsonResponse
+    {
+        $shop = $request->attributes->get('shop') ?? $this->resolveShopModel($request);
+
+        if (!$shop) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No Shopify shop installed.',
+            ], 404);
+        }
+
+        $validated = $request->validate([
+            'gateways' => ['required', 'array'],
+            'gateways.*.shopify_gateway' => ['required', 'string'],
+            'gateways.*.payment_mode' => ['required', 'string'],
+            'gateways.*.account_id' => ['nullable', 'string'],
+        ]);
+
+        $settingsMap = $shop->payment_gateway_settings ?? [];
+        foreach ($validated['gateways'] as $item) {
+            $key = strtolower(trim($item['shopify_gateway']));
+            $settingsMap[$key] = [
+                'payment_mode' => strtolower(trim($item['payment_mode'])),
+                'account_id' => !empty($item['account_id']) ? trim($item['account_id']) : null,
+            ];
+        }
+
+        $shop->payment_gateway_settings = $settingsMap;
+        $shop->save();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Payment gateway settings saved successfully.',
+            'payment_gateway_settings' => $settingsMap,
         ]);
     }
 
