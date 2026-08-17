@@ -217,6 +217,35 @@ export default function History({
         loadData(historiesState?.current_page || 1, search, statusFilter);
     };
 
+    const getStatusPillStyle = (status) => {
+        switch (status) {
+            case "success":
+                return {
+                    backgroundColor: "#eafbdf",
+                    color: "#108043",
+                    border: "1px solid #b7eb8f",
+                };
+            case "failed":
+                return {
+                    backgroundColor: "#fbeae8",
+                    color: "#d72c0d",
+                    border: "1px solid #f3baba",
+                };
+            case "skipped":
+                return {
+                    backgroundColor: "#f1f2f4",
+                    color: "#616a75",
+                    border: "1px solid #c9cccf",
+                };
+            default:
+                return {
+                    backgroundColor: "#fff8e6",
+                    color: "#b78103",
+                    border: "1px solid #ffe58f",
+                };
+        }
+    };
+
     return (
         <ZohoLayout
             title="Sync History | Zoho Books Integration"
@@ -225,96 +254,296 @@ export default function History({
             host={host}
             activePage="history"
         >
-            <main className="zoho-content" style={{ padding: 0 }}>
+            <div
+                style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "20px",
+                }}
+            >
                 {/* PAGE HEADER */}
-
-                <section className="page-intro history-page-intro">
+                <div
+                    style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                    }}
+                >
                     <div>
-                        <span className="eyebrow">ACTIVITY</span>
-
-                        <h1>Activity Logs</h1>
-
-                        <p>
-                            Monitor Shopify to Zoho Books synchronization activity and results.
+                        <h1
+                            style={{
+                                fontSize: "24px",
+                                fontWeight: 700,
+                                color: "#1a1d20",
+                                margin: 0,
+                            }}
+                        >
+                            Activity Logs
+                        </h1>
+                        <p
+                            style={{
+                                fontSize: "14px",
+                                color: "#616a75",
+                                margin: "4px 0 0 0",
+                            }}
+                        >
+                            Monitor Shopify to Zoho Books synchronization activity and execution logs.
                         </p>
                     </div>
 
                     <button
                         type="button"
-                        className="history-refresh-btn"
                         onClick={refreshPage}
+                        disabled={loading}
+                        style={{
+                            padding: "8px 16px",
+                            borderRadius: "6px",
+                            border: "1px solid #c9cccf",
+                            backgroundColor: "#ffffff",
+                            fontSize: "13px",
+                            fontWeight: 600,
+                            color: "#202223",
+                            cursor: loading ? "wait" : "pointer",
+                        }}
                     >
-                        <span>↻</span>
-                        Refresh
+                        {loading ? "Refreshing..." : "↻ Refresh"}
                     </button>
-                </section>
+                </div>
 
-                {/* METRICS */}
-
-                <section className="history-metrics">
-                    <div className="history-metric-card">
-                        <div className="history-metric-icon neutral">#</div>
-
-                        <div>
-                            <span>Total Records</span>
-                            <strong>{metrics.total}</strong>
+                {/* METRICS CARDS */}
+                <div
+                    style={{
+                        display: "grid",
+                        gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+                        gap: "16px",
+                    }}
+                >
+                    <div
+                        style={{
+                            backgroundColor: "#ffffff",
+                            borderRadius: "10px",
+                            padding: "16px 20px",
+                            border: "1px solid #e1e3e5",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "14px",
+                        }}
+                    >
+                        <div
+                            style={{
+                                width: "40px",
+                                height: "40px",
+                                borderRadius: "8px",
+                                backgroundColor: "#f1f2f4",
+                                color: "#202223",
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                fontSize: "16px",
+                                fontWeight: 700,
+                            }}
+                        >
+                            #
                         </div>
-                    </div>
-
-                    <div className="history-metric-card">
-                        <div className="history-metric-icon success">✓</div>
-
                         <div>
-                            <span>Synced Items</span>
-                            <strong>{metrics.success}</strong>
-                        </div>
-                    </div>
-
-                    <div className="history-metric-card">
-                        <div className="history-metric-icon warning">!</div>
-
-                        <div>
-                            <span>Pending Catalog</span>
-                            <strong>{metrics.pending}</strong>
-                        </div>
-                    </div>
-
-                    <div className="history-metric-card">
-                        <div className="history-metric-icon error">✕</div>
-
-                        <div>
-                            <span>Failed Logs</span>
-                            <strong>{metrics.failed}</strong>
-                        </div>
-                    </div>
-                </section>
-
-                {/* FILTERS */}
-
-                <section className="history-filters-card">
-                    <div className="history-search-group">
-                        <input
-                            type="text"
-                            className="history-search-input"
-                            placeholder="Search by title, SKU, order #, payment reference, or Zoho ID..."
-                            value={search}
-                            onChange={(e) => setSearch(e.target.value)}
-                        />
-
-                        {search && (
-                            <button
-                                type="button"
-                                className="history-search-clear"
-                                onClick={() => setSearch("")}
+                            <span
+                                style={{
+                                    fontSize: "12px",
+                                    color: "#616a75",
+                                    fontWeight: 500,
+                                    textTransform: "uppercase",
+                                    letterSpacing: "0.5px",
+                                }}
                             >
-                                ✕
-                            </button>
-                        )}
+                                Total Records
+                            </span>
+                            <div
+                                style={{
+                                    fontSize: "22px",
+                                    fontWeight: 700,
+                                    color: "#202223",
+                                    lineHeight: "1.2",
+                                }}
+                            >
+                                {metrics.total}
+                            </div>
+                        </div>
                     </div>
 
-                    <div className="history-filter-chips">
+                    <div
+                        style={{
+                            backgroundColor: "#ffffff",
+                            borderRadius: "10px",
+                            padding: "16px 20px",
+                            border: "1px solid #e1e3e5",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "14px",
+                        }}
+                    >
+                        <div
+                            style={{
+                                width: "40px",
+                                height: "40px",
+                                borderRadius: "8px",
+                                backgroundColor: "#eafbdf",
+                                color: "#108043",
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                fontSize: "16px",
+                                fontWeight: 700,
+                            }}
+                        >
+                            ✓
+                        </div>
+                        <div>
+                            <span
+                                style={{
+                                    fontSize: "12px",
+                                    color: "#616a75",
+                                    fontWeight: 500,
+                                    textTransform: "uppercase",
+                                    letterSpacing: "0.5px",
+                                }}
+                            >
+                                Synced Items
+                            </span>
+                            <div
+                                style={{
+                                    fontSize: "22px",
+                                    fontWeight: 700,
+                                    color: "#202223",
+                                    lineHeight: "1.2",
+                                }}
+                            >
+                                {metrics.success}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div
+                        style={{
+                            backgroundColor: "#ffffff",
+                            borderRadius: "10px",
+                            padding: "16px 20px",
+                            border: "1px solid #e1e3e5",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "14px",
+                        }}
+                    >
+                        <div
+                            style={{
+                                width: "40px",
+                                height: "40px",
+                                borderRadius: "8px",
+                                backgroundColor: "#fff8e6",
+                                color: "#b78103",
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                fontSize: "16px",
+                                fontWeight: 700,
+                            }}
+                        >
+                            !
+                        </div>
+                        <div>
+                            <span
+                                style={{
+                                    fontSize: "12px",
+                                    color: "#616a75",
+                                    fontWeight: 500,
+                                    textTransform: "uppercase",
+                                    letterSpacing: "0.5px",
+                                }}
+                            >
+                                Pending Catalog
+                            </span>
+                            <div
+                                style={{
+                                    fontSize: "22px",
+                                    fontWeight: 700,
+                                    color: "#202223",
+                                    lineHeight: "1.2",
+                                }}
+                            >
+                                {metrics.pending}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div
+                        style={{
+                            backgroundColor: "#ffffff",
+                            borderRadius: "10px",
+                            padding: "16px 20px",
+                            border: "1px solid #e1e3e5",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "14px",
+                        }}
+                    >
+                        <div
+                            style={{
+                                width: "40px",
+                                height: "40px",
+                                borderRadius: "8px",
+                                backgroundColor: "#fbeae8",
+                                color: "#d72c0d",
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                fontSize: "16px",
+                                fontWeight: 700,
+                            }}
+                        >
+                            ✕
+                        </div>
+                        <div>
+                            <span
+                                style={{
+                                    fontSize: "12px",
+                                    color: "#616a75",
+                                    fontWeight: 500,
+                                    textTransform: "uppercase",
+                                    letterSpacing: "0.5px",
+                                }}
+                            >
+                                Failed Logs
+                            </span>
+                            <div
+                                style={{
+                                    fontSize: "22px",
+                                    fontWeight: 700,
+                                    color: "#202223",
+                                    lineHeight: "1.2",
+                                }}
+                            >
+                                {metrics.failed}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                {/* SEARCH & STATUS CHIPS BAR */}
+                <div
+                    style={{
+                        backgroundColor: "#ffffff",
+                        borderRadius: "10px",
+                        padding: "16px",
+                        border: "1px solid #e1e3e5",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        gap: "16px",
+                        flexWrap: "wrap",
+                    }}
+                >
+                    <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
                         {[
-                            { label: "All", value: "all" },
+                            { label: "All Records", value: "all" },
                             { label: "Synced", value: "synced" },
                             { label: "Pending", value: "pending" },
                             { label: "Failed", value: "failed" },
@@ -322,204 +551,366 @@ export default function History({
                             <button
                                 key={chip.value}
                                 type="button"
-                                className={`history-chip ${
-                                    statusFilter === chip.value ? "active" : ""
-                                }`}
                                 onClick={() => setStatusFilter(chip.value)}
+                                style={{
+                                    padding: "6px 14px",
+                                    borderRadius: "20px",
+                                    border: "none",
+                                    fontSize: "13px",
+                                    fontWeight:
+                                        statusFilter === chip.value ? 600 : 500,
+                                    backgroundColor:
+                                        statusFilter === chip.value
+                                            ? "#202223"
+                                            : "#f1f2f4",
+                                    color:
+                                        statusFilter === chip.value
+                                            ? "#ffffff"
+                                            : "#616a75",
+                                    cursor: "pointer",
+                                }}
                             >
                                 {chip.label}
                             </button>
                         ))}
                     </div>
-                </section>
 
-                {/* TABLE */}
+                    <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                        <input
+                            type="text"
+                            placeholder="Search title, order #, payment ref, or Zoho ID..."
+                            value={search}
+                            onChange={(e) => setSearch(e.target.value)}
+                            style={{
+                                padding: "8px 14px",
+                                borderRadius: "6px",
+                                border: "1px solid #c9cccf",
+                                fontSize: "13px",
+                                width: "320px",
+                                boxSizing: "border-box",
+                            }}
+                        />
 
-                <section className="history-table-section">
-                    {loading && historyData.length === 0 ? (
-                        <div style={{ textAlign: "center", padding: "40px", color: "#616a75" }}>
-                            Loading sync history...
-                        </div>
-                    ) : historyData.length === 0 ? (
-                        <div className="empty-history-card">
-                            <div className="empty-history-icon">📋</div>
+                        {search && (
+                            <button
+                                type="button"
+                                onClick={() => setSearch("")}
+                                style={{
+                                    padding: "8px 12px",
+                                    borderRadius: "6px",
+                                    border: "1px solid #c9cccf",
+                                    backgroundColor: "#ffffff",
+                                    color: "#616a75",
+                                    fontSize: "12px",
+                                    cursor: "pointer",
+                                }}
+                            >
+                                Clear
+                            </button>
+                        )}
+                    </div>
+                </div>
 
-                            <strong>No synchronization logs found</strong>
+                {/* LOGS TABLE CONTAINER */}
+                <div
+                    style={{
+                        backgroundColor: "#ffffff",
+                        borderRadius: "10px",
+                        border: "1px solid #e1e3e5",
+                        overflow: "hidden",
+                    }}
+                >
+                    <table
+                        style={{
+                            width: "100%",
+                            borderCollapse: "collapse",
+                            fontSize: "13px",
+                        }}
+                    >
+                        <thead>
+                            <tr
+                                style={{
+                                    backgroundColor: "#f8f9fa",
+                                    borderBottom: "1px solid #e1e3e5",
+                                    textAlign: "left",
+                                    color: "#616a75",
+                                }}
+                            >
+                                <th style={{ padding: "12px 16px", fontSize: "12px", fontWeight: 600 }}>
+                                    ITEM / REFERENCE
+                                </th>
+                                <th style={{ padding: "12px 16px", fontSize: "12px", fontWeight: 600 }}>
+                                    ACTION
+                                </th>
+                                <th style={{ padding: "12px 16px", fontSize: "12px", fontWeight: 600 }}>
+                                    STATUS
+                                </th>
+                                <th style={{ padding: "12px 16px", fontSize: "12px", fontWeight: 600 }}>
+                                    ZOHO REFERENCE
+                                </th>
+                                <th style={{ padding: "12px 16px", fontSize: "12px", fontWeight: 600 }}>
+                                    MESSAGE
+                                </th>
+                                <th style={{ padding: "12px 16px", fontSize: "12px", fontWeight: 600 }}>
+                                    DATE
+                                </th>
+                            </tr>
+                        </thead>
 
-                            <p>
-                                {hasActiveFilters
-                                    ? "Try changing your search or status filter."
-                                    : "Your synchronization activity will appear here."}
-                            </p>
+                        <tbody>
+                            {loading && historyData.length === 0 ? (
+                                <tr>
+                                    <td
+                                        colSpan={6}
+                                        style={{
+                                            textAlign: "center",
+                                            padding: "40px",
+                                            color: "#616a75",
+                                        }}
+                                    >
+                                        Loading sync history...
+                                    </td>
+                                </tr>
+                            ) : historyData.length === 0 ? (
+                                <tr>
+                                    <td
+                                        colSpan={6}
+                                        style={{
+                                            textAlign: "center",
+                                            padding: "48px 24px",
+                                        }}
+                                    >
+                                        <div style={{ fontSize: "32px", marginBottom: "12px" }}>📋</div>
+                                        <div style={{ fontSize: "15px", fontWeight: 600, color: "#202223", marginBottom: "4px" }}>
+                                            No synchronization logs found
+                                        </div>
+                                        <p style={{ fontSize: "13px", color: "#616a75", margin: "0 0 16px 0" }}>
+                                            {hasActiveFilters
+                                                ? "Try changing your search query or status filter."
+                                                : "Your synchronization activity will appear here."}
+                                        </p>
+                                        {hasActiveFilters && (
+                                            <button
+                                                type="button"
+                                                onClick={clearFilters}
+                                                style={{
+                                                    padding: "6px 14px",
+                                                    borderRadius: "6px",
+                                                    border: "1px solid #c9cccf",
+                                                    backgroundColor: "#ffffff",
+                                                    fontSize: "13px",
+                                                    fontWeight: 500,
+                                                    color: "#202223",
+                                                    cursor: "pointer",
+                                                }}
+                                            >
+                                                Clear filters
+                                            </button>
+                                        )}
+                                    </td>
+                                </tr>
+                            ) : (
+                                historyData.map((history) => {
+                                    const productTitle = getProductTitle(history);
+                                    const variantTitle = getVariantTitle(history);
+                                    const status = getStatus(history);
+                                    const action = getAction(history);
+                                    const zohoId = getZohoId(history);
+                                    const message = history?.message || "No message";
+                                    const date = formatDate(history?.created_at);
+                                    const pillStyle = getStatusPillStyle(status);
 
-                            {hasActiveFilters && (
-                                <button
-                                    type="button"
-                                    className="empty-clear-btn"
-                                    onClick={clearFilters}
-                                >
-                                    Clear filters
-                                </button>
+                                    return (
+                                        <tr
+                                            key={history.id}
+                                            style={{
+                                                borderBottom: "1px solid #f1f2f4",
+                                            }}
+                                        >
+                                            {/* ITEM / REFERENCE */}
+                                            <td style={{ padding: "12px 16px" }}>
+                                                <div
+                                                    style={{
+                                                        fontWeight: 600,
+                                                        color: "#1a1d20",
+                                                        fontSize: "13px",
+                                                    }}
+                                                >
+                                                    {productTitle}
+                                                </div>
+                                                <div
+                                                    style={{
+                                                        fontSize: "12px",
+                                                        color: "#616a75",
+                                                        marginTop: "2px",
+                                                    }}
+                                                >
+                                                    {variantTitle}
+                                                </div>
+                                            </td>
+
+                                            {/* ACTION */}
+                                            <td style={{ padding: "12px 16px" }}>
+                                                <span
+                                                    style={{
+                                                        padding: "3px 8px",
+                                                        borderRadius: "4px",
+                                                        fontSize: "11px",
+                                                        fontWeight: 600,
+                                                        backgroundColor: "#f1f2f4",
+                                                        color: "#303030",
+                                                        textTransform: "uppercase",
+                                                        letterSpacing: "0.5px",
+                                                    }}
+                                                >
+                                                    {formatLabel(action)}
+                                                </span>
+                                            </td>
+
+                                            {/* STATUS */}
+                                            <td style={{ padding: "12px 16px" }}>
+                                                <span
+                                                    style={{
+                                                        display: "inline-flex",
+                                                        alignItems: "center",
+                                                        gap: "6px",
+                                                        padding: "3px 10px",
+                                                        borderRadius: "12px",
+                                                        fontSize: "12px",
+                                                        fontWeight: 500,
+                                                        ...pillStyle,
+                                                    }}
+                                                >
+                                                    <span
+                                                        style={{
+                                                            width: "6px",
+                                                            height: "6px",
+                                                            borderRadius: "50%",
+                                                            backgroundColor: "currentColor",
+                                                        }}
+                                                    />
+                                                    {formatLabel(status)}
+                                                </span>
+                                            </td>
+
+                                            {/* ZOHO REFERENCE */}
+                                            <td style={{ padding: "12px 16px" }}>
+                                                {zohoId ? (
+                                                    <span
+                                                        style={{
+                                                            fontFamily: "monospace",
+                                                            fontSize: "12px",
+                                                            color: "#005bd3",
+                                                            backgroundColor: "#e8f4fe",
+                                                            padding: "2px 6px",
+                                                            borderRadius: "4px",
+                                                            display: "inline-block",
+                                                        }}
+                                                        title={String(zohoId)}
+                                                    >
+                                                        {zohoId}
+                                                    </span>
+                                                ) : (
+                                                    <span
+                                                        style={{
+                                                            fontSize: "12px",
+                                                            color: "#8c9196",
+                                                            fontStyle: "italic",
+                                                        }}
+                                                    >
+                                                        Not Created
+                                                    </span>
+                                                )}
+                                            </td>
+
+                                            {/* MESSAGE */}
+                                            <td style={{ padding: "12px 16px" }}>
+                                                <div
+                                                    style={{
+                                                        fontSize: "12px",
+                                                        color: "#4a4f56",
+                                                        maxWidth: "280px",
+                                                        overflow: "hidden",
+                                                        textOverflow: "ellipsis",
+                                                        whiteSpace: "nowrap",
+                                                    }}
+                                                    title={message}
+                                                >
+                                                    {message}
+                                                </div>
+                                            </td>
+
+                                            {/* DATE */}
+                                            <td style={{ padding: "12px 16px" }}>
+                                                <div
+                                                    style={{
+                                                        fontSize: "13px",
+                                                        fontWeight: 500,
+                                                        color: "#1a1d20",
+                                                    }}
+                                                >
+                                                    {date.date}
+                                                </div>
+                                                <div
+                                                    style={{
+                                                        fontSize: "11px",
+                                                        color: "#616a75",
+                                                    }}
+                                                >
+                                                    {date.time}
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    );
+                                })
                             )}
-                        </div>
-                    ) : (
-                        <div className="table-wrapper history-modern-table-wrapper">
-                            <table className="history-table modern-history-table">
-                                <thead>
-                                    <tr>
-                                        <th>ITEM / REFERENCE</th>
-
-                                        <th>ACTION</th>
-
-                                        <th>STATUS</th>
-
-                                        <th>ZOHO REFERENCE</th>
-
-                                        <th>MESSAGE</th>
-
-                                        <th>DATE</th>
-                                    </tr>
-                                </thead>
-
-                                <tbody>
-                                    {historyData.map((history) => {
-                                        const productTitle =
-                                            getProductTitle(history);
-
-                                        const variantTitle =
-                                            getVariantTitle(history);
-
-                                        const status = getStatus(history);
-
-                                        const action = getAction(history);
-
-                                        const zohoId = getZohoId(history);
-
-                                        const message =
-                                            history?.message || "No message";
-
-                                        const date = formatDate(
-                                            history?.created_at,
-                                        );
-
-                                        return (
-                                            <tr key={history.id}>
-                                                {/* ITEM */}
-
-                                                <td>
-                                                    <div className="product-cell history-product-cell">
-                                                        <div className="product-avatar history-product-avatar">
-                                                            {productTitle
-                                                                .charAt(0)
-                                                                .toUpperCase()}
-                                                        </div>
-
-                                                        <div className="history-product-info">
-                                                            <div className="product-name">
-                                                                {productTitle}
-                                                            </div>
-
-                                                            <div className="variant-name">
-                                                                {variantTitle}
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                </td>
-
-                                                {/* ACTION */}
-
-                                                <td>
-                                                    <span
-                                                        className={`history-action ${action}`}
-                                                    >
-                                                        {formatLabel(action)}
-                                                    </span>
-                                                </td>
-
-                                                {/* STATUS */}
-
-                                                <td>
-                                                    <span
-                                                        className={`status ${status}`}
-                                                    >
-                                                        <span className="status-dot" />
-
-                                                        {formatLabel(status)}
-                                                    </span>
-                                                </td>
-
-                                                {/* ZOHO ID */}
-
-                                                <td>
-                                                    {zohoId ? (
-                                                        <span
-                                                            className="zoho-id history-zoho-id"
-                                                            title={String(zohoId)}
-                                                        >
-                                                            {zohoId}
-                                                        </span>
-                                                    ) : (
-                                                        <span className="zoho-id empty">
-                                                            Not Created
-                                                        </span>
-                                                    )}
-                                                </td>
-
-                                                {/* MESSAGE */}
-
-                                                <td>
-                                                    <div
-                                                        className="history-message"
-                                                        title={message}
-                                                    >
-                                                        {message}
-                                                    </div>
-                                                </td>
-
-                                                {/* DATE */}
-
-                                                <td>
-                                                    <div className="history-date">
-                                                        {date.date}
-                                                    </div>
-
-                                                    <div className="history-time">
-                                                        {date.time}
-                                                    </div>
-                                                </td>
-                                            </tr>
-                                        );
-                                    })}
-                                </tbody>
-                            </table>
-                        </div>
-                    )}
-                </section>
+                        </tbody>
+                    </table>
+                </div>
 
                 {/* PAGINATION */}
-
                 {historiesState?.last_page > 1 && (
-                    <div className="history-pagination">
-                        <div className="history-pagination-info">
-                            Page <strong>{historiesState.current_page}</strong>{" "}
-                            of <strong>{historiesState.last_page}</strong>
+                    <div
+                        style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            padding: "16px",
+                            backgroundColor: "#ffffff",
+                            borderRadius: "10px",
+                            border: "1px solid #e1e3e5",
+                        }}
+                    >
+                        <div style={{ fontSize: "13px", color: "#616a75" }}>
+                            Page <strong>{historiesState.current_page}</strong> of{" "}
+                            <strong>{historiesState.last_page}</strong>
                         </div>
 
-                        <div className="pagination">
+                        <div style={{ display: "flex", gap: "4px" }}>
                             {historiesState.links.map((link, index) => (
                                 <button
                                     key={index}
                                     type="button"
                                     disabled={!link.url}
-                                    className={
-                                        link.active
-                                            ? "pagination-btn active"
-                                            : "pagination-btn"
-                                    }
+                                    style={{
+                                        padding: "6px 12px",
+                                        borderRadius: "6px",
+                                        border: link.active
+                                            ? "1px solid #202223"
+                                            : "1px solid #c9cccf",
+                                        backgroundColor: link.active
+                                            ? "#202223"
+                                            : "#ffffff",
+                                        color: link.active
+                                            ? "#ffffff"
+                                            : "#202223",
+                                        fontSize: "12px",
+                                        fontWeight: 500,
+                                        cursor: !link.url ? "default" : "pointer",
+                                        opacity: !link.url ? 0.5 : 1,
+                                    }}
                                     onClick={() => {
-                                        if (!link.url) {
-                                            return;
-                                        }
+                                        if (!link.url) return;
 
                                         try {
                                             const url = new URL(
@@ -545,7 +936,7 @@ export default function History({
                         </div>
                     </div>
                 )}
-            </main>
+            </div>
         </ZohoLayout>
     );
 }
