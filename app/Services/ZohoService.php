@@ -444,50 +444,87 @@ class ZohoService
      */
     private function resolveZohoTaxId(array $taxLines = [], ?Order $order = null): ?string
     {
+        // 0. If order has no tax lines AND order tax_total is 0, this is a non-taxed order.
+        // Do NOT attach tax_id to non-taxed orders.
+        $hasTaxLines = !empty($taxLines);
+        if (!$hasTaxLines && $order && !empty($order->tax_lines) && is_array($order->tax_lines)) {
+            $hasTaxLines = count($order->tax_lines) > 0;
+        }
+        $orderTaxTotal = $order ? (float) ($order->tax_total ?? 0.0) : 0.0;
+
+        if (!$hasTaxLines && $orderTaxTotal <= 0) {
+            return null;
+        }
+
         $taxSettings = $this->shop->tax_settings ?? [];
         $mappings = $taxSettings['tax_mappings'] ?? [];
         $defaultTaxId = $taxSettings['default_tax_id'] ?? null;
 
-        // 1. Try matching item-level tax lines against tax_mappings
-        if (!empty($taxLines)) {
-            foreach ($taxLines as $tl) {
+        $targetTaxLines = !empty($taxLines) ? $taxLines : ($order ? ($order->tax_lines ?? []) : []);
+
+        // Fetch taxes from Zoho to validate actual Zoho tax rates
+        $zohoTaxes = [];
+        try {
+            $zohoTaxes = $this->getTaxes();
+        } catch (\Throwable $e) {
+            Log::warning("resolveZohoTaxId: Could not fetch Zoho taxes: " . $e->getMessage());
+        }
+
+        $zohoTaxMap = [];
+        foreach ($zohoTaxes as $zt) {
+            if (!empty($zt['tax_id'])) {
+                $zohoTaxMap[(string) $zt['tax_id']] = $zt;
+            }
+        }
+
+        // 1. Try matching item/order tax lines against tax_mappings with strict rate validation
+        if (!empty($targetTaxLines)) {
+            foreach ($targetTaxLines as $tl) {
                 $title = strtolower(trim($tl['title'] ?? ''));
                 $ratePct = round(((float) ($tl['rate'] ?? 0.0)) * 100, 2);
 
                 foreach ($mappings as $map) {
                     $mappedName = strtolower(trim($map['shopify_tax_name'] ?? ''));
                     $mappedRate = round((float) ($map['shopify_rate'] ?? 0.0), 2);
+                    $mappedZohoTaxId = !empty($map['zoho_tax_id']) ? (string) $map['zoho_tax_id'] : null;
 
-                    if (!empty($map['zoho_tax_id'])) {
-                        if (($mappedName !== '' && str_contains($title, $mappedName)) || ($mappedRate > 0 && abs($ratePct - $mappedRate) < 0.01)) {
-                            return (string) $map['zoho_tax_id'];
+                    if ($mappedZohoTaxId) {
+                        $isTitleMatch = ($mappedName !== '' && (str_contains($title, $mappedName) || str_contains($mappedName, $title)));
+                        $isRateMatch = ($mappedRate > 0 && abs($ratePct - $mappedRate) < 0.01);
+
+                        if ($isTitleMatch || $isRateMatch) {
+                            // Validate Zoho tax rate parity
+                            if (isset($zohoTaxMap[$mappedZohoTaxId])) {
+                                $actualZohoRate = (float) ($zohoTaxMap[$mappedZohoTaxId]['tax_percentage'] ?? 0.0);
+                                if (abs($ratePct - $actualZohoRate) > 0.01) {
+                                    Log::warning("resolveZohoTaxId: Tax mapping rate mismatch. Shopify tax rate is {$ratePct}%, but mapped Zoho tax '{$zohoTaxMap[$mappedZohoTaxId]['tax_name']}' actual rate is {$actualZohoRate}%. Rejecting tax ID {$mappedZohoTaxId}.");
+                                    throw new \Exception("Tax mapping rate mismatch: Shopify tax rate ({$ratePct}%) does not match Zoho tax '{$zohoTaxMap[$mappedZohoTaxId]['tax_name']}' actual rate ({$actualZohoRate}%). Please update the tax mapping in Settings.");
+                                }
+                            }
+                            return $mappedZohoTaxId;
                         }
                     }
                 }
             }
         }
 
-        // 2. Try matching order-level tax lines against tax_mappings
-        if ($order && !empty($order->tax_lines) && is_array($order->tax_lines)) {
-            foreach ($order->tax_lines as $tl) {
-                $title = strtolower(trim($tl['title'] ?? ''));
-                $ratePct = round(((float) ($tl['rate'] ?? 0.0)) * 100, 2);
-
-                foreach ($mappings as $map) {
-                    $mappedName = strtolower(trim($map['shopify_tax_name'] ?? ''));
-                    $mappedRate = round((float) ($map['shopify_rate'] ?? 0.0), 2);
-
-                    if (!empty($map['zoho_tax_id'])) {
-                        if (($mappedName !== '' && str_contains($title, $mappedName)) || ($mappedRate > 0 && abs($ratePct - $mappedRate) < 0.01)) {
-                            return (string) $map['zoho_tax_id'];
-                        }
+        // 2. Fallback to default_tax_id if specified AND order has taxes
+        if (!empty($defaultTaxId) && ($hasTaxLines || $orderTaxTotal > 0)) {
+            $defaultTaxIdStr = (string) $defaultTaxId;
+            if (isset($zohoTaxMap[$defaultTaxIdStr])) {
+                if (!empty($targetTaxLines)) {
+                    $firstLineRate = round(((float) ($targetTaxLines[0]['rate'] ?? 0.0)) * 100, 2);
+                    $actualZohoRate = (float) ($zohoTaxMap[$defaultTaxIdStr]['tax_percentage'] ?? 0.0);
+                    if ($firstLineRate > 0 && abs($firstLineRate - $actualZohoRate) > 0.01) {
+                        Log::warning("resolveZohoTaxId: Default tax ID rate mismatch. Shopify rate is {$firstLineRate}%, but default Zoho tax rate is {$actualZohoRate}%.");
+                        throw new \Exception("Default tax rate mismatch: Shopify tax rate ({$firstLineRate}%) does not match default Zoho tax '{$zohoTaxMap[$defaultTaxIdStr]['tax_name']}' actual rate ({$actualZohoRate}%).");
                     }
                 }
             }
+            return $defaultTaxIdStr;
         }
 
-        // 3. Fallback to default_tax_id if specified
-        return !empty($defaultTaxId) ? (string) $defaultTaxId : null;
+        return null;
     }
 
     private function getShopifyVariantFieldId(): string

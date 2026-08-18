@@ -570,6 +570,9 @@ export default function Settings({ shop, zohoConnection, host }) {
 
                         <div className="settings-body">
                             <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+                                <div style={{ padding: "12px 14px", backgroundColor: "#fbf6ed", border: "1px solid #e1b878", borderRadius: "6px", fontSize: "12px", color: "#614700" }}>
+                                    <strong>💡 Tax Sync & GST Notice:</strong> GST-specific operations require GST activation under <em>Settings → Tax Settings</em> in your Zoho Books portal. Orders with 0% tax sync without tax lines. Tax mappings require exact rate parity (e.g. Shopify 18% must match Zoho tax rate of 18%).
+                                </div>
                                 {/* Tax Mode & Default Tax */}
                                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
                                     <div>
@@ -757,25 +760,38 @@ export default function Settings({ shop, zohoConnection, host }) {
                                                     </div>
 
                                                     <div>
-                                                        <select
-                                                            value={map.zoho_tax_id || ""}
-                                                            onChange={(e) => handleMappingChange(idx, "zoho_tax_id", e.target.value)}
-                                                            style={{
-                                                                width: "100%",
-                                                                padding: "6px 10px",
-                                                                borderRadius: "4px",
-                                                                border: "1px solid #c9cccf",
-                                                                fontSize: "12px",
-                                                                backgroundColor: "#ffffff",
-                                                            }}
-                                                        >
-                                                            <option value="">Select Zoho Tax Rate...</option>
-                                                            {zohoTaxes.map((tax) => (
-                                                                <option key={tax.tax_id} value={tax.tax_id}>
-                                                                    {tax.tax_name} ({tax.tax_percentage}%)
-                                                                </option>
-                                                            ))}
-                                                        </select>
+                                                        {(() => {
+                                                            const selTax = zohoTaxes.find(t => String(t.tax_id) === String(map.zoho_tax_id));
+                                                            const isMismatch = selTax && map.shopify_rate !== "" && Math.abs(Number(map.shopify_rate) - Number(selTax.tax_percentage)) > 0.01;
+                                                            return (
+                                                                <>
+                                                                    <select
+                                                                        value={map.zoho_tax_id || ""}
+                                                                        onChange={(e) => handleMappingChange(idx, "zoho_tax_id", e.target.value)}
+                                                                        style={{
+                                                                            width: "100%",
+                                                                            padding: "6px 10px",
+                                                                            borderRadius: "4px",
+                                                                            border: isMismatch ? "1px solid #d72c0d" : "1px solid #c9cccf",
+                                                                            fontSize: "12px",
+                                                                            backgroundColor: "#ffffff",
+                                                                        }}
+                                                                    >
+                                                                        <option value="">Select Zoho Tax Rate...</option>
+                                                                        {zohoTaxes.map((tax) => (
+                                                                            <option key={tax.tax_id} value={tax.tax_id}>
+                                                                                {tax.tax_name} ({tax.tax_percentage}%)
+                                                                            </option>
+                                                                        ))}
+                                                                    </select>
+                                                                    {isMismatch && (
+                                                                        <span style={{ fontSize: "10px", color: "#d72c0d", fontWeight: 600, display: "block", marginTop: "2px" }}>
+                                                                            ⚠️ Rate mismatch: Zoho rate is {selTax.tax_percentage}% vs Shopify {map.shopify_rate}%
+                                                                        </span>
+                                                                    )}
+                                                                </>
+                                                            );
+                                                        })()}
                                                     </div>
 
                                                     <button

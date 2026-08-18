@@ -1727,6 +1727,22 @@ GRAPHQL;
             'tax_mappings.*.zoho_tax_id' => ['nullable', 'string'],
         ]);
 
+        // Fetch Zoho taxes to validate rate parity
+        $zohoTaxes = [];
+        try {
+            $zohoService = new ZohoService($shop);
+            $zohoTaxes = $zohoService->getTaxes();
+        } catch (\Throwable $e) {
+            Log::warning('saveTaxSettings: Could not fetch Zoho taxes for validation: ' . $e->getMessage());
+        }
+
+        $zohoTaxMap = [];
+        foreach ($zohoTaxes as $zt) {
+            if (!empty($zt['tax_id'])) {
+                $zohoTaxMap[(string) $zt['tax_id']] = $zt;
+            }
+        }
+
         if (!empty($validated['tax_mappings'])) {
             if (count($validated['tax_mappings']) > 50) {
                 return response()->json([
@@ -1739,6 +1755,7 @@ GRAPHQL;
             foreach ($validated['tax_mappings'] as $mapping) {
                 $name = strtolower(trim($mapping['shopify_tax_name'] ?? ''));
                 $rate = isset($mapping['shopify_rate']) && $mapping['shopify_rate'] !== '' ? round((float) $mapping['shopify_rate'], 2) : null;
+                $zohoTaxId = !empty($mapping['zoho_tax_id']) ? (string) $mapping['zoho_tax_id'] : null;
 
                 if ($name !== '' && $rate !== null) {
                     $key = "{$name}:{$rate}";
@@ -1750,6 +1767,17 @@ GRAPHQL;
                         ], 422);
                     }
                     $seen[$key] = true;
+                }
+
+                if ($zohoTaxId && $rate !== null && isset($zohoTaxMap[$zohoTaxId])) {
+                    $actualZohoRate = (float) ($zohoTaxMap[$zohoTaxId]['tax_percentage'] ?? 0.0);
+                    if (abs($rate - $actualZohoRate) > 0.01) {
+                        $zohoTaxName = $zohoTaxMap[$zohoTaxId]['tax_name'] ?? 'Zoho Tax';
+                        return response()->json([
+                            'success' => false,
+                            'message' => "Tax mapping rate mismatch: Mapped Zoho tax '{$zohoTaxName}' has an actual API rate of {$actualZohoRate}%, which does not match the Shopify tax rate of {$rate}%.",
+                        ], 422);
+                    }
                 }
             }
         }

@@ -483,6 +483,145 @@ class TaxMappingTest extends \Tests\TestCase
         $response->assertStatus(422);
     }
 
+    public function test_rate_mismatch_throws_exception_in_resolve_zoho_tax_id(): void
+    {
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/settings/taxes*' => Http::response([
+                'code' => 0,
+                'taxes' => [
+                    [
+                        'tax_id' => 'zoho_tax_mismatch_15',
+                        'tax_name' => 'GST 18%',
+                        'tax_percentage' => 15,
+                        'status' => 'Active',
+                    ],
+                ],
+            ], 200),
+        ]);
+
+        $this->shop->update([
+            'tax_settings' => [
+                'tax_mode' => 'exclusive',
+                'tax_mappings' => [
+                    [
+                        'shopify_tax_name' => 'GST',
+                        'shopify_rate' => 18,
+                        'zoho_tax_id' => 'zoho_tax_mismatch_15',
+                    ],
+                ],
+            ],
+        ]);
+
+        $order = Order::create([
+            'shop_id' => $this->shop->id,
+            'shopify_order_id' => 'gid://shopify/Order/7009',
+            'order_number' => '#7009',
+            'currency' => 'INR',
+            'subtotal' => 100.00,
+            'tax_total' => 18.00,
+            'total_price' => 118.00,
+            'tax_lines' => [
+                [
+                    'title' => 'GST 18%',
+                    'rate' => 0.18,
+                    'price' => 18.00,
+                ],
+            ],
+            'line_items' => [],
+        ]);
+
+        $this->expectException(\Exception::class);
+        $this->expectExceptionMessage('Tax mapping rate mismatch');
+
+        $service = new ZohoService($this->shop);
+        $reflection = new \ReflectionClass($service);
+        $method = $reflection->getMethod('resolveZohoTaxId');
+        $method->setAccessible(true);
+        $method->invoke($service, $order->tax_lines, $order);
+    }
+
+    public function test_rate_mismatch_rejected_in_save_tax_settings_endpoint(): void
+    {
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/settings/taxes*' => Http::response([
+                'code' => 0,
+                'taxes' => [
+                    [
+                        'tax_id' => 'zoho_tax_mismatch_15',
+                        'tax_name' => 'GST 18%',
+                        'tax_percentage' => 15,
+                        'status' => 'Active',
+                    ],
+                ],
+            ], 200),
+        ]);
+
+        $payload = [
+            'tax_mode' => 'exclusive',
+            'shipping_tax_mode' => 'use_order_tax',
+            'discount_tax_mode' => 'before_tax',
+            'tax_mappings' => [
+                [
+                    'shopify_tax_name' => 'GST',
+                    'shopify_rate' => 18,
+                    'zoho_tax_id' => 'zoho_tax_mismatch_15',
+                ],
+            ],
+        ];
+
+        $response = $this->actingAsShop()
+            ->postJson('/zoho/settings/tax', $payload);
+
+        $response->assertStatus(422);
+        $response->assertJsonFragment(['success' => false]);
+        $this->assertStringContainsString('Tax mapping rate mismatch', $response->json('message'));
+    }
+
+    public function test_zero_tax_orders_do_not_attach_default_tax_id(): void
+    {
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/settings/taxes*' => Http::response([
+                'code' => 0,
+                'taxes' => [
+                    [
+                        'tax_id' => 'zoho_default_5',
+                        'tax_name' => 'GST 5%',
+                        'tax_percentage' => 5,
+                        'status' => 'Active',
+                    ],
+                ],
+            ], 200),
+        ]);
+
+        $this->shop->update([
+            'tax_settings' => [
+                'tax_mode' => 'exclusive',
+                'default_tax_id' => 'zoho_default_5',
+                'tax_mappings' => [],
+            ],
+        ]);
+
+        $order = Order::create([
+            'shop_id' => $this->shop->id,
+            'shopify_order_id' => 'gid://shopify/Order/7010',
+            'order_number' => '#7010',
+            'currency' => 'INR',
+            'subtotal' => 100.00,
+            'tax_total' => 0.00,
+            'total_price' => 100.00,
+            'tax_lines' => [],
+            'line_items' => [],
+        ]);
+
+        $service = new ZohoService($this->shop);
+        $reflection = new \ReflectionClass($service);
+        $method = $reflection->getMethod('resolveZohoTaxId');
+        $method->setAccessible(true);
+        $resolvedTaxId = $method->invoke($service, [], $order);
+
+        $this->assertNull($resolvedTaxId);
+    }
+
     private function actingAsShop()
     {
         return $this->withHeaders([
