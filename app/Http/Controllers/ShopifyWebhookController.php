@@ -536,19 +536,24 @@ class ShopifyWebhookController extends Controller
         $billingAddr = $payload['billing_address'] ?? $defaultAddr;
         $shippingAddr = $payload['shipping_address'] ?? $defaultAddr;
 
+        $phone = $this->extractCustomerPhone($payload);
+        $updateData = [
+            'first_name' => $payload['first_name'] ?? null,
+            'last_name' => $payload['last_name'] ?? null,
+            'email' => $payload['email'] ?? null,
+            'billing_address' => $billingAddr,
+            'shipping_address' => $shippingAddr,
+        ];
+        if (!empty($phone)) {
+            $updateData['phone'] = $phone;
+        }
+
         $customer = Customer::updateOrCreate(
             [
                 'shop_id' => $shop->id,
                 'shopify_customer_id' => $shopifyCustomerId,
             ],
-            [
-                'first_name' => $payload['first_name'] ?? null,
-                'last_name' => $payload['last_name'] ?? null,
-                'email' => $payload['email'] ?? null,
-                'phone' => $payload['phone'] ?? ($defaultAddr['phone'] ?? null),
-                'billing_address' => $billingAddr,
-                'shipping_address' => $shippingAddr,
-            ]
+            $updateData
         );
 
         $synced = false;
@@ -661,19 +666,27 @@ class ShopifyWebhookController extends Controller
             $billingAddr = $payload['billing_address'] ?? $defaultAddr;
             $shippingAddr = $payload['shipping_address'] ?? $defaultAddr;
 
+            $phone = $this->extractCustomerPhone($custData);
+            if (empty($phone)) {
+                $phone = $this->extractCustomerPhone($payload);
+            }
+            $updateData = [
+                'first_name' => $custData['first_name'] ?? null,
+                'last_name' => $custData['last_name'] ?? null,
+                'email' => $custData['email'] ?? ($payload['email'] ?? null),
+                'billing_address' => $billingAddr,
+                'shipping_address' => $shippingAddr,
+            ];
+            if (!empty($phone)) {
+                $updateData['phone'] = $phone;
+            }
+
             $customer = Customer::updateOrCreate(
                 [
                     'shop_id' => $shop->id,
                     'shopify_customer_id' => $shopifyCustId,
                 ],
-                [
-                    'first_name' => $custData['first_name'] ?? null,
-                    'last_name' => $custData['last_name'] ?? null,
-                    'email' => $custData['email'] ?? ($payload['email'] ?? null),
-                    'phone' => $custData['phone'] ?? ($payload['phone'] ?? ($defaultAddr['phone'] ?? null)),
-                    'billing_address' => $billingAddr,
-                    'shipping_address' => $shippingAddr,
-                ]
+                $updateData
             );
 
             $customerId = $customer->id;
@@ -1328,6 +1341,36 @@ class ShopifyWebhookController extends Controller
         ], 200);
     }
 
+    /**
+     * Extract phone number from a customer or order payload safely.
+     */
+    private function extractCustomerPhone(array $payload): ?string
+    {
+        if (!empty($payload['phone'])) {
+            return trim($payload['phone']);
+        }
+        if (!empty($payload['default_address']['phone'])) {
+            return trim($payload['default_address']['phone']);
+        }
+        if (!empty($payload['billing_address']['phone'])) {
+            return trim($payload['billing_address']['phone']);
+        }
+        if (!empty($payload['shipping_address']['phone'])) {
+            return trim($payload['shipping_address']['phone']);
+        }
+        if (!empty($payload['addresses']) && is_array($payload['addresses'])) {
+            foreach ($payload['addresses'] as $addr) {
+                if (!empty($addr['phone'])) {
+                    return trim($addr['phone']);
+                }
+            }
+        }
+        if (!empty($payload['sms_marketing_consent']['phone_number'])) {
+            return trim($payload['sms_marketing_consent']['phone_number']);
+        }
+        return null;
+    }
+
     private function createLocalOrderFromShopifyData(Shop $shop, array $orderData): Order
     {
         $rawOrderId = (string) ($orderData['id'] ?? '');
@@ -1342,19 +1385,27 @@ class ShopifyWebhookController extends Controller
             $shopifyCustId = str_starts_with($rawCustId, 'gid://') ? $rawCustId : "gid://shopify/Customer/{$rawCustId}";
 
             $defaultAddr = $custData['default_address'] ?? ($custData['addresses'][0] ?? null);
+            $phone = $this->extractCustomerPhone($custData);
+            if (empty($phone)) {
+                $phone = $this->extractCustomerPhone($orderData);
+            }
+            $updateData = [
+                'first_name' => $custData['first_name'] ?? null,
+                'last_name' => $custData['last_name'] ?? null,
+                'email' => $custData['email'] ?? ($orderData['email'] ?? null),
+                'billing_address' => $orderData['billing_address'] ?? $defaultAddr,
+                'shipping_address' => $orderData['shipping_address'] ?? $defaultAddr,
+            ];
+            if (!empty($phone)) {
+                $updateData['phone'] = $phone;
+            }
+
             $customer = Customer::updateOrCreate(
                 [
                     'shop_id' => $shop->id,
                     'shopify_customer_id' => $shopifyCustId,
                 ],
-                [
-                    'first_name' => $custData['first_name'] ?? null,
-                    'last_name' => $custData['last_name'] ?? null,
-                    'email' => $custData['email'] ?? ($orderData['email'] ?? null),
-                    'phone' => $custData['phone'] ?? ($orderData['phone'] ?? ($defaultAddr['phone'] ?? null)),
-                    'billing_address' => $orderData['billing_address'] ?? $defaultAddr,
-                    'shipping_address' => $orderData['shipping_address'] ?? $defaultAddr,
-                ]
+                $updateData
             );
             $customerId = $customer->id;
         }

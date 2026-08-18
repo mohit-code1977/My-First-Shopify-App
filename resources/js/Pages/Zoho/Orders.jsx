@@ -43,7 +43,8 @@ export default function Orders({
     const [syncingPaymentId, setSyncingPaymentId] = useState(null);
     const [syncType, setSyncType] = useState(null);
     const [notification, setNotification] = useState(null);
-    const [selectedOrderForPayment, setSelectedOrderForPayment] = useState(null);
+    const [selectedOrderForPayment, setSelectedOrderForPayment] =
+        useState(null);
     const [openActionMenuId, setOpenActionMenuId] = useState(null);
 
     // Bulk State
@@ -86,7 +87,9 @@ export default function Orders({
     // Sync selected order in modal when orderList updates
     useEffect(() => {
         if (selectedOrderForPayment) {
-            const updated = orderList.find((o) => o.id === selectedOrderForPayment.id);
+            const updated = orderList.find(
+                (o) => o.id === selectedOrderForPayment.id,
+            );
             if (updated) {
                 setSelectedOrderForPayment(updated);
             }
@@ -97,7 +100,8 @@ export default function Orders({
         if (!connectedState) {
             setNotification({
                 type: "error",
-                message: "Zoho is not connected. Please connect in Settings first.",
+                message:
+                    "Zoho is not connected. Please connect in Settings first.",
             });
             return;
         }
@@ -123,7 +127,9 @@ export default function Orders({
             if (response.ok && data.success) {
                 setNotification({
                     type: "success",
-                    message: data.message || "Sales Order synchronized successfully.",
+                    message:
+                        data.message ||
+                        "Sales Order synchronized successfully.",
                 });
                 await loadData(true);
             } else {
@@ -147,7 +153,8 @@ export default function Orders({
         if (!connectedState) {
             setNotification({
                 type: "error",
-                message: "Zoho is not connected. Please connect in Settings first.",
+                message:
+                    "Zoho is not connected. Please connect in Settings first.",
             });
             return;
         }
@@ -173,7 +180,9 @@ export default function Orders({
             if (response.ok && data.success) {
                 setNotification({
                     type: "success",
-                    message: data.message || "Invoice created/synchronized successfully.",
+                    message:
+                        data.message ||
+                        "Invoice created/synchronized successfully.",
                 });
                 await loadData(true);
             } else {
@@ -197,7 +206,8 @@ export default function Orders({
         if (!connectedState) {
             setNotification({
                 type: "error",
-                message: "Zoho is not connected. Please connect in Settings first.",
+                message:
+                    "Zoho is not connected. Please connect in Settings first.",
             });
             return;
         }
@@ -225,7 +235,9 @@ export default function Orders({
             if (response.ok && data.success) {
                 setNotification({
                     type: "success",
-                    message: data.message || "Payment synchronized to Zoho successfully.",
+                    message:
+                        data.message ||
+                        "Payment synchronized to Zoho successfully.",
                 });
                 await loadData(true);
             } else {
@@ -282,7 +294,10 @@ export default function Orders({
             };
         }
 
-        if (order.financial_status === "refunded" || payments.some((p) => p.status === "refunded")) {
+        if (
+            order.financial_status === "refunded" ||
+            payments.some((p) => p.status === "refunded")
+        ) {
             return {
                 status: "refunded",
                 label: "Refunded",
@@ -343,7 +358,8 @@ export default function Orders({
         if (!connectedState) {
             setNotification({
                 type: "error",
-                message: "Zoho is not connected. Please connect in Settings first.",
+                message:
+                    "Zoho is not connected. Please connect in Settings first.",
             });
             return;
         }
@@ -370,6 +386,15 @@ export default function Orders({
             const data = await response.json();
 
             if (response.ok && data.success) {
+                const total = data.summary?.total || 0;
+                const synced = data.summary?.synced || 0;
+                const failed = data.summary?.failed || 0;
+                const skipped = data.summary?.skipped || 0;
+
+                setNotification({
+                    type: failed > 0 ? "warning" : "success",
+                    message: `${total} order(s) processed: ${synced} synced, ${failed} failed${skipped > 0 ? `, ${skipped} skipped` : ""}.`,
+                });
                 setBulkResultsModal({
                     summary: data.summary || {},
                     results: data.results || [],
@@ -452,14 +477,21 @@ export default function Orders({
                 <IndexTable.Cell>
                     <Text variant="bodyMd" fontWeight="bold" as="span">
                         <span style={{ color: "#005bd3" }}>
-                            {o.name || (o.order_number ? `#${o.order_number}` : `#${o.shopify_order_id}`)}
+                            {o.name ||
+                                (o.order_number
+                                    ? `#${o.order_number}`
+                                    : `#${o.shopify_order_id}`)}
                         </span>
                     </Text>
                 </IndexTable.Cell>
                 <IndexTable.Cell>
                     {o.customer ? (
                         <BlockStack gap="050">
-                            <Text variant="bodyMd" fontWeight="semibold" as="span">
+                            <Text
+                                variant="bodyMd"
+                                fontWeight="semibold"
+                                as="span"
+                            >
                                 {o.customer.first_name} {o.customer.last_name}
                             </Text>
                             <Text variant="bodySm" tone="subdued" as="span">
@@ -474,7 +506,9 @@ export default function Orders({
                 </IndexTable.Cell>
                 <IndexTable.Cell>
                     <Text variant="bodySm" tone="subdued" as="span">
-                        {o.created_at ? new Date(o.created_at).toLocaleDateString() : "—"}
+                        {o.created_at
+                            ? new Date(o.created_at).toLocaleDateString()
+                            : "—"}
                     </Text>
                 </IndexTable.Cell>
                 <IndexTable.Cell>
@@ -488,23 +522,46 @@ export default function Orders({
                 <IndexTable.Cell>
                     {o.zoho_sales_order_number || o.zoho_sales_order_id ? (
                         <Text variant="bodySm" tone="subdued" as="span">
-                            <code style={{ fontSize: "11px", backgroundColor: "#f1f2f4", padding: "2px 6px", borderRadius: "4px", color: "#616a75" }}>
-                                {o.zoho_sales_order_number || (o.zoho_sales_order_id?.startsWith("SO-") ? o.zoho_sales_order_id : `SO-${o.zoho_sales_order_id}`)}
+                            <code
+                                style={{
+                                    fontSize: "11px",
+                                    backgroundColor: "#f1f2f4",
+                                    padding: "2px 6px",
+                                    borderRadius: "4px",
+                                    color: "#616a75",
+                                }}
+                            >
+                                {o.zoho_sales_order_number ||
+                                    (o.zoho_sales_order_id?.startsWith("SO-")
+                                        ? o.zoho_sales_order_id
+                                        : `SO-${o.zoho_sales_order_id}`)}
                             </code>
                         </Text>
                     ) : (
-                        <Text variant="bodySm" tone="subdued" as="span">—</Text>
+                        <Text variant="bodySm" tone="subdued" as="span">
+                            —
+                        </Text>
                     )}
                 </IndexTable.Cell>
                 <IndexTable.Cell>
                     {o.invoice?.zoho_invoice_id ? (
                         <Text variant="bodySm" tone="subdued" as="span">
-                            <code style={{ fontSize: "11px", backgroundColor: "#f1f2f4", padding: "2px 6px", borderRadius: "4px", color: "#616a75" }}>
+                            <code
+                                style={{
+                                    fontSize: "11px",
+                                    backgroundColor: "#f1f2f4",
+                                    padding: "2px 6px",
+                                    borderRadius: "4px",
+                                    color: "#616a75",
+                                }}
+                            >
                                 INV-{o.invoice.zoho_invoice_id}
                             </code>
                         </Text>
                     ) : (
-                        <Text variant="bodySm" tone="subdued" as="span">—</Text>
+                        <Text variant="bodySm" tone="subdued" as="span">
+                            —
+                        </Text>
                     )}
                 </IndexTable.Cell>
                 <IndexTable.Cell>
@@ -518,7 +575,9 @@ export default function Orders({
                             size="micro"
                             onClick={() => setSelectedOrderForPayment(o)}
                         >
-                            <Badge tone={paySummary.tone}>{paySummary.label}</Badge>
+                            <Badge tone={paySummary.tone}>
+                                {paySummary.label}
+                            </Badge>
                         </Button>
                     </div>
                 </IndexTable.Cell>
@@ -529,7 +588,11 @@ export default function Orders({
                             activator={
                                 <Button
                                     size="slim"
-                                    onClick={() => setOpenActionMenuId(isMenuOpen ? null : o.id)}
+                                    onClick={() =>
+                                        setOpenActionMenuId(
+                                            isMenuOpen ? null : o.id,
+                                        )
+                                    }
                                     disabled={isSyncing || bulkSyncing}
                                     disclosure
                                 >
@@ -594,7 +657,13 @@ export default function Orders({
                     {/* NOTIFICATION BANNER */}
                     {notification && (
                         <Banner
-                            tone={notification.type === "success" ? "success" : "critical"}
+                            tone={
+                                notification.type === "success"
+                                    ? "success"
+                                    : notification.type === "warning"
+                                      ? "warning"
+                                      : "critical"
+                            }
                             onDismiss={() => setNotification(null)}
                         >
                             <p>{notification.message}</p>
@@ -602,7 +671,11 @@ export default function Orders({
                     )}
 
                     <Card padding="0">
-                        <Tabs tabs={tabs} selected={selectedTab} onSelect={setSelectedTab}>
+                        <Tabs
+                            tabs={tabs}
+                            selected={selectedTab}
+                            onSelect={setSelectedTab}
+                        >
                             <Box padding="400">
                                 <TextField
                                     label="Search orders"
@@ -617,19 +690,35 @@ export default function Orders({
                             </Box>
                             {initialLoading ? (
                                 <Box padding="800">
-                                    <BlockStack align="center" inlineAlign="center" gap="300">
-                                        <Spinner accessibilityLabel="Loading orders" size="large" />
-                                        <Text tone="subdued" variant="bodyMd" as="p">
+                                    <BlockStack
+                                        align="center"
+                                        inlineAlign="center"
+                                        gap="300"
+                                    >
+                                        <Spinner
+                                            accessibilityLabel="Loading orders"
+                                            size="large"
+                                        />
+                                        <Text
+                                            tone="subdued"
+                                            variant="bodyMd"
+                                            as="p"
+                                        >
                                             Loading orders and invoices...
                                         </Text>
                                     </BlockStack>
                                 </Box>
                             ) : (
                                 <IndexTable
-                                    resourceName={{ singular: "order", plural: "orders" }}
+                                    resourceName={{
+                                        singular: "order",
+                                        plural: "orders",
+                                    }}
                                     itemCount={filteredOrders.length}
                                     selectedItemsCount={
-                                        allResourcesSelected ? "All" : selectedResources.length
+                                        allResourcesSelected
+                                            ? "All"
+                                            : selectedResources.length
                                     }
                                     onSelectionChange={handleSelectionChange}
                                     headings={headings}
@@ -663,39 +752,126 @@ export default function Orders({
                         <Modal.Section>
                             <BlockStack gap="300">
                                 <InlineStack gap="200">
-                                    <Badge>Total: {bulkResultsModal.summary?.total || 0}</Badge>
-                                    <Badge tone="success">Synced: {bulkResultsModal.summary?.synced || 0}</Badge>
-                                    <Badge tone="critical">Failed: {bulkResultsModal.summary?.failed || 0}</Badge>
+                                    <Badge>
+                                        Total:{" "}
+                                        {bulkResultsModal.summary?.total || 0}
+                                    </Badge>
+                                    <Badge tone="success">
+                                        Synced:{" "}
+                                        {bulkResultsModal.summary?.synced || 0}
+                                    </Badge>
+                                    <Badge tone="critical">
+                                        Failed:{" "}
+                                        {bulkResultsModal.summary?.failed || 0}
+                                    </Badge>
                                     {bulkResultsModal.summary?.skipped > 0 && (
-                                        <Badge tone="warning">Skipped: {bulkResultsModal.summary?.skipped}</Badge>
+                                        <Badge tone="warning">
+                                            Skipped:{" "}
+                                            {bulkResultsModal.summary?.skipped}
+                                        </Badge>
                                     )}
                                 </InlineStack>
 
-                                <Box borderWidth="025" borderColor="border" borderRadius="200" overflowX="auto">
-                                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+                                <Box
+                                    borderWidth="025"
+                                    borderColor="border"
+                                    borderRadius="200"
+                                    overflowX="auto"
+                                >
+                                    <table
+                                        style={{
+                                            width: "100%",
+                                            borderCollapse: "collapse",
+                                            fontSize: "13px",
+                                        }}
+                                    >
                                         <thead>
-                                            <tr style={{ backgroundColor: "#f8f9fa", borderBottom: "1px solid #e1e3e5", textAlign: "left" }}>
-                                                <th style={{ padding: "10px 14px" }}>Order # / ID</th>
-                                                <th style={{ padding: "10px 14px" }}>Status</th>
-                                                <th style={{ padding: "10px 14px" }}>Message</th>
+                                            <tr
+                                                style={{
+                                                    backgroundColor: "#f8f9fa",
+                                                    borderBottom:
+                                                        "1px solid #e1e3e5",
+                                                    textAlign: "left",
+                                                }}
+                                            >
+                                                <th
+                                                    style={{
+                                                        padding: "10px 14px",
+                                                    }}
+                                                >
+                                                    Order # / ID
+                                                </th>
+                                                <th
+                                                    style={{
+                                                        padding: "10px 14px",
+                                                    }}
+                                                >
+                                                    Status
+                                                </th>
+                                                <th
+                                                    style={{
+                                                        padding: "10px 14px",
+                                                    }}
+                                                >
+                                                    Message
+                                                </th>
                                             </tr>
                                         </thead>
                                         <tbody>
-                                            {bulkResultsModal.results?.map((res, idx) => (
-                                                <tr key={idx} style={{ borderBottom: "1px solid #f1f2f4" }}>
-                                                    <td style={{ padding: "10px 14px", fontWeight: 600, fontFamily: "monospace" }}>
-                                                        {res.order_number ? `#${res.order_number}` : `ID #${res.id}`}
-                                                    </td>
-                                                    <td style={{ padding: "10px 14px" }}>
-                                                        <Badge tone={res.status === "success" ? "success" : res.status === "skipped" ? "warning" : "critical"}>
-                                                            {res.status}
-                                                        </Badge>
-                                                    </td>
-                                                    <td style={{ padding: "10px 14px", color: "#616a75" }}>
-                                                        {res.message}
-                                                    </td>
-                                                </tr>
-                                            ))}
+                                            {bulkResultsModal.results?.map(
+                                                (res, idx) => (
+                                                    <tr
+                                                        key={idx}
+                                                        style={{
+                                                            borderBottom:
+                                                                "1px solid #f1f2f4",
+                                                        }}
+                                                    >
+                                                        <td
+                                                            style={{
+                                                                padding:
+                                                                    "10px 14px",
+                                                                fontWeight: 600,
+                                                                fontFamily:
+                                                                    "monospace",
+                                                            }}
+                                                        >
+                                                            {res.order_number
+                                                                ? `#${res.order_number}`
+                                                                : `ID #${res.id}`}
+                                                        </td>
+                                                        <td
+                                                            style={{
+                                                                padding:
+                                                                    "10px 14px",
+                                                            }}
+                                                        >
+                                                            <Badge
+                                                                tone={
+                                                                    res.status ===
+                                                                    "success"
+                                                                        ? "success"
+                                                                        : res.status ===
+                                                                            "skipped"
+                                                                          ? "warning"
+                                                                          : "critical"
+                                                                }
+                                                            >
+                                                                {res.status}
+                                                            </Badge>
+                                                        </td>
+                                                        <td
+                                                            style={{
+                                                                padding:
+                                                                    "10px 14px",
+                                                                color: "#616a75",
+                                                            }}
+                                                        >
+                                                            {res.message}
+                                                        </td>
+                                                    </tr>
+                                                ),
+                                            )}
                                         </tbody>
                                     </table>
                                 </Box>
@@ -719,31 +895,86 @@ export default function Orders({
                             <BlockStack gap="400">
                                 <Text tone="subdued" as="p">
                                     Associated Invoice:{" "}
-                                    <strong style={{ color: "#005bd3", fontFamily: "monospace" }}>
-                                        {selectedOrderForPayment.invoice?.zoho_invoice_id
+                                    <strong
+                                        style={{
+                                            color: "#005bd3",
+                                            fontFamily: "monospace",
+                                        }}
+                                    >
+                                        {selectedOrderForPayment.invoice
+                                            ?.zoho_invoice_id
                                             ? `INV-${selectedOrderForPayment.invoice.zoho_invoice_id}`
                                             : "Pending Invoice"}
                                     </strong>
                                 </Text>
 
                                 <InlineStack gap="400">
-                                    <Box padding="300" background="bg-surface-secondary" borderRadius="200" style={{ flex: 1 }}>
-                                        <Text tone="subdued" variant="bodySm" as="p">Order Total</Text>
+                                    <Box
+                                        padding="300"
+                                        background="bg-surface-secondary"
+                                        borderRadius="200"
+                                        style={{ flex: 1 }}
+                                    >
+                                        <Text
+                                            tone="subdued"
+                                            variant="bodySm"
+                                            as="p"
+                                        >
+                                            Order Total
+                                        </Text>
                                         <Text variant="headingSm" as="p">
-                                            ${parseFloat(selectedOrderForPayment.total_price || 0).toFixed(2)} {selectedOrderForPayment.currency || "USD"}
+                                            $
+                                            {parseFloat(
+                                                selectedOrderForPayment.total_price ||
+                                                    0,
+                                            ).toFixed(2)}{" "}
+                                            {selectedOrderForPayment.currency ||
+                                                "USD"}
                                         </Text>
                                     </Box>
-                                    <Box padding="300" background="bg-surface-secondary" borderRadius="200" style={{ flex: 1 }}>
-                                        <Text tone="subdued" variant="bodySm" as="p">Financial Status</Text>
-                                        <Text variant="headingSm" as="p" style={{ textTransform: "capitalize" }}>
-                                            {selectedOrderForPayment.financial_status || "pending"}
+                                    <Box
+                                        padding="300"
+                                        background="bg-surface-secondary"
+                                        borderRadius="200"
+                                        style={{ flex: 1 }}
+                                    >
+                                        <Text
+                                            tone="subdued"
+                                            variant="bodySm"
+                                            as="p"
+                                        >
+                                            Financial Status
+                                        </Text>
+                                        <Text
+                                            variant="headingSm"
+                                            as="p"
+                                            style={{
+                                                textTransform: "capitalize",
+                                            }}
+                                        >
+                                            {selectedOrderForPayment.financial_status ||
+                                                "pending"}
                                         </Text>
                                     </Box>
-                                    <Box padding="300" background="bg-surface-secondary" borderRadius="200" style={{ flex: 1 }}>
-                                        <Text tone="subdued" variant="bodySm" as="p">Shipping Charge</Text>
+                                    <Box
+                                        padding="300"
+                                        background="bg-surface-secondary"
+                                        borderRadius="200"
+                                        style={{ flex: 1 }}
+                                    >
+                                        <Text
+                                            tone="subdued"
+                                            variant="bodySm"
+                                            as="p"
+                                        >
+                                            Shipping Charge
+                                        </Text>
                                         <Text variant="headingSm" as="p">
-                                            {parseFloat(selectedOrderForPayment.shipping_total || 0) > 0 
-                                                ? `$${parseFloat(selectedOrderForPayment.shipping_total).toFixed(2)} ${selectedOrderForPayment.currency || "USD"}` 
+                                            {parseFloat(
+                                                selectedOrderForPayment.shipping_total ||
+                                                    0,
+                                            ) > 0
+                                                ? `$${parseFloat(selectedOrderForPayment.shipping_total).toFixed(2)} ${selectedOrderForPayment.currency || "USD"}`
                                                 : "Free Shipping"}
                                         </Text>
                                     </Box>
@@ -757,131 +988,342 @@ export default function Orders({
                                         </Text>
                                         <InlineStack gap="400" wrap={false}>
                                             <Box style={{ flex: 1 }}>
-                                                <Text tone="subdued" variant="bodySm" as="p">Shipping Method</Text>
-                                                <Text variant="bodyMd" fontWeight="semibold" as="p">
-                                                    {selectedOrderForPayment.shipping_method || "Standard Delivery"}
+                                                <Text
+                                                    tone="subdued"
+                                                    variant="bodySm"
+                                                    as="p"
+                                                >
+                                                    Shipping Method
+                                                </Text>
+                                                <Text
+                                                    variant="bodyMd"
+                                                    fontWeight="semibold"
+                                                    as="p"
+                                                >
+                                                    {selectedOrderForPayment.shipping_method ||
+                                                        "Standard Delivery"}
                                                 </Text>
                                             </Box>
                                             <Box style={{ flex: 1 }}>
-                                                <Text tone="subdued" variant="bodySm" as="p">Carrier / Courier</Text>
-                                                <Text variant="bodyMd" fontWeight="semibold" as="p">
-                                                    {selectedOrderForPayment.tracking_company || "Not Specified"}
+                                                <Text
+                                                    tone="subdued"
+                                                    variant="bodySm"
+                                                    as="p"
+                                                >
+                                                    Carrier / Courier
+                                                </Text>
+                                                <Text
+                                                    variant="bodyMd"
+                                                    fontWeight="semibold"
+                                                    as="p"
+                                                >
+                                                    {selectedOrderForPayment.tracking_company ||
+                                                        "Not Specified"}
                                                 </Text>
                                             </Box>
                                             <Box style={{ flex: 1 }}>
-                                                <Text tone="subdued" variant="bodySm" as="p">Tracking Number</Text>
+                                                <Text
+                                                    tone="subdued"
+                                                    variant="bodySm"
+                                                    as="p"
+                                                >
+                                                    Tracking Number
+                                                </Text>
                                                 {selectedOrderForPayment.tracking_number ? (
                                                     selectedOrderForPayment.tracking_url ? (
-                                                        <a href={selectedOrderForPayment.tracking_url} target="_blank" rel="noopener noreferrer" style={{ color: "#005bd3", fontWeight: 600, fontSize: "13px" }}>
-                                                            #{selectedOrderForPayment.tracking_number} 🔗
+                                                        <a
+                                                            href={
+                                                                selectedOrderForPayment.tracking_url
+                                                            }
+                                                            target="_blank"
+                                                            rel="noopener noreferrer"
+                                                            style={{
+                                                                color: "#005bd3",
+                                                                fontWeight: 600,
+                                                                fontSize:
+                                                                    "13px",
+                                                            }}
+                                                        >
+                                                            #
+                                                            {
+                                                                selectedOrderForPayment.tracking_number
+                                                            }{" "}
+                                                            🔗
                                                         </a>
                                                     ) : (
-                                                        <Text variant="bodyMd" fontWeight="semibold" as="p">
-                                                            #{selectedOrderForPayment.tracking_number}
+                                                        <Text
+                                                            variant="bodyMd"
+                                                            fontWeight="semibold"
+                                                            as="p"
+                                                        >
+                                                            #
+                                                            {
+                                                                selectedOrderForPayment.tracking_number
+                                                            }
                                                         </Text>
                                                     )
                                                 ) : (
-                                                    <Text tone="subdued" variant="bodyMd" as="p">No tracking yet</Text>
+                                                    <Text
+                                                        tone="subdued"
+                                                        variant="bodyMd"
+                                                        as="p"
+                                                    >
+                                                        No tracking yet
+                                                    </Text>
                                                 )}
                                             </Box>
                                         </InlineStack>
 
-                                        {selectedOrderForPayment.shipping_address && typeof selectedOrderForPayment.shipping_address === "object" && (
-                                            <Box padding="300" background="bg-surface-secondary" borderRadius="200" marginTop="200">
-                                                <Text tone="subdued" variant="bodySm" as="p" fontWeight="semibold">Shipping Destination:</Text>
-                                                <Text variant="bodySm" as="p">
-                                                    {selectedOrderForPayment.shipping_address.first_name || selectedOrderForPayment.shipping_address.name} {selectedOrderForPayment.shipping_address.last_name || ""}
-                                                    {selectedOrderForPayment.shipping_address.company ? ` (${selectedOrderForPayment.shipping_address.company})` : ""}
-                                                </Text>
-                                                <Text variant="bodySm" tone="subdued" as="p">
-                                                    {[
-                                                        selectedOrderForPayment.shipping_address.address1,
-                                                        selectedOrderForPayment.shipping_address.address2,
-                                                        selectedOrderForPayment.shipping_address.city,
-                                                        selectedOrderForPayment.shipping_address.province || selectedOrderForPayment.shipping_address.state,
-                                                        selectedOrderForPayment.shipping_address.zip,
-                                                        selectedOrderForPayment.shipping_address.country
-                                                    ].filter(Boolean).join(", ")}
-                                                </Text>
-                                                {selectedOrderForPayment.shipping_address.phone && (
-                                                    <Text variant="bodySm" tone="subdued" as="p">
-                                                        📞 {selectedOrderForPayment.shipping_address.phone}
+                                        {selectedOrderForPayment.shipping_address &&
+                                            typeof selectedOrderForPayment.shipping_address ===
+                                                "object" && (
+                                                <Box
+                                                    padding="300"
+                                                    background="bg-surface-secondary"
+                                                    borderRadius="200"
+                                                    marginTop="200"
+                                                >
+                                                    <Text
+                                                        tone="subdued"
+                                                        variant="bodySm"
+                                                        as="p"
+                                                        fontWeight="semibold"
+                                                    >
+                                                        Shipping Destination:
                                                     </Text>
-                                                )}
-                                            </Box>
-                                        )}
+                                                    <Text
+                                                        variant="bodySm"
+                                                        as="p"
+                                                    >
+                                                        {selectedOrderForPayment
+                                                            .shipping_address
+                                                            .first_name ||
+                                                            selectedOrderForPayment
+                                                                .shipping_address
+                                                                .name}{" "}
+                                                        {selectedOrderForPayment
+                                                            .shipping_address
+                                                            .last_name || ""}
+                                                        {selectedOrderForPayment
+                                                            .shipping_address
+                                                            .company
+                                                            ? ` (${selectedOrderForPayment.shipping_address.company})`
+                                                            : ""}
+                                                    </Text>
+                                                    <Text
+                                                        variant="bodySm"
+                                                        tone="subdued"
+                                                        as="p"
+                                                    >
+                                                        {[
+                                                            selectedOrderForPayment
+                                                                .shipping_address
+                                                                .address1,
+                                                            selectedOrderForPayment
+                                                                .shipping_address
+                                                                .address2,
+                                                            selectedOrderForPayment
+                                                                .shipping_address
+                                                                .city,
+                                                            selectedOrderForPayment
+                                                                .shipping_address
+                                                                .province ||
+                                                                selectedOrderForPayment
+                                                                    .shipping_address
+                                                                    .state,
+                                                            selectedOrderForPayment
+                                                                .shipping_address
+                                                                .zip,
+                                                            selectedOrderForPayment
+                                                                .shipping_address
+                                                                .country,
+                                                        ]
+                                                            .filter(Boolean)
+                                                            .join(", ")}
+                                                    </Text>
+                                                    {selectedOrderForPayment
+                                                        .shipping_address
+                                                        .phone && (
+                                                        <Text
+                                                            variant="bodySm"
+                                                            tone="subdued"
+                                                            as="p"
+                                                        >
+                                                            📞{" "}
+                                                            {
+                                                                selectedOrderForPayment
+                                                                    .shipping_address
+                                                                    .phone
+                                                            }
+                                                        </Text>
+                                                    )}
+                                                </Box>
+                                            )}
                                     </BlockStack>
                                 </Card>
 
                                 <Text variant="headingSm" as="h3">
-                                    Payment Transactions ({selectedOrderForPayment.payments ? selectedOrderForPayment.payments.length : 0})
+                                    Payment Transactions (
+                                    {selectedOrderForPayment.payments
+                                        ? selectedOrderForPayment.payments
+                                              .length
+                                        : 0}
+                                    )
                                 </Text>
 
-                                {!selectedOrderForPayment.payments || selectedOrderForPayment.payments.length === 0 ? (
-                                    <Box padding="400" background="bg-surface-secondary" borderRadius="200">
+                                {!selectedOrderForPayment.payments ||
+                                selectedOrderForPayment.payments.length ===
+                                    0 ? (
+                                    <Box
+                                        padding="400"
+                                        background="bg-surface-secondary"
+                                        borderRadius="200"
+                                    >
                                         <Text tone="subdued" as="p">
-                                            No payment transaction recorded locally for this order.
+                                            No payment transaction recorded
+                                            locally for this order.
                                         </Text>
                                         {selectedOrderForPayment.invoice && (
                                             <Box paddingTop="200">
                                                 <Button
                                                     variant="primary"
-                                                    onClick={() => handleSyncPayment(null, selectedOrderForPayment.id)}
-                                                    loading={syncingPaymentId === selectedOrderForPayment.id}
+                                                    onClick={() =>
+                                                        handleSyncPayment(
+                                                            null,
+                                                            selectedOrderForPayment.id,
+                                                        )
+                                                    }
+                                                    loading={
+                                                        syncingPaymentId ===
+                                                        selectedOrderForPayment.id
+                                                    }
                                                 >
-                                                    Record &amp; Sync Payment to Zoho
+                                                    Record &amp; Sync Payment to
+                                                    Zoho
                                                 </Button>
                                             </Box>
                                         )}
                                     </Box>
                                 ) : (
                                     <BlockStack gap="300">
-                                        {selectedOrderForPayment.payments.map((p) => {
-                                            const isPaymentSyncing = syncingPaymentId === p.id || syncingPaymentId === selectedOrderForPayment.id;
-                                            const isSynced = p.sync_status === "synced" || !!p.zoho_payment_id;
-                                            const isFailed = p.sync_status === "failed";
+                                        {selectedOrderForPayment.payments.map(
+                                            (p) => {
+                                                const isPaymentSyncing =
+                                                    syncingPaymentId === p.id ||
+                                                    syncingPaymentId ===
+                                                        selectedOrderForPayment.id;
+                                                const isSynced =
+                                                    p.sync_status ===
+                                                        "synced" ||
+                                                    !!p.zoho_payment_id;
+                                                const isFailed =
+                                                    p.sync_status === "failed";
 
-                                            return (
-                                                <Card key={p.id}>
-                                                    <BlockStack gap="200">
-                                                        <InlineStack align="space-between">
-                                                            <Text variant="headingSm" as="span">
-                                                                ${parseFloat(p.amount || 0).toFixed(2)} {p.currency || "USD"}
-                                                            </Text>
-                                                            <Badge tone={isSynced ? "success" : isFailed ? "critical" : "warning"}>
-                                                                Sync: {p.sync_status ? p.sync_status.toUpperCase() : "PENDING"}
-                                                            </Badge>
-                                                        </InlineStack>
-
-                                                        <Text variant="bodySm" tone="subdued" as="p">
-                                                            Method: {p.payment_method || "shopify_payments"} | Date: {p.payment_date ? new Date(p.payment_date).toLocaleString() : "—"}
-                                                        </Text>
-                                                        <Text variant="bodySm" tone="subdued" as="p">
-                                                            Shopify Txn: <code>{p.shopify_transaction_id || p.payment_reference || "—"}</code> | Zoho Payment ID: <code>{p.zoho_payment_id || "Not Synced"}</code>
-                                                        </Text>
-
-                                                        {isFailed && p.error_message && (
-                                                            <Banner tone="critical">
-                                                                <p>{p.error_message}</p>
-                                                            </Banner>
-                                                        )}
-
-                                                        {(!isSynced || isFailed) && (
-                                                            <InlineStack align="end">
-                                                                <Button
-                                                                    variant="primary"
-                                                                    size="slim"
-                                                                    onClick={() => handleSyncPayment(p.id, selectedOrderForPayment.id)}
-                                                                    loading={isPaymentSyncing}
+                                                return (
+                                                    <Card key={p.id}>
+                                                        <BlockStack gap="200">
+                                                            <InlineStack align="space-between">
+                                                                <Text
+                                                                    variant="headingSm"
+                                                                    as="span"
                                                                 >
-                                                                    Retry Payment
-                                                                </Button>
+                                                                    $
+                                                                    {parseFloat(
+                                                                        p.amount ||
+                                                                            0,
+                                                                    ).toFixed(
+                                                                        2,
+                                                                    )}{" "}
+                                                                    {p.currency ||
+                                                                        "USD"}
+                                                                </Text>
+                                                                <Badge
+                                                                    tone={
+                                                                        isSynced
+                                                                            ? "success"
+                                                                            : isFailed
+                                                                              ? "critical"
+                                                                              : "warning"
+                                                                    }
+                                                                >
+                                                                    Sync:{" "}
+                                                                    {p.sync_status
+                                                                        ? p.sync_status.toUpperCase()
+                                                                        : "PENDING"}
+                                                                </Badge>
                                                             </InlineStack>
-                                                        )}
-                                                    </BlockStack>
-                                                </Card>
-                                            );
-                                        })}
+
+                                                            <Text
+                                                                variant="bodySm"
+                                                                tone="subdued"
+                                                                as="p"
+                                                            >
+                                                                Method:{" "}
+                                                                {p.payment_method ||
+                                                                    "shopify_payments"}{" "}
+                                                                | Date:{" "}
+                                                                {p.payment_date
+                                                                    ? new Date(
+                                                                          p.payment_date,
+                                                                      ).toLocaleString()
+                                                                    : "—"}
+                                                            </Text>
+                                                            <Text
+                                                                variant="bodySm"
+                                                                tone="subdued"
+                                                                as="p"
+                                                            >
+                                                                Shopify Txn:{" "}
+                                                                <code>
+                                                                    {p.shopify_transaction_id ||
+                                                                        p.payment_reference ||
+                                                                        "—"}
+                                                                </code>{" "}
+                                                                | Zoho Payment
+                                                                ID:{" "}
+                                                                <code>
+                                                                    {p.zoho_payment_id ||
+                                                                        "Not Synced"}
+                                                                </code>
+                                                            </Text>
+
+                                                            {isFailed &&
+                                                                p.error_message && (
+                                                                    <Banner tone="critical">
+                                                                        <p>
+                                                                            {
+                                                                                p.error_message
+                                                                            }
+                                                                        </p>
+                                                                    </Banner>
+                                                                )}
+
+                                                            {(!isSynced ||
+                                                                isFailed) && (
+                                                                <InlineStack align="end">
+                                                                    <Button
+                                                                        variant="primary"
+                                                                        size="slim"
+                                                                        onClick={() =>
+                                                                            handleSyncPayment(
+                                                                                p.id,
+                                                                                selectedOrderForPayment.id,
+                                                                            )
+                                                                        }
+                                                                        loading={
+                                                                            isPaymentSyncing
+                                                                        }
+                                                                    >
+                                                                        Retry
+                                                                        Payment
+                                                                    </Button>
+                                                                </InlineStack>
+                                                            )}
+                                                        </BlockStack>
+                                                    </Card>
+                                                );
+                                            },
+                                        )}
                                     </BlockStack>
                                 )}
                             </BlockStack>

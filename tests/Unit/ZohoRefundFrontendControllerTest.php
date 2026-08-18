@@ -282,6 +282,104 @@ class ZohoRefundFrontendControllerTest extends TestCase
         $this->assertEquals('cn_zoho_99855', $refund->zoho_creditnote_id);
     }
 
+    public function test_full_refund_with_restock_and_multiple_refunded_items(): void
+    {
+        $order = Order::create([
+            'shop_id' => $this->shopA->id,
+            'shopify_order_id' => 'gid://shopify/Order/3001',
+            'order_number' => '3001',
+            'total_price' => '100.00',
+            'currency' => 'USD',
+            'order_date' => now(),
+            'line_items' => [
+                ['title' => 'Item Alpha', 'quantity' => 1, 'price' => 40.00],
+                ['title' => 'Item Beta', 'quantity' => 2, 'price' => 30.00],
+            ],
+        ]);
+
+        $refund = Refund::create([
+            'shop_id' => $this->shopA->id,
+            'order_id' => $order->id,
+            'shopify_refund_id' => '99901',
+            'shopify_order_id' => 'gid://shopify/Order/3001',
+            'amount' => '100.00',
+            'currency' => 'USD',
+            'restock' => true,
+            'refund_line_items' => [
+                ['title' => 'Item Alpha', 'sku' => 'SKU-A', 'quantity' => 1, 'price' => 40.00, 'restock_type' => 'return'],
+                ['title' => 'Item Beta', 'sku' => 'SKU-B', 'quantity' => 2, 'price' => 30.00, 'restock_type' => 'return'],
+            ],
+            'sync_status' => 'synced',
+            'zoho_creditnote_id' => 'CN-3001',
+        ]);
+
+        $response = $this->actingAsShop($this->shopA)
+            ->getJson("/api/zoho/refunds/{$refund->id}");
+
+        $response->assertStatus(200)
+            ->assertJson([
+                'success' => true,
+                'refund' => [
+                    'id' => $refund->id,
+                    'amount' => '100.00',
+                    'restock' => true,
+                    'zoho_creditnote_id' => 'CN-3001',
+                ],
+            ]);
+
+        $refundData = $response->json('refund');
+        $this->assertCount(2, $refundData['refund_line_items']);
+        $this->assertEquals('Item Alpha', $refundData['refund_line_items'][0]['title']);
+        $this->assertEquals('Item Beta', $refundData['refund_line_items'][1]['title']);
+    }
+
+    public function test_partial_refund_without_restock(): void
+    {
+        $order = Order::create([
+            'shop_id' => $this->shopA->id,
+            'shopify_order_id' => 'gid://shopify/Order/3002',
+            'order_number' => '3002',
+            'total_price' => '200.00',
+            'currency' => 'USD',
+            'order_date' => now(),
+            'line_items' => [
+                ['title' => 'Item Gamma', 'quantity' => 2, 'price' => 100.00],
+            ],
+        ]);
+
+        $refund = Refund::create([
+            'shop_id' => $this->shopA->id,
+            'order_id' => $order->id,
+            'shopify_refund_id' => '99902',
+            'shopify_order_id' => 'gid://shopify/Order/3002',
+            'amount' => '100.00',
+            'currency' => 'USD',
+            'restock' => false,
+            'refund_line_items' => [
+                ['title' => 'Item Gamma', 'sku' => 'SKU-G', 'quantity' => 1, 'price' => 100.00, 'restock_type' => 'no_restock'],
+            ],
+            'sync_status' => 'pending',
+        ]);
+
+        $response = $this->actingAsShop($this->shopA)
+            ->getJson("/api/zoho/refunds/{$refund->id}");
+
+        $response->assertStatus(200)
+            ->assertJson([
+                'success' => true,
+                'refund' => [
+                    'id' => $refund->id,
+                    'amount' => '100.00',
+                    'restock' => false,
+                    'sync_status' => 'pending',
+                ],
+            ]);
+
+        $refundData = $response->json('refund');
+        $this->assertCount(1, $refundData['refund_line_items']);
+        $this->assertFalse($refundData['restock']);
+    }
+
     private function actingAsShop(Shop $shop)
     {
         return $this->withHeaders([

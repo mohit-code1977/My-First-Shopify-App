@@ -405,6 +405,16 @@ class TaxMappingTest extends \Tests\TestCase
 
     public function test_save_tax_settings_endpoint_validates_and_persists_settings(): void
     {
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/settings/taxes*' => Http::response([
+                'code' => 0,
+                'taxes' => [
+                    ['tax_id' => 'zoho_tax_default_100', 'tax_name' => 'Default Tax', 'tax_percentage' => 10],
+                    ['tax_id' => 'zoho_sgst_9', 'tax_name' => 'State GST', 'tax_percentage' => 9],
+                ],
+            ], 200),
+        ]);
+
         $payload = [
             'tax_mode' => 'inclusive',
             'default_tax_id' => 'zoho_tax_default_100',
@@ -420,14 +430,17 @@ class TaxMappingTest extends \Tests\TestCase
         ];
 
         $response = $this->actingAsShop()
-            ->postJson('/zoho/settings/tax', $payload);
+            ->postJson('/zoho/settings/tax?shop=' . $this->shop->shop_domain, $payload);
 
         $response->assertStatus(200);
         $response->assertJson(['success' => true]);
 
-        $this->shop->refresh();
-        $this->assertEquals('inclusive', $this->shop->tax_settings['tax_mode']);
-        $this->assertEquals('zoho_sgst_9', $this->shop->tax_settings['tax_mappings'][0]['zoho_tax_id']);
+        $this->assertEquals('inclusive', $response->json('tax_settings.tax_mode'));
+        $this->assertEquals('zoho_sgst_9', $response->json('tax_settings.tax_mappings.0.zoho_tax_id'));
+
+        $freshShop = $this->shop->fresh();
+        $this->assertEquals('inclusive', $freshShop->tax_settings['tax_mode']);
+        $this->assertEquals('zoho_sgst_9', $freshShop->tax_settings['tax_mappings'][0]['zoho_tax_id']);
     }
 
     public function test_save_tax_settings_rejects_more_than_50_mappings(): void

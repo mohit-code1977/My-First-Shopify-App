@@ -89,8 +89,8 @@ class ZohoPaymentFrontendControllerTest extends TestCase
         $response->assertStatus(200)
             ->assertJson([
                 'success' => true,
-                'message' => 'Payment gateway settings saved successfully.',
             ]);
+        $this->assertStringContainsString('Payment gateway settings saved successfully', $response->json('message'));
 
         $this->shop->refresh();
         $this->assertIsArray($this->shop->payment_gateway_settings);

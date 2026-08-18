@@ -298,43 +298,13 @@ export default function Settings({ shop, zohoConnection, host }) {
         >
             <main className="zoho-content" style={{ padding: 0 }}>
                 {notification && (
-                    <div
-                        style={{
-                            padding: "12px 16px",
-                            borderRadius: "8px",
-                            fontSize: "14px",
-                            fontWeight: 500,
-                            marginBottom: "20px",
-                            backgroundColor:
-                                notification.type === "success"
-                                    ? "#eafbdf"
-                                    : "#fbeae8",
-                            color:
-                                notification.type === "success"
-                                    ? "#108043"
-                                    : "#d72c0d",
-                            border:
-                                notification.type === "success"
-                                    ? "1px solid #b7eb8f"
-                                    : "1px solid #f3baba",
-                            display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "center",
-                        }}
-                    >
-                        <span>{notification.message}</span>
-                        <button
-                            type="button"
-                            onClick={() => setNotification(null)}
-                            style={{
-                                background: "none",
-                                border: "none",
-                                cursor: "pointer",
-                                fontSize: "16px",
-                            }}
+                    <div style={{ marginBottom: "20px" }}>
+                        <Banner
+                            tone={notification.type === "success" ? "success" : notification.type === "warning" ? "warning" : "critical"}
+                            onDismiss={() => setNotification(null)}
                         >
-                            ×
-                        </button>
+                            <p>{notification.message}</p>
+                        </Banner>
                     </div>
                 )}
 

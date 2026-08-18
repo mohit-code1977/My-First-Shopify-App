@@ -751,13 +751,14 @@ GRAPHQL;
             $customer = null;
             if ($custNode) {
                 $custNumericId = preg_replace('/[^0-9]/', '', $custNode['id'] ?? '');
+                $customerDefaultAddr = $custNode['defaultAddress'] ?? [];
                 $customer = [
                     'id' => $custNumericId,
                     'first_name' => $custNode['firstName'] ?? '',
                     'last_name' => $custNode['lastName'] ?? '',
                     'email' => $custNode['email'] ?? '',
-                    'phone' => $custNode['phone'] ?? null,
-                    'default_address' => $custNode['defaultAddress'] ?? [],
+                    'phone' => !empty($custNode['phone']) ? $custNode['phone'] : ($customerDefaultAddr['phone'] ?? null),
+                    'default_address' => $customerDefaultAddr,
                 ];
             }
 
@@ -907,7 +908,6 @@ query fetchSingleOrder($id: ID!) {
             firstName
             lastName
             email
-            phone
             defaultAddress {
                 address1
                 city
@@ -967,19 +967,25 @@ GRAPHQL;
                 : "gid://shopify/Customer/" . preg_replace('/[^0-9]/', '', $rawCustId);
 
             $defaultAddr = $custNode['defaultAddress'] ?? [];
+            $phone = !empty($custNode['phone']) ? $custNode['phone'] : ($defaultAddr['phone'] ?? null);
+
+            $updateData = [
+                'first_name' => $custNode['firstName'] ?? null,
+                'last_name' => $custNode['lastName'] ?? null,
+                'email' => $custNode['email'] ?? null,
+                'billing_address' => $defaultAddr,
+                'shipping_address' => $defaultAddr,
+            ];
+            if ($phone !== null) {
+                $updateData['phone'] = $phone;
+            }
+
             $customer = Customer::updateOrCreate(
                 [
                     'shop_id' => $shop->id,
                     'shopify_customer_id' => $shopifyCustId,
                 ],
-                [
-                    'first_name' => $custNode['firstName'] ?? null,
-                    'last_name' => $custNode['lastName'] ?? null,
-                    'email' => $custNode['email'] ?? null,
-                    'phone' => $custNode['phone'] ?? ($defaultAddr['phone'] ?? null),
-                    'billing_address' => $defaultAddr,
-                    'shipping_address' => $defaultAddr,
-                ]
+                $updateData
             );
 
             $customerId = $customer->id;
@@ -1195,13 +1201,15 @@ GRAPHQL;
 
         foreach ($nodes as $node) {
             $numericId = preg_replace('/[^0-9]/', '', $node['id'] ?? '');
+            $defaultAddr = $node['defaultAddress'] ?? [];
+            $phone = !empty($node['phone']) ? $node['phone'] : ($defaultAddr['phone'] ?? null);
             $customers[] = [
                 'id' => $numericId,
                 'first_name' => $node['firstName'] ?? '',
                 'last_name' => $node['lastName'] ?? '',
                 'email' => $node['email'] ?? '',
-                'phone' => $node['phone'] ?? null,
-                'default_address' => $node['defaultAddress'] ?? [],
+                'phone' => $phone,
+                'default_address' => $defaultAddr,
             ];
         }
 

@@ -20,6 +20,8 @@ class ZohoCustomerSyncTest extends TestCase {
     protected function setUp(): void {
         parent::setUp();
 
+        $this->withoutMiddleware([\App\Http\Middleware\ShopifyAuthenticate::class]);
+
         $this->shop = Shop::create([
             'shop_domain' => 'customer-test.myshopify.com',
             'access_token' => 'shpat_test_token',
@@ -434,4 +436,205 @@ class ZohoCustomerSyncTest extends TestCase {
         $this->expectException(\Exception::class);
         $shopifyService->fetchCustomers($this->shop);
     }
+
+    public function test_customer_with_phone_persisted_and_synced_to_zoho() {
+        $customer = Customer::create([
+            'shop_id' => $this->shop->id,
+            'shopify_customer_id' => 'gid://shopify/Customer/9901',
+            'first_name' => 'Mohit',
+            'last_name' => 'Sanodiya',
+            'email' => 'mohit@example.com',
+            'phone' => '+919876543210',
+        ]);
+
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/contacts*' => function (Request $request) {
+                if ($request->method() === 'GET') {
+                    return Http::response(['code' => 0, 'contacts' => []], 200);
+                }
+                if ($request->method() === 'POST') {
+                    return Http::response([
+                        'code' => 0,
+                        'contact' => ['contact_id' => 'zoho_contact_mohit'],
+                    ], 201);
+                }
+                return Http::response(['code' => 0], 200);
+            },
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncCustomer($customer);
+
+        $this->assertTrue($result['success']);
+        $this->assertEquals('+919876543210', $customer->phone);
+
+        Http::assertSent(function (Request $request) {
+            return $request->method() === 'POST' &&
+                $request->data()['phone'] === '+919876543210' &&
+                $request->data()['contact_persons'][0]['phone'] === '+919876543210';
+        });
+    }
+
+    public function test_customer_without_phone_persisted_and_synced_to_zoho() {
+        $customer = Customer::create([
+            'shop_id' => $this->shop->id,
+            'shopify_customer_id' => 'gid://shopify/Customer/9902',
+            'first_name' => 'NoPhone',
+            'last_name' => 'User',
+            'email' => 'nophone@example.com',
+            'phone' => null,
+        ]);
+
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/contacts*' => function (Request $request) {
+                if ($request->method() === 'GET') {
+                    return Http::response(['code' => 0, 'contacts' => []], 200);
+                }
+                if ($request->method() === 'POST') {
+                    return Http::response([
+                        'code' => 0,
+                        'contact' => ['contact_id' => 'zoho_contact_nophone'],
+                    ], 201);
+                }
+                return Http::response(['code' => 0], 200);
+            },
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncCustomer($customer);
+
+        $this->assertTrue($result['success']);
+        $this->assertNull($customer->phone);
+    }
+
+    public function test_customer_phone_update_preserves_or_updates_phone() {
+        config(['services.shopify.api_secret' => 'test_secret']);
+
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/contacts*' => Http::response(['code' => 0, 'contacts' => []], 200),
+        ]);
+
+        $customer = Customer::create([
+            'shop_id' => $this->shop->id,
+            'shopify_customer_id' => 'gid://shopify/Customer/9903',
+            'first_name' => 'Original',
+            'last_name' => 'Name',
+            'email' => 'original@example.com',
+            'phone' => '+15551112222',
+        ]);
+
+        $payload = json_encode([
+            'id' => 9903,
+            'first_name' => 'Original',
+            'last_name' => 'Name',
+            'email' => 'original@example.com',
+            'phone' => '+15559998888',
+        ]);
+
+        $hmac = $this->calculateHmac($payload, 'test_secret');
+
+        $response = $this->withHeaders([
+            'X-Shopify-Hmac-SHA256' => $hmac,
+            'X-Shopify-Shop-Domain' => $this->shop->shop_domain,
+            'X-Shopify-Webhook-Id' => 'webhook_cust_phone_update',
+            'X-Shopify-Topic' => 'customers/update',
+            'Content-Type' => 'application/json',
+        ])->postJson('/webhooks/customers', json_decode($payload, true));
+
+        $response->assertStatus(200);
+        $this->assertEquals('+15559998888', $customer->fresh()->phone);
+    }
+
+    public function test_customers_api_response_contains_phone() {
+        Customer::create([
+            'shop_id' => $this->shop->id,
+            'shopify_customer_id' => 'gid://shopify/Customer/9904',
+            'first_name' => 'API',
+            'last_name' => 'Test',
+            'email' => 'api@example.com',
+            'phone' => '+15554443333',
+        ]);
+
+        $response = $this->withHeaders([
+            'X-Shop-Domain' => $this->shop->shop_domain,
+            'Accept' => 'application/json',
+        ])->getJson('/api/zoho/customers?shop=' . $this->shop->shop_domain);
+
+        $response->assertStatus(200);
+        $response->assertJson(['success' => true]);
+        $customersData = $response->json('customers');
+        $this->assertNotEmpty($customersData);
+        $found = collect($customersData)->firstWhere('shopify_customer_id', 'gid://shopify/Customer/9904');
+        $this->assertNotNull($found);
+        $this->assertEquals('+15554443333', $found['phone']);
+    }
+
+    public function test_shopify_customer_update_webhook_updates_local_phone_and_api_returns_it() {
+        config(['services.shopify.api_secret' => 'test_secret']);
+
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/contacts*' => Http::response(['code' => 0, 'contacts' => []], 200),
+        ]);
+
+        $payload = json_encode([
+            'id' => 9708807946408,
+            'first_name' => 'Mohit',
+            'last_name' => 'Sanodiya',
+            'email' => 'mohit.s.elsner@gmail.com',
+            'phone' => '+91 84630 33420',
+            'default_address' => [
+                'phone' => '+91 84630 33420',
+            ],
+        ]);
+
+        $hmac = $this->calculateHmac($payload, 'test_secret');
+
+        $response = $this->withHeaders([
+            'X-Shopify-Hmac-SHA256' => $hmac,
+            'X-Shopify-Shop-Domain' => $this->shop->shop_domain,
+            'X-Shopify-Webhook-Id' => 'webhook_mohit_phone_update_001',
+            'X-Shopify-Topic' => 'customers/update',
+            'Content-Type' => 'application/json',
+        ])->postJson('/webhooks/customers', json_decode($payload, true));
+
+        $response->assertStatus(200);
+
+        $customer = Customer::where('shopify_customer_id', 'gid://shopify/Customer/9708807946408')->first();
+        $this->assertNotNull($customer);
+        $this->assertEquals('+91 84630 33420', $customer->phone);
+
+        $apiResponse = $this->withHeaders([
+            'X-Shop-Domain' => $this->shop->shop_domain,
+            'Accept' => 'application/json',
+        ])->getJson('/api/zoho/customers?shop=' . $this->shop->shop_domain);
+
+        $apiResponse->assertStatus(200);
+        $customers = $apiResponse->json('customers');
+        $found = collect($customers)->firstWhere('shopify_customer_id', 'gid://shopify/Customer/9708807946408');
+        $this->assertNotNull($found);
+        $this->assertEquals('+91 84630 33420', $found['phone']);
+
+        // Assert null-protection: subsequent webhook without phone must not overwrite existing phone with null
+        $payloadNoPhone = json_encode([
+            'id' => 9708807946408,
+            'first_name' => 'Mohit',
+            'last_name' => 'Sanodiya',
+            'email' => 'mohit.s.elsner@gmail.com',
+            'phone' => null,
+        ]);
+
+        $hmac2 = $this->calculateHmac($payloadNoPhone, 'test_secret');
+
+        $response2 = $this->withHeaders([
+            'X-Shopify-Hmac-SHA256' => $hmac2,
+            'X-Shopify-Shop-Domain' => $this->shop->shop_domain,
+            'X-Shopify-Webhook-Id' => 'webhook_mohit_phone_null_002',
+            'X-Shopify-Topic' => 'customers/update',
+            'Content-Type' => 'application/json',
+        ])->postJson('/webhooks/customers', json_decode($payloadNoPhone, true));
+
+        $response2->assertStatus(200);
+        $this->assertEquals('+91 84630 33420', $customer->fresh()->phone);
+    }
 }
+

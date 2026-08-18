@@ -312,19 +312,23 @@ class ZohoSyncController extends Controller {
 
                     foreach ($rawCustomers as $raw) {
                         $defaultAddr = $raw['default_address'] ?? [];
+                        $phone = !empty($raw['phone']) ? $raw['phone'] : ($defaultAddr['phone'] ?? null);
+                        $updateData = [
+                            'first_name' => $raw['first_name'] ?? '',
+                            'last_name' => $raw['last_name'] ?? '',
+                            'email' => $raw['email'] ?? '',
+                            'billing_address' => $defaultAddr,
+                            'shipping_address' => $defaultAddr,
+                        ];
+                        if ($phone !== null) {
+                            $updateData['phone'] = $phone;
+                        }
                         Customer::updateOrCreate(
                             [
                                 'shop_id' => $shopModel->id,
                                 'shopify_customer_id' => (string) $raw['id'],
                             ],
-                            [
-                                'first_name' => $raw['first_name'] ?? '',
-                                'last_name' => $raw['last_name'] ?? '',
-                                'email' => $raw['email'] ?? '',
-                                'phone' => $raw['phone'] ?? $defaultAddr['phone'] ?? null,
-                                'billing_address' => $defaultAddr,
-                                'shipping_address' => $defaultAddr,
-                            ]
+                            $updateData
                         );
                     }
 
@@ -368,19 +372,23 @@ class ZohoSyncController extends Controller {
 
                 foreach ($rawCustomers as $raw) {
                     $defaultAddr = $raw['default_address'] ?? [];
+                    $phone = !empty($raw['phone']) ? $raw['phone'] : ($defaultAddr['phone'] ?? null);
+                    $updateData = [
+                        'first_name' => $raw['first_name'] ?? '',
+                        'last_name' => $raw['last_name'] ?? '',
+                        'email' => $raw['email'] ?? '',
+                        'billing_address' => $defaultAddr,
+                        'shipping_address' => $defaultAddr,
+                    ];
+                    if ($phone !== null) {
+                        $updateData['phone'] = $phone;
+                    }
                     Customer::updateOrCreate(
                         [
                             'shop_id' => $shop->id,
                             'shopify_customer_id' => (string) $raw['id'],
                         ],
-                        [
-                            'first_name' => $raw['first_name'] ?? '',
-                            'last_name' => $raw['last_name'] ?? '',
-                            'email' => $raw['email'] ?? '',
-                            'phone' => $raw['phone'] ?? $defaultAddr['phone'] ?? null,
-                            'billing_address' => $defaultAddr,
-                            'shipping_address' => $defaultAddr,
-                        ]
+                        $updateData
                     );
                 }
 
@@ -1698,9 +1706,10 @@ GRAPHQL;
         $shop->payment_gateway_settings = $settingsMap;
         $shop->save();
 
+        $count = count($validated['gateways']);
         return response()->json([
             'success' => true,
-            'message' => 'Payment gateway settings saved successfully.',
+            'message' => "Payment gateway settings saved successfully — {$count} gateway mapping(s) configured.",
             'payment_gateway_settings' => $settingsMap,
         ]);
     }
@@ -1804,9 +1813,13 @@ GRAPHQL;
         $shop->tax_settings = $validated;
         $shop->save();
 
+        $taxModeStr = ucfirst($validated['tax_mode']);
+        $defaultTaxStr = !empty($validated['default_tax_id']) ? "Tax ID: {$validated['default_tax_id']}" : "None";
+        $mappingCount = count($validated['tax_mappings'] ?? []);
+
         return response()->json([
             'success' => true,
-            'message' => 'Tax configuration saved successfully.',
+            'message' => "Tax configuration saved successfully — Mode: {$taxModeStr}, Default Tax: {$defaultTaxStr}, {$mappingCount} tax mapping(s) saved.",
             'tax_settings' => $shop->tax_settings,
         ]);
     }

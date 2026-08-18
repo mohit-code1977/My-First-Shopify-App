@@ -82,7 +82,8 @@ export default function Customers({
         if (!connectedState) {
             setNotification({
                 type: "error",
-                message: "Zoho is not connected. Please connect in Settings first.",
+                message:
+                    "Zoho is not connected. Please connect in Settings first.",
             });
             return;
         }
@@ -107,7 +108,9 @@ export default function Customers({
             if (response.ok && data.success) {
                 setNotification({
                     type: "success",
-                    message: data.message || "Customer synchronized to Zoho successfully.",
+                    message:
+                        data.message ||
+                        "Customer synchronized to Zoho successfully.",
                 });
                 await loadData(true);
             } else {
@@ -130,7 +133,8 @@ export default function Customers({
     const currentTabKey = tabKeys[selectedTab] || "all";
 
     const filteredCustomers = customerList.filter((c) => {
-        const fullName = `${c.first_name || ""} ${c.last_name || ""}`.toLowerCase();
+        const fullName =
+            `${c.first_name || ""} ${c.last_name || ""}`.toLowerCase();
         const email = (c.email || "").toLowerCase();
         const phone = (c.phone || "").toLowerCase();
 
@@ -160,7 +164,8 @@ export default function Customers({
         if (!connectedState) {
             setNotification({
                 type: "error",
-                message: "Zoho is not connected. Please connect in Settings first.",
+                message:
+                    "Zoho is not connected. Please connect in Settings first.",
             });
             return;
         }
@@ -185,6 +190,15 @@ export default function Customers({
             const data = await response.json();
 
             if (response.ok && data.success) {
+                const total = data.summary?.total || 0;
+                const synced = data.summary?.synced || 0;
+                const failed = data.summary?.failed || 0;
+                const skipped = data.summary?.skipped || 0;
+
+                setNotification({
+                    type: failed > 0 ? "warning" : "success",
+                    message: `${total} customer(s) processed: ${synced} synced, ${failed} failed${skipped > 0 ? `, ${skipped} skipped` : ""}.`,
+                });
                 setBulkResultsModal({
                     summary: data.summary || {},
                     results: data.results || [],
@@ -220,7 +234,7 @@ export default function Customers({
 
     const promotedBulkActions = [
         {
-            content: "Sync Selected Customers",
+            content: "Sync Customers",
             onAction: handleBulkSync,
             disabled: bulkSyncing,
         },
@@ -232,7 +246,7 @@ export default function Customers({
         { title: "Phone" },
         { title: "Zoho Contact ID" },
         { title: "Sync Status" },
-        { title: "Action", alignment: "end" },
+        { title: "Actions", alignment: "end" },
     ];
 
     const rowMarkup = filteredCustomers.map((c, index) => {
@@ -268,12 +282,22 @@ export default function Customers({
                 <IndexTable.Cell>
                     {c.zoho_contact_id ? (
                         <Text variant="bodySm" tone="subdued" as="span">
-                            <code style={{ fontSize: "11px", backgroundColor: "#f1f2f4", padding: "2px 6px", borderRadius: "4px", color: "#616a75" }}>
+                            <code
+                                style={{
+                                    fontSize: "11px",
+                                    backgroundColor: "#f1f2f4",
+                                    padding: "2px 6px",
+                                    borderRadius: "4px",
+                                    color: "#616a75",
+                                }}
+                            >
                                 {c.zoho_contact_id}
                             </code>
                         </Text>
                     ) : (
-                        <Text variant="bodySm" tone="subdued" as="span">—</Text>
+                        <Text variant="bodySm" tone="subdued" as="span">
+                            —
+                        </Text>
                     )}
                 </IndexTable.Cell>
                 <IndexTable.Cell>
@@ -288,7 +312,11 @@ export default function Customers({
                             activator={
                                 <Button
                                     size="slim"
-                                    onClick={() => setOpenActionMenuId(isMenuOpen ? null : c.id)}
+                                    onClick={() =>
+                                        setOpenActionMenuId(
+                                            isMenuOpen ? null : c.id,
+                                        )
+                                    }
                                     disabled={isSyncing || bulkSyncing}
                                     disclosure
                                 >
@@ -301,7 +329,14 @@ export default function Customers({
                                 actionRole="menuitem"
                                 items={[
                                     {
-                                        content: isSynced ? "Re-sync Customer" : "Sync Customer",
+                                        content: "Sync Customer",
+                                        onAction: () => {
+                                            setOpenActionMenuId(null);
+                                            handleSyncCustomer(c.id);
+                                        },
+                                    },
+                                    {
+                                        content: "Re-sync Customer",
                                         onAction: () => {
                                             setOpenActionMenuId(null);
                                             handleSyncCustomer(c.id);
@@ -339,7 +374,13 @@ export default function Customers({
                     {/* NOTIFICATION BANNER */}
                     {notification && (
                         <Banner
-                            tone={notification.type === "success" ? "success" : "critical"}
+                            tone={
+                                notification.type === "success"
+                                    ? "success"
+                                    : notification.type === "warning"
+                                      ? "warning"
+                                      : "critical"
+                            }
                             onDismiss={() => setNotification(null)}
                         >
                             <p>{notification.message}</p>
@@ -347,7 +388,11 @@ export default function Customers({
                     )}
 
                     <Card padding="0">
-                        <Tabs tabs={tabs} selected={selectedTab} onSelect={setSelectedTab}>
+                        <Tabs
+                            tabs={tabs}
+                            selected={selectedTab}
+                            onSelect={setSelectedTab}
+                        >
                             <Box padding="400">
                                 <TextField
                                     label="Search customers"
@@ -362,19 +407,35 @@ export default function Customers({
                             </Box>
                             {initialLoading ? (
                                 <Box padding="800">
-                                    <BlockStack align="center" inlineAlign="center" gap="300">
-                                        <Spinner accessibilityLabel="Loading customers" size="large" />
-                                        <Text tone="subdued" variant="bodyMd" as="p">
+                                    <BlockStack
+                                        align="center"
+                                        inlineAlign="center"
+                                        gap="300"
+                                    >
+                                        <Spinner
+                                            accessibilityLabel="Loading customers"
+                                            size="large"
+                                        />
+                                        <Text
+                                            tone="subdued"
+                                            variant="bodyMd"
+                                            as="p"
+                                        >
                                             Loading customer profiles...
                                         </Text>
                                     </BlockStack>
                                 </Box>
                             ) : (
                                 <IndexTable
-                                    resourceName={{ singular: "customer", plural: "customers" }}
+                                    resourceName={{
+                                        singular: "customer",
+                                        plural: "customers",
+                                    }}
                                     itemCount={filteredCustomers.length}
                                     selectedItemsCount={
-                                        allResourcesSelected ? "All" : selectedResources.length
+                                        allResourcesSelected
+                                            ? "All"
+                                            : selectedResources.length
                                     }
                                     onSelectionChange={handleSelectionChange}
                                     headings={headings}
@@ -408,39 +469,125 @@ export default function Customers({
                         <Modal.Section>
                             <BlockStack gap="300">
                                 <InlineStack gap="200">
-                                    <Badge>Total: {bulkResultsModal.summary?.total || 0}</Badge>
-                                    <Badge tone="success">Synced: {bulkResultsModal.summary?.synced || 0}</Badge>
-                                    <Badge tone="critical">Failed: {bulkResultsModal.summary?.failed || 0}</Badge>
+                                    <Badge>
+                                        Total:{" "}
+                                        {bulkResultsModal.summary?.total || 0}
+                                    </Badge>
+                                    <Badge tone="success">
+                                        Synced:{" "}
+                                        {bulkResultsModal.summary?.synced || 0}
+                                    </Badge>
+                                    <Badge tone="critical">
+                                        Failed:{" "}
+                                        {bulkResultsModal.summary?.failed || 0}
+                                    </Badge>
                                     {bulkResultsModal.summary?.skipped > 0 && (
-                                        <Badge tone="warning">Skipped: {bulkResultsModal.summary?.skipped}</Badge>
+                                        <Badge tone="warning">
+                                            Skipped:{" "}
+                                            {bulkResultsModal.summary?.skipped}
+                                        </Badge>
                                     )}
                                 </InlineStack>
 
-                                <Box borderWidth="025" borderColor="border" borderRadius="200" overflowX="auto">
-                                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+                                <Box
+                                    borderWidth="025"
+                                    borderColor="border"
+                                    borderRadius="200"
+                                    overflowX="auto"
+                                >
+                                    <table
+                                        style={{
+                                            width: "100%",
+                                            borderCollapse: "collapse",
+                                            fontSize: "13px",
+                                        }}
+                                    >
                                         <thead>
-                                            <tr style={{ backgroundColor: "#f8f9fa", borderBottom: "1px solid #e1e3e5", textAlign: "left" }}>
-                                                <th style={{ padding: "10px 14px" }}>Customer / ID</th>
-                                                <th style={{ padding: "10px 14px" }}>Status</th>
-                                                <th style={{ padding: "10px 14px" }}>Message</th>
+                                            <tr
+                                                style={{
+                                                    backgroundColor: "#f8f9fa",
+                                                    borderBottom:
+                                                        "1px solid #e1e3e5",
+                                                    textAlign: "left",
+                                                }}
+                                            >
+                                                <th
+                                                    style={{
+                                                        padding: "10px 14px",
+                                                    }}
+                                                >
+                                                    Customer / ID
+                                                </th>
+                                                <th
+                                                    style={{
+                                                        padding: "10px 14px",
+                                                    }}
+                                                >
+                                                    Status
+                                                </th>
+                                                <th
+                                                    style={{
+                                                        padding: "10px 14px",
+                                                    }}
+                                                >
+                                                    Message
+                                                </th>
                                             </tr>
                                         </thead>
                                         <tbody>
-                                            {bulkResultsModal.results?.map((res, idx) => (
-                                                <tr key={idx} style={{ borderBottom: "1px solid #f1f2f4" }}>
-                                                    <td style={{ padding: "10px 14px", fontWeight: 600, fontFamily: "monospace" }}>
-                                                        {res.name || `ID #${res.id}`}
-                                                    </td>
-                                                    <td style={{ padding: "10px 14px" }}>
-                                                        <Badge tone={res.status === "success" ? "success" : res.status === "skipped" ? "warning" : "critical"}>
-                                                            {res.status}
-                                                        </Badge>
-                                                    </td>
-                                                    <td style={{ padding: "10px 14px", color: "#616a75" }}>
-                                                        {res.message}
-                                                    </td>
-                                                </tr>
-                                            ))}
+                                            {bulkResultsModal.results?.map(
+                                                (res, idx) => (
+                                                    <tr
+                                                        key={idx}
+                                                        style={{
+                                                            borderBottom:
+                                                                "1px solid #f1f2f4",
+                                                        }}
+                                                    >
+                                                        <td
+                                                            style={{
+                                                                padding:
+                                                                    "10px 14px",
+                                                                fontWeight: 600,
+                                                                fontFamily:
+                                                                    "monospace",
+                                                            }}
+                                                        >
+                                                            {res.name ||
+                                                                `ID #${res.id}`}
+                                                        </td>
+                                                        <td
+                                                            style={{
+                                                                padding:
+                                                                    "10px 14px",
+                                                            }}
+                                                        >
+                                                            <Badge
+                                                                tone={
+                                                                    res.status ===
+                                                                    "success"
+                                                                        ? "success"
+                                                                        : res.status ===
+                                                                            "skipped"
+                                                                          ? "warning"
+                                                                          : "critical"
+                                                                }
+                                                            >
+                                                                {res.status}
+                                                            </Badge>
+                                                        </td>
+                                                        <td
+                                                            style={{
+                                                                padding:
+                                                                    "10px 14px",
+                                                                color: "#616a75",
+                                                            }}
+                                                        >
+                                                            {res.message}
+                                                        </td>
+                                                    </tr>
+                                                ),
+                                            )}
                                         </tbody>
                                     </table>
                                 </Box>

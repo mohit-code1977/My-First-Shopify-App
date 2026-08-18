@@ -13,10 +13,8 @@ use App\Models\SyncHistory;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
-class ZohoService
-{
-    private const SHOPIFY_VARIANT_FIELD_API_NAME =
-        'cf_shopify_variant_id';
+class ZohoService {
+    private const SHOPIFY_VARIANT_FIELD_API_NAME = 'cf_shopify_variant_id';
 
     public const CAPABILITY_ZOHO_INVENTORY = 'zoho_inventory';
     public const CAPABILITY_ZOHO_ERP = 'zoho_erp';
@@ -1839,15 +1837,20 @@ class ZohoService
     {
         $fullName = $customer->full_name;
 
+        $billing = $customer->billing_address;
+        $shipping = $customer->shipping_address;
+        $phone = $customer->phone ?? ($billing['phone'] ?? ($shipping['phone'] ?? ''));
+
         $payload = [
             'contact_name' => $fullName,
             'contact_type' => 'customer',
+            'phone' => $phone,
             'contact_persons' => [
                 [
                     'first_name' => $customer->first_name ?? '',
                     'last_name' => $customer->last_name ?? '',
                     'email' => $customer->email ?? '',
-                    'phone' => $customer->phone ?? '',
+                    'phone' => $phone,
                     'is_primary_contact' => true,
                 ],
             ],
@@ -1959,13 +1962,21 @@ class ZohoService
             'synced_at' => now(),
         ]);
 
+        $custName = trim("{$customer->first_name} {$customer->last_name}");
+        if (empty($custName)) {
+            $custName = $customer->email ?: "Customer #{$customer->id}";
+        }
+        $contactRef = $zohoContactId ? "Zoho Contact ID: {$zohoContactId}" : '';
+        $msgAction = $created ? 'created' : 'synced';
+        $custMsg = "Customer {$msgAction} successfully — {$custName}" . ($contactRef ? " → {$contactRef}" : "") . ".";
+
         return [
             'success' => true,
             'created' => $created,
             'updated' => $updated,
             'zoho_contact_id' => $zohoContactId,
             'customer_id' => $customer->id,
-            'message' => $created ? 'Customer created successfully.' : 'Customer updated successfully.',
+            'message' => $custMsg,
         ];
     }
 
@@ -2374,6 +2385,11 @@ class ZohoService
             'synced_at' => now(),
         ]);
 
+        $soRef = $order->zoho_sales_order_number ?: ($zohoSalesOrderId ? "SO-{$zohoSalesOrderId}" : '');
+        $orderRef = $order->order_number ? "#{$order->order_number}" : "Order #{$order->id}";
+        $msgAction = $created ? 'created' : 'synced';
+        $orderMsg = "Sales Order {$msgAction} successfully — Shopify Order {$orderRef}" . ($soRef ? " → Zoho {$soRef}" : "") . ".";
+
         return [
             'success' => true,
             'created' => $created,
@@ -2381,7 +2397,7 @@ class ZohoService
             'zoho_sales_order_id' => $zohoSalesOrderId,
             'zoho_sales_order_number' => $order->zoho_sales_order_number,
             'order_id' => $order->id,
-            'message' => $created ? 'Sales Order created successfully.' : 'Sales Order updated successfully.',
+            'message' => $orderMsg,
         ];
     }
 
@@ -2779,6 +2795,11 @@ class ZohoService
             'synced_at' => now(),
         ]);
 
+        $invRef = $invoice->invoice_number ?: ($zohoInvoiceId ? "INV-{$zohoInvoiceId}" : '');
+        $orderRef = $order->order_number ? "#{$order->order_number}" : "Order #{$order->id}";
+        $msgAction = $created ? 'created' : 'synced';
+        $invMsg = "Invoice {$msgAction} successfully — Shopify Order {$orderRef}" . ($invRef ? " → Zoho {$invRef}" : "") . ".";
+
         return [
             'success' => true,
             'created' => $created,
@@ -2787,7 +2808,7 @@ class ZohoService
             'invoice_number' => $invoice->invoice_number,
             'order_id' => $order->id,
             'invoice_id' => $invoice->id,
-            'message' => $created ? 'Invoice created successfully.' : 'Invoice updated successfully.',
+            'message' => $invMsg,
         ];
     }
 
@@ -3145,6 +3166,12 @@ class ZohoService
                 'synced_at' => now(),
             ]);
 
+                $payRef = $zohoPaymentId ? "Payment #{$zohoPaymentId}" : ($payment->payment_reference ?: "Payment #{$payment->id}");
+            $orderRef = $order->order_number ? "#{$order->order_number}" : "Order #{$order->id}";
+            $invRef = $invoice->invoice_number ?: ($invoice->zoho_invoice_id ? "INV-{$invoice->zoho_invoice_id}" : '');
+            $msgAction = $created ? 'created' : 'reconciled';
+            $payMsg = "Payment {$msgAction} successfully — Shopify Order {$orderRef}" . ($invRef ? " ({$invRef})" : "") . " → Zoho {$payRef}.";
+
             return [
                 'success' => true,
                 'created' => $created,
@@ -3154,7 +3181,7 @@ class ZohoService
                 'payment_id' => $payment->id,
                 'order_id' => $order->id,
                 'invoice_id' => $invoice->id,
-                'message' => $created ? 'Payment synchronized successfully.' : 'Payment reconciled successfully.',
+                'message' => $payMsg,
             ];
 
         } catch (\Throwable $e) {
@@ -3372,6 +3399,12 @@ class ZohoService
             'synced_at' => now(),
         ]);
 
+        $cnRef = $refund->creditnote_number ?: ($refund->zoho_creditnote_id ? "CN-{$refund->zoho_creditnote_id}" : '');
+        $orderRef = $order->order_number ? "#{$order->order_number}" : "Order #{$order->id}";
+        $refundRef = $refund->shopify_refund_id ? "#{$refund->shopify_refund_id}" : "Refund #{$refund->id}";
+        $msgAction = $created ? 'created' : 'reconciled';
+        $refundMsg = "Credit Note {$msgAction} successfully — Shopify Refund {$refundRef} (Order {$orderRef})" . ($cnRef ? " → Zoho {$cnRef}" : "") . ".";
+
         return [
             'success' => true,
             'created' => $created,
@@ -3379,7 +3412,7 @@ class ZohoService
             'zoho_creditnote_id' => $refund->zoho_creditnote_id,
             'refund_id' => $refund->id,
             'order_id' => $order->id,
-            'message' => $created ? 'Credit Note synchronized successfully.' : 'Credit Note reconciled successfully.',
+            'message' => $refundMsg,
         ];
     }
 }

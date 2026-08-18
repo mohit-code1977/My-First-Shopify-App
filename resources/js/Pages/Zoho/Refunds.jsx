@@ -16,6 +16,8 @@ import {
     BlockStack,
     InlineStack,
     Spinner,
+    Grid,
+    Divider,
     useIndexResourceState,
 } from "@shopify/polaris";
 import ZohoLayout from "@/Layouts/ZohoLayout";
@@ -23,6 +25,71 @@ import ZohoLayout from "@/Layouts/ZohoLayout";
 const REFUNDS_DATA_URL = "/api/zoho/refunds";
 const SYNC_REFUND_URL = "/zoho/sync-refund";
 const BULK_SYNC_REFUNDS_URL = "/zoho/bulk-sync-refunds";
+
+const computeRefundType = (refund) => {
+    if (!refund) return "Not available";
+    if (refund.refund_type) {
+        return refund.refund_type.toLowerCase() === "full" ? "Full Refund" : "Partial Refund";
+    }
+    const refundAmount = parseFloat(refund.amount || 0);
+    const orderTotal = parseFloat(refund.order?.total_price || 0);
+
+    if (orderTotal > 0 && Math.abs(refundAmount - orderTotal) < 0.01) {
+        return "Full Refund";
+    }
+
+    const refundItems = Array.isArray(refund.refund_line_items) ? refund.refund_line_items : [];
+    const orderItems = Array.isArray(refund.order?.line_items) ? refund.order.line_items : [];
+
+    if (orderItems.length > 0 && refundItems.length > 0) {
+        const totalOrderQty = orderItems.reduce((sum, item) => sum + parseInt(item.quantity || 0, 10), 0);
+        const totalRefundQty = refundItems.reduce((sum, item) => sum + parseInt(item.quantity || 0, 10), 0);
+        if (totalOrderQty > 0 && totalRefundQty >= totalOrderQty) {
+            return "Full Refund";
+        }
+    }
+
+    if (orderTotal > 0 && refundAmount < orderTotal) {
+        return "Partial Refund";
+    }
+
+    return "Partial Refund";
+};
+
+const calculateSubtotal = (r) => {
+    if (!r) return 0;
+    if (typeof r.subtotal !== "undefined" && r.subtotal !== null) {
+        return parseFloat(r.subtotal);
+    }
+    const items = Array.isArray(r.refund_line_items) ? r.refund_line_items : [];
+    if (items.length > 0) {
+        const itemSum = items.reduce((sum, item) => {
+            const qty = item.quantity || 1;
+            const price = parseFloat(item.price || item.subtotal || 0);
+            return sum + (item.price ? price * qty : price);
+        }, 0);
+        if (itemSum > 0) return itemSum;
+    }
+    const tax = parseFloat(r.tax_amount || r.tax || 0);
+    const shipping = parseFloat(r.shipping_amount || r.shipping || 0);
+    const total = parseFloat(r.amount || 0);
+    return Math.max(0, total - tax - shipping);
+};
+
+const calculateTax = (r) => {
+    if (!r) return 0;
+    if (typeof r.tax_amount !== "undefined" && r.tax_amount !== null) return parseFloat(r.tax_amount);
+    if (typeof r.tax !== "undefined" && r.tax !== null) return parseFloat(r.tax);
+    const items = Array.isArray(r.refund_line_items) ? r.refund_line_items : [];
+    return items.reduce((sum, item) => sum + parseFloat(item.total_tax || item.tax || 0), 0);
+};
+
+const calculateShipping = (r) => {
+    if (!r) return 0;
+    if (typeof r.shipping_amount !== "undefined" && r.shipping_amount !== null) return parseFloat(r.shipping_amount);
+    if (typeof r.shipping !== "undefined" && r.shipping !== null) return parseFloat(r.shipping);
+    return 0;
+};
 
 export default function Refunds({
     shop,
@@ -47,7 +114,9 @@ export default function Refunds({
     const [bulkResultsModal, setBulkResultsModal] = useState(null);
 
     const getCsrfToken = () =>
-        document.querySelector('meta[name="csrf-token"]')?.getAttribute("content") || "";
+        document
+            .querySelector('meta[name="csrf-token"]')
+            ?.getAttribute("content") || "";
 
     const loadData = async (isRefresh = false) => {
         if (isRefresh) {
@@ -98,7 +167,8 @@ export default function Refunds({
         if (!connectedState) {
             setNotification({
                 type: "error",
-                message: "Zoho is not connected. Please connect in Settings first.",
+                message:
+                    "Zoho is not connected. Please connect in Settings first.",
             });
             return;
         }
@@ -124,7 +194,9 @@ export default function Refunds({
             if (response.ok && data.success) {
                 setNotification({
                     type: "success",
-                    message: data.message || "Credit Note synchronized to Zoho successfully.",
+                    message:
+                        data.message ||
+                        "Credit Note synchronized to Zoho successfully.",
                 });
                 await loadData(true);
             } else {
@@ -152,7 +224,9 @@ export default function Refunds({
             ? `${r.order.customer.first_name} ${r.order.customer.last_name} ${r.order.customer.email}`
             : "Guest Customer";
         const refundIdStr = String(r.shopify_refund_id || r.id);
-        const creditNoteStr = String(r.creditnote_number || r.zoho_creditnote_id || "");
+        const creditNoteStr = String(
+            r.creditnote_number || r.zoho_creditnote_id || "",
+        );
 
         const matchesSearch =
             refundIdStr.toLowerCase().includes(search.toLowerCase()) ||
@@ -182,8 +256,10 @@ export default function Refunds({
         if (onlyFailed) {
             const failedSet = new Set(
                 refundList
-                    .filter((r) => (r.sync_status || "").toLowerCase() === "failed")
-                    .map((r) => r.id)
+                    .filter(
+                        (r) => (r.sync_status || "").toLowerCase() === "failed",
+                    )
+                    .map((r) => r.id),
             );
             idsToSync = selectedResources.filter((id) => failedSet.has(id));
             if (idsToSync.length === 0) {
@@ -196,7 +272,8 @@ export default function Refunds({
         if (!connectedState) {
             setNotification({
                 type: "error",
-                message: "Zoho is not connected. Please connect in Settings first.",
+                message:
+                    "Zoho is not connected. Please connect in Settings first.",
             });
             return;
         }
@@ -222,6 +299,15 @@ export default function Refunds({
             const data = await response.json();
 
             if (response.ok && data.success) {
+                const total = data.summary?.total || 0;
+                const synced = data.summary?.synced || 0;
+                const failed = data.summary?.failed || 0;
+                const skipped = data.summary?.skipped || 0;
+
+                setNotification({
+                    type: failed > 0 ? "warning" : "success",
+                    message: `${total} refund(s) processed: ${synced} synced, ${failed} failed${skipped > 0 ? `, ${skipped} skipped` : ""}.`,
+                });
                 setBulkResultsModal({
                     summary: data.summary || {},
                     results: data.results || [],
@@ -266,7 +352,7 @@ export default function Refunds({
             disabled: bulkSyncing,
         },
         {
-            content: "Retry Failed Only",
+            content: "Retry Sync",
             onAction: () => handleBulkSync(true),
             disabled: bulkSyncing,
         },
@@ -307,15 +393,23 @@ export default function Refunds({
                 <IndexTable.Cell>
                     <Text variant="bodyMd" fontWeight="semibold" as="span">
                         <span style={{ color: "#005bd3" }}>
-                            {r.order?.name || (r.order?.order_number ? `#${r.order.order_number}` : `#${r.shopify_order_id}`)}
+                            {r.order?.name ||
+                                (r.order?.order_number
+                                    ? `#${r.order.order_number}`
+                                    : `#${r.shopify_order_id}`)}
                         </span>
                     </Text>
                 </IndexTable.Cell>
                 <IndexTable.Cell>
                     {r.order?.customer ? (
                         <BlockStack gap="050">
-                            <Text variant="bodyMd" fontWeight="semibold" as="span">
-                                {r.order.customer.first_name} {r.order.customer.last_name}
+                            <Text
+                                variant="bodyMd"
+                                fontWeight="semibold"
+                                as="span"
+                            >
+                                {r.order.customer.first_name}{" "}
+                                {r.order.customer.last_name}
                             </Text>
                             <Text variant="bodySm" tone="subdued" as="span">
                                 {r.order.customer.email}
@@ -329,7 +423,9 @@ export default function Refunds({
                 </IndexTable.Cell>
                 <IndexTable.Cell>
                     <Text variant="bodySm" tone="subdued" as="span">
-                        {r.created_at ? new Date(r.created_at).toLocaleDateString() : "—"}
+                        {r.created_at
+                            ? new Date(r.created_at).toLocaleDateString()
+                            : "—"}
                     </Text>
                 </IndexTable.Cell>
                 <IndexTable.Cell>
@@ -348,17 +444,38 @@ export default function Refunds({
                 <IndexTable.Cell>
                     {r.creditnote_number || r.zoho_creditnote_id ? (
                         <Text variant="bodySm" tone="subdued" as="span">
-                            <code style={{ fontSize: "11px", backgroundColor: "#f1f2f4", padding: "2px 6px", borderRadius: "4px", color: "#616a75" }}>
-                                {r.creditnote_number || `CN-${r.zoho_creditnote_id}`}
+                            <code
+                                style={{
+                                    fontSize: "11px",
+                                    backgroundColor: "#f1f2f4",
+                                    padding: "2px 6px",
+                                    borderRadius: "4px",
+                                    color: "#616a75",
+                                }}
+                            >
+                                {r.creditnote_number ||
+                                    `CN-${r.zoho_creditnote_id}`}
                             </code>
                         </Text>
                     ) : (
-                        <Text variant="bodySm" tone="subdued" as="span">—</Text>
+                        <Text variant="bodySm" tone="subdued" as="span">
+                            —
+                        </Text>
                     )}
                 </IndexTable.Cell>
                 <IndexTable.Cell>
-                    <Badge tone={isSynced ? "success" : isFailed ? "critical" : "warning"}>
-                        {r.sync_status ? r.sync_status.toUpperCase() : "PENDING"}
+                    <Badge
+                        tone={
+                            isSynced
+                                ? "success"
+                                : isFailed
+                                  ? "critical"
+                                  : "warning"
+                        }
+                    >
+                        {r.sync_status
+                            ? r.sync_status.toUpperCase()
+                            : "PENDING"}
                     </Badge>
                 </IndexTable.Cell>
                 <IndexTable.Cell alignment="end">
@@ -368,7 +485,11 @@ export default function Refunds({
                             activator={
                                 <Button
                                     size="slim"
-                                    onClick={() => setOpenActionMenuId(isMenuOpen ? null : r.id)}
+                                    onClick={() =>
+                                        setOpenActionMenuId(
+                                            isMenuOpen ? null : r.id,
+                                        )
+                                    }
                                     disabled={isSyncing || bulkSyncing}
                                     disclosure
                                 >
@@ -388,7 +509,14 @@ export default function Refunds({
                                         },
                                     },
                                     {
-                                        content: isFailed ? "Retry Sync" : "Sync Credit Note",
+                                        content: "Sync Credit Note",
+                                        onAction: () => {
+                                            setOpenActionMenuId(null);
+                                            handleRetrySync(r.id);
+                                        },
+                                    },
+                                    {
+                                        content: "Retry Sync",
                                         onAction: () => {
                                             setOpenActionMenuId(null);
                                             handleRetrySync(r.id);
@@ -426,7 +554,13 @@ export default function Refunds({
                     {/* NOTIFICATION BANNER */}
                     {notification && (
                         <Banner
-                            tone={notification.type === "success" ? "success" : "critical"}
+                            tone={
+                                notification.type === "success"
+                                    ? "success"
+                                    : notification.type === "warning"
+                                      ? "warning"
+                                      : "critical"
+                            }
                             onDismiss={() => setNotification(null)}
                         >
                             <p>{notification.message}</p>
@@ -434,7 +568,11 @@ export default function Refunds({
                     )}
 
                     <Card padding="0">
-                        <Tabs tabs={tabs} selected={selectedTab} onSelect={setSelectedTab}>
+                        <Tabs
+                            tabs={tabs}
+                            selected={selectedTab}
+                            onSelect={setSelectedTab}
+                        >
                             <Box padding="400">
                                 <TextField
                                     label="Search refunds"
@@ -449,19 +587,35 @@ export default function Refunds({
                             </Box>
                             {initialLoading ? (
                                 <Box padding="800">
-                                    <BlockStack align="center" inlineAlign="center" gap="300">
-                                        <Spinner accessibilityLabel="Loading refunds" size="large" />
-                                        <Text tone="subdued" variant="bodyMd" as="p">
+                                    <BlockStack
+                                        align="center"
+                                        inlineAlign="center"
+                                        gap="300"
+                                    >
+                                        <Spinner
+                                            accessibilityLabel="Loading refunds"
+                                            size="large"
+                                        />
+                                        <Text
+                                            tone="subdued"
+                                            variant="bodyMd"
+                                            as="p"
+                                        >
                                             Loading refunds and credit notes...
                                         </Text>
                                     </BlockStack>
                                 </Box>
                             ) : (
                                 <IndexTable
-                                    resourceName={{ singular: "refund", plural: "refunds" }}
+                                    resourceName={{
+                                        singular: "refund",
+                                        plural: "refunds",
+                                    }}
                                     itemCount={filteredRefunds.length}
                                     selectedItemsCount={
-                                        allResourcesSelected ? "All" : selectedResources.length
+                                        allResourcesSelected
+                                            ? "All"
+                                            : selectedResources.length
                                     }
                                     onSelectionChange={handleSelectionChange}
                                     headings={headings}
@@ -488,42 +642,203 @@ export default function Refunds({
                     >
                         <Modal.Section>
                             <BlockStack gap="400">
-                                <InlineStack gap="400">
-                                    <Box padding="300" background="bg-surface-secondary" borderRadius="200">
-                                        <Text tone="subdued" variant="bodySm" as="p">Refund Amount</Text>
-                                        <Text variant="headingSm" as="p">
-                                            ${parseFloat(selectedRefund.amount || 0).toFixed(2)} {selectedRefund.currency || "USD"}
-                                        </Text>
-                                    </Box>
-                                    <Box padding="300" background="bg-surface-secondary" borderRadius="200">
-                                        <Text tone="subdued" variant="bodySm" as="p">Restock Status</Text>
-                                        <Badge tone={selectedRefund.restocked ? "success" : "subdued"}>
-                                            {selectedRefund.restocked ? "Inventory Restocked" : "No Restock"}
-                                        </Badge>
-                                    </Box>
-                                </InlineStack>
+                                {/* Header Information */}
+                                <Box
+                                    padding="300"
+                                    background="bg-surface-secondary"
+                                    borderRadius="200"
+                                >
+                                    <Grid>
+                                        <Grid.Cell columnSpan={{ xs: 6, sm: 3, md: 3, lg: 3, xl: 3 }}>
+                                            <BlockStack gap="100">
+                                                <Text tone="subdued" variant="bodySm" as="p">
+                                                    Refund ID
+                                                </Text>
+                                                <Text fontWeight="bold" as="p">
+                                                    #{selectedRefund.shopify_refund_id || selectedRefund.id}
+                                                </Text>
+                                            </BlockStack>
+                                        </Grid.Cell>
+                                        <Grid.Cell columnSpan={{ xs: 6, sm: 3, md: 3, lg: 3, xl: 3 }}>
+                                            <BlockStack gap="100">
+                                                <Text tone="subdued" variant="bodySm" as="p">
+                                                    Order Number
+                                                </Text>
+                                                <Text fontWeight="bold" as="p">
+                                                    {selectedRefund.order?.name || (selectedRefund.order?.order_number ? `#${selectedRefund.order.order_number}` : (selectedRefund.shopify_order_id ? `#${selectedRefund.shopify_order_id}` : "Not available"))}
+                                                </Text>
+                                            </BlockStack>
+                                        </Grid.Cell>
+                                        <Grid.Cell columnSpan={{ xs: 6, sm: 3, md: 3, lg: 3, xl: 3 }}>
+                                            <BlockStack gap="100">
+                                                <Text tone="subdued" variant="bodySm" as="p">
+                                                    Refund Date
+                                                </Text>
+                                                <Text as="p">
+                                                    {selectedRefund.created_at ? new Date(selectedRefund.created_at).toLocaleString() : "Not available"}
+                                                </Text>
+                                            </BlockStack>
+                                        </Grid.Cell>
+                                        <Grid.Cell columnSpan={{ xs: 6, sm: 3, md: 3, lg: 3, xl: 3 }}>
+                                            <BlockStack gap="100">
+                                                <Text tone="subdued" variant="bodySm" as="p">
+                                                    Refund Type
+                                                </Text>
+                                                <Badge tone={computeRefundType(selectedRefund) === "Full Refund" ? "info" : "attention"}>
+                                                    {computeRefundType(selectedRefund)}
+                                                </Badge>
+                                            </BlockStack>
+                                        </Grid.Cell>
+                                    </Grid>
+                                </Box>
 
+                                {/* Customer Info */}
                                 <Card>
                                     <BlockStack gap="200">
-                                        <Text variant="headingSm" as="h3">Synchronization Info</Text>
-                                        <Text variant="bodySm" as="p">
-                                            <strong>Sync Status: </strong>
-                                            <Badge tone={selectedRefund.sync_status === "synced" ? "success" : selectedRefund.sync_status === "failed" ? "critical" : "warning"}>
-                                                {selectedRefund.sync_status ? selectedRefund.sync_status.toUpperCase() : "PENDING"}
-                                            </Badge>
+                                        <Text variant="headingSm" as="h3">
+                                            Customer Information
                                         </Text>
-                                        <Text variant="bodySm" as="p">
-                                            <strong>Zoho Credit Note ID: </strong>
-                                            <code>{selectedRefund.zoho_creditnote_id || "Not Created"}</code>
+                                        <Text variant="bodyMd" as="p">
+                                            {selectedRefund.order?.customer ? (
+                                                <>
+                                                    <strong>
+                                                        {selectedRefund.order.customer.first_name || ""} {selectedRefund.order.customer.last_name || ""}
+                                                    </strong>
+                                                    {selectedRefund.order.customer.email && ` (${selectedRefund.order.customer.email})`}
+                                                </>
+                                            ) : (
+                                                "Not available"
+                                            )}
                                         </Text>
-                                        <Text variant="bodySm" as="p">
-                                            <strong>Credit Note #: </strong>
-                                            <code>{selectedRefund.creditnote_number || "—"}</code>
-                                        </Text>
+                                    </BlockStack>
+                                </Card>
 
-                                        {selectedRefund.sync_status === "failed" && selectedRefund.error_message && (
+                                {/* Refunded Items */}
+                                <Card>
+                                    <BlockStack gap="300">
+                                        <Text variant="headingSm" as="h3">
+                                            Refunded Items
+                                        </Text>
+                                        {Array.isArray(selectedRefund.refund_line_items) && selectedRefund.refund_line_items.length > 0 ? (
+                                            <Box
+                                                borderWidth="025"
+                                                borderColor="border"
+                                                borderRadius="200"
+                                                overflowX="auto"
+                                            >
+                                                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+                                                    <thead>
+                                                        <tr style={{ backgroundColor: "#f8f9fa", borderBottom: "1px solid #e1e3e5", textAlign: "left" }}>
+                                                            <th style={{ padding: "8px 12px" }}>Product</th>
+                                                            <th style={{ padding: "8px 12px" }}>Variant</th>
+                                                            <th style={{ padding: "8px 12px" }}>SKU</th>
+                                                            <th style={{ padding: "8px 12px" }}>Qty</th>
+                                                            <th style={{ padding: "8px 12px" }}>Restock</th>
+                                                            <th style={{ padding: "8px 12px", textAlign: "right" }}>Amount</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {selectedRefund.refund_line_items.map((item, idx) => {
+                                                            const title = item.title || item.name || item.product_title || "Not available";
+                                                            const variant = item.variant_title || item.variant_name || item.variant || "Not available";
+                                                            const sku = item.sku || "Not available";
+                                                            const qty = item.quantity || 1;
+                                                            const isItemRestocked = item.restock_type === 'cancel' || item.restock_type === 'return' || item.restock === true || selectedRefund.restock === true;
+                                                            const price = parseFloat(item.price || item.subtotal || 0);
+
+                                                            return (
+                                                                <tr key={idx} style={{ borderBottom: "1px solid #f1f2f4" }}>
+                                                                    <td style={{ padding: "8px 12px", fontWeight: 600 }}>{title}</td>
+                                                                    <td style={{ padding: "8px 12px", color: "#616a75" }}>{variant}</td>
+                                                                    <td style={{ padding: "8px 12px", fontFamily: "monospace", fontSize: "12px" }}>{sku}</td>
+                                                                    <td style={{ padding: "8px 12px" }}>{qty}</td>
+                                                                    <td style={{ padding: "8px 12px" }}>
+                                                                        <Badge tone={isItemRestocked ? "success" : "subdued"}>
+                                                                            {isItemRestocked ? "Restocked" : "No Restock"}
+                                                                        </Badge>
+                                                                    </td>
+                                                                    <td style={{ padding: "8px 12px", textAlign: "right", fontWeight: 600 }}>
+                                                                        ${(price * (item.price ? qty : 1)).toFixed(2)}
+                                                                    </td>
+                                                                </tr>
+                                                            );
+                                                        })}
+                                                    </tbody>
+                                                </table>
+                                            </Box>
+                                        ) : (
+                                            <Text tone="subdued" as="p">
+                                                No itemized refund data available.
+                                            </Text>
+                                        )}
+                                    </BlockStack>
+                                </Card>
+
+                                {/* Refund Totals */}
+                                <Card>
+                                    <BlockStack gap="200">
+                                        <Text variant="headingSm" as="h3">
+                                            Refund Totals
+                                        </Text>
+                                        <BlockStack gap="100">
+                                            <InlineStack align="space-between">
+                                                <Text tone="subdued" as="span">Subtotal:</Text>
+                                                <Text as="span">${calculateSubtotal(selectedRefund).toFixed(2)}</Text>
+                                            </InlineStack>
+                                            <InlineStack align="space-between">
+                                                <Text tone="subdued" as="span">Tax:</Text>
+                                                <Text as="span">${calculateTax(selectedRefund).toFixed(2)}</Text>
+                                            </InlineStack>
+                                            <InlineStack align="space-between">
+                                                <Text tone="subdued" as="span">Shipping:</Text>
+                                                <Text as="span">${calculateShipping(selectedRefund).toFixed(2)}</Text>
+                                            </InlineStack>
+                                            <Divider />
+                                            <InlineStack align="space-between">
+                                                <Text fontWeight="bold" as="span">Total Refunded:</Text>
+                                                <Text fontWeight="bold" variant="headingSm" as="span">
+                                                    ${parseFloat(selectedRefund.amount || 0).toFixed(2)} {selectedRefund.currency || "USD"}
+                                                </Text>
+                                            </InlineStack>
+                                        </BlockStack>
+                                    </BlockStack>
+                                </Card>
+
+                                {/* Synchronization Info */}
+                                <Card>
+                                    <BlockStack gap="200">
+                                        <Text variant="headingSm" as="h3">
+                                            Zoho Books Synchronization
+                                        </Text>
+                                        <InlineStack gap="400">
+                                            <Text variant="bodySm" as="span">
+                                                <strong>Sync Status: </strong>
+                                                <Badge
+                                                    tone={
+                                                        selectedRefund.sync_status === "synced"
+                                                            ? "success"
+                                                            : selectedRefund.sync_status === "failed"
+                                                              ? "critical"
+                                                              : "warning"
+                                                    }
+                                                >
+                                                    {selectedRefund.sync_status ? selectedRefund.sync_status.toUpperCase() : "PENDING"}
+                                                </Badge>
+                                            </Text>
+                                            <Text variant="bodySm" as="span">
+                                                <strong>Zoho Credit Note ID: </strong>
+                                                <code>
+                                                    {selectedRefund.creditnote_number || selectedRefund.zoho_creditnote_id || "Not available"}
+                                                </code>
+                                            </Text>
+                                        </InlineStack>
+
+                                        {(selectedRefund.sync_status === "failed" || selectedRefund.error_message) && (
                                             <Banner tone="critical">
-                                                <p><strong>Sync Error: </strong>{selectedRefund.error_message}</p>
+                                                <p>
+                                                    <strong>Sync Error: </strong>
+                                                    {selectedRefund.error_message || "Synchronization failed."}
+                                                </p>
                                             </Banner>
                                         )}
 
@@ -564,39 +879,124 @@ export default function Refunds({
                         <Modal.Section>
                             <BlockStack gap="300">
                                 <InlineStack gap="200">
-                                    <Badge>Total: {bulkResultsModal.summary?.total || 0}</Badge>
-                                    <Badge tone="success">Synced: {bulkResultsModal.summary?.synced || 0}</Badge>
-                                    <Badge tone="critical">Failed: {bulkResultsModal.summary?.failed || 0}</Badge>
+                                    <Badge>
+                                        Total:{" "}
+                                        {bulkResultsModal.summary?.total || 0}
+                                    </Badge>
+                                    <Badge tone="success">
+                                        Synced:{" "}
+                                        {bulkResultsModal.summary?.synced || 0}
+                                    </Badge>
+                                    <Badge tone="critical">
+                                        Failed:{" "}
+                                        {bulkResultsModal.summary?.failed || 0}
+                                    </Badge>
                                     {bulkResultsModal.summary?.skipped > 0 && (
-                                        <Badge tone="warning">Skipped: {bulkResultsModal.summary?.skipped}</Badge>
+                                        <Badge tone="warning">
+                                            Skipped:{" "}
+                                            {bulkResultsModal.summary?.skipped}
+                                        </Badge>
                                     )}
                                 </InlineStack>
 
-                                <Box borderWidth="025" borderColor="border" borderRadius="200" overflowX="auto">
-                                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+                                <Box
+                                    borderWidth="025"
+                                    borderColor="border"
+                                    borderRadius="200"
+                                    overflowX="auto"
+                                >
+                                    <table
+                                        style={{
+                                            width: "100%",
+                                            borderCollapse: "collapse",
+                                            fontSize: "13px",
+                                        }}
+                                    >
                                         <thead>
-                                            <tr style={{ backgroundColor: "#f8f9fa", borderBottom: "1px solid #e1e3e5", textAlign: "left" }}>
-                                                <th style={{ padding: "10px 14px" }}>Refund ID</th>
-                                                <th style={{ padding: "10px 14px" }}>Status</th>
-                                                <th style={{ padding: "10px 14px" }}>Message</th>
+                                            <tr
+                                                style={{
+                                                    backgroundColor: "#f8f9fa",
+                                                    borderBottom:
+                                                        "1px solid #e1e3e5",
+                                                    textAlign: "left",
+                                                }}
+                                            >
+                                                <th
+                                                    style={{
+                                                        padding: "10px 14px",
+                                                    }}
+                                                >
+                                                    Refund ID
+                                                </th>
+                                                <th
+                                                    style={{
+                                                        padding: "10px 14px",
+                                                    }}
+                                                >
+                                                    Status
+                                                </th>
+                                                <th
+                                                    style={{
+                                                        padding: "10px 14px",
+                                                    }}
+                                                >
+                                                    Message
+                                                </th>
                                             </tr>
                                         </thead>
                                         <tbody>
-                                            {bulkResultsModal.results?.map((res, idx) => (
-                                                <tr key={idx} style={{ borderBottom: "1px solid #f1f2f4" }}>
-                                                    <td style={{ padding: "10px 14px", fontWeight: 600, fontFamily: "monospace" }}>
-                                                        ID #{res.id}
-                                                    </td>
-                                                    <td style={{ padding: "10px 14px" }}>
-                                                        <Badge tone={res.status === "success" ? "success" : res.status === "skipped" ? "warning" : "critical"}>
-                                                            {res.status}
-                                                        </Badge>
-                                                    </td>
-                                                    <td style={{ padding: "10px 14px", color: "#616a75" }}>
-                                                        {res.message}
-                                                    </td>
-                                                </tr>
-                                            ))}
+                                            {bulkResultsModal.results?.map(
+                                                (res, idx) => (
+                                                    <tr
+                                                        key={idx}
+                                                        style={{
+                                                            borderBottom:
+                                                                "1px solid #f1f2f4",
+                                                        }}
+                                                    >
+                                                        <td
+                                                            style={{
+                                                                padding:
+                                                                    "10px 14px",
+                                                                fontWeight: 600,
+                                                                fontFamily:
+                                                                    "monospace",
+                                                            }}
+                                                        >
+                                                            ID #{res.id}
+                                                        </td>
+                                                        <td
+                                                            style={{
+                                                                padding:
+                                                                    "10px 14px",
+                                                            }}
+                                                        >
+                                                            <Badge
+                                                                tone={
+                                                                    res.status ===
+                                                                    "success"
+                                                                        ? "success"
+                                                                        : res.status ===
+                                                                            "skipped"
+                                                                          ? "warning"
+                                                                          : "critical"
+                                                                }
+                                                            >
+                                                                {res.status}
+                                                            </Badge>
+                                                        </td>
+                                                        <td
+                                                            style={{
+                                                                padding:
+                                                                    "10px 14px",
+                                                                color: "#616a75",
+                                                            }}
+                                                        >
+                                                            {res.message}
+                                                        </td>
+                                                    </tr>
+                                                ),
+                                            )}
                                         </tbody>
                                     </table>
                                 </Box>
