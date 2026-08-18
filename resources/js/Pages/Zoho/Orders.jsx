@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import ZohoLayout from "@/Layouts/ZohoLayout";
 
 const ORDERS_DATA_URL = "/api/zoho/orders";
 const SYNC_ORDER_URL = "/zoho/sync-order";
 const SYNC_INVOICE_URL = "/zoho/sync-invoice";
 const SYNC_PAYMENT_URL = "/zoho/sync-payment";
+const BULK_SYNC_ORDERS_URL = "/zoho/bulk-sync-orders";
 
 export default function Orders({
     shop,
@@ -23,6 +24,13 @@ export default function Orders({
     const [syncType, setSyncType] = useState(null);
     const [notification, setNotification] = useState(null);
     const [selectedOrderForPayment, setSelectedOrderForPayment] = useState(null);
+
+    // Bulk Selection State
+    const [selectedIds, setSelectedIds] = useState([]);
+    const [bulkSyncing, setBulkSyncing] = useState(false);
+    const [bulkResultsModal, setBulkResultsModal] = useState(null);
+
+    const headerCheckboxRef = useRef(null);
 
     const loadData = async () => {
         setLoading(true);
@@ -325,6 +333,94 @@ export default function Orders({
         return true;
     });
 
+    const visibleIds = filteredOrders.map((o) => o.id);
+    const isAllSelected =
+        visibleIds.length > 0 &&
+        visibleIds.every((id) => selectedIds.includes(id));
+    const isIndeterminate =
+        selectedIds.length > 0 && !isAllSelected;
+
+    useEffect(() => {
+        if (headerCheckboxRef.current) {
+            headerCheckboxRef.current.indeterminate = isIndeterminate;
+        }
+    }, [isIndeterminate]);
+
+    const handleToggleSelectAll = () => {
+        if (isAllSelected) {
+            setSelectedIds((prev) =>
+                prev.filter((id) => !visibleIds.includes(id))
+            );
+        } else {
+            const combined = Array.from(
+                new Set([...selectedIds, ...visibleIds])
+            );
+            setSelectedIds(combined);
+        }
+    };
+
+    const handleToggleSelectRow = (id) => {
+        setSelectedIds((prev) =>
+            prev.includes(id)
+                ? prev.filter((item) => item !== id)
+                : [...prev, id]
+        );
+    };
+
+    const handleBulkSync = async (type = "order") => {
+        if (selectedIds.length === 0) return;
+
+        if (!connectedState) {
+            setNotification({
+                type: "error",
+                message: "Zoho is not connected. Please connect in Settings first.",
+            });
+            return;
+        }
+
+        setBulkSyncing(true);
+        setNotification(null);
+
+        try {
+            const token = await window.shopify?.idToken();
+            const response = await fetch(BULK_SYNC_ORDERS_URL, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Accept: "application/json",
+                    Authorization: token ? `Bearer ${token}` : "",
+                },
+                body: JSON.stringify({
+                    order_ids: selectedIds,
+                    sync_type: type,
+                }),
+            });
+
+            const data = await response.json();
+
+            if (response.ok && data.success) {
+                setBulkResultsModal({
+                    summary: data.summary || {},
+                    results: data.results || [],
+                    syncType: type,
+                });
+                await loadData();
+            } else {
+                setNotification({
+                    type: "error",
+                    message: data.message || "Bulk order sync failed.",
+                });
+            }
+        } catch (error) {
+            setNotification({
+                type: "error",
+                message: "Network error during bulk order sync.",
+            });
+        } finally {
+            setBulkSyncing(false);
+        }
+    };
+
     return (
         <ZohoLayout
             title="Orders & Invoices | Zoho Books Integration"
@@ -398,7 +494,7 @@ export default function Orders({
                                 margin: 0,
                             }}
                         >
-                            Orders & Invoices
+                            Orders &amp; Invoices
                         </h1>
                         <p
                             style={{
@@ -446,10 +542,7 @@ export default function Orders({
                 >
                     <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
                         {[
-                            {
-                                key: "all",
-                                label: `All Orders (${orderList.length})`,
-                            },
+                            { key: "all", label: `All (${orderList.length})` },
                             {
                                 key: "invoiced",
                                 label: `Invoiced (${orderList.filter((o) => o.invoice?.zoho_invoice_id).length})`,
@@ -502,6 +595,100 @@ export default function Orders({
                     />
                 </div>
 
+                {/* BULK ACTION TOOLBAR */}
+                {selectedIds.length > 0 && (
+                    <div
+                        style={{
+                            backgroundColor: "#002040",
+                            color: "#ffffff",
+                            borderRadius: "8px",
+                            padding: "12px 20px",
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+                            flexWrap: "wrap",
+                            gap: "12px",
+                        }}
+                    >
+                        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                            <span style={{ fontSize: "14px", fontWeight: 600 }}>
+                                ✓ {selectedIds.length} order(s) selected
+                            </span>
+                            <button
+                                type="button"
+                                onClick={() => setSelectedIds([])}
+                                style={{
+                                    background: "none",
+                                    border: "none",
+                                    color: "#99ccee",
+                                    fontSize: "13px",
+                                    cursor: "pointer",
+                                    textDecoration: "underline",
+                                }}
+                            >
+                                Deselect all
+                            </button>
+                        </div>
+
+                        <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+                            <button
+                                type="button"
+                                onClick={() => handleBulkSync("order")}
+                                disabled={bulkSyncing}
+                                style={{
+                                    padding: "8px 14px",
+                                    borderRadius: "6px",
+                                    border: "none",
+                                    backgroundColor: "#008060",
+                                    color: "#ffffff",
+                                    fontSize: "13px",
+                                    fontWeight: 600,
+                                    cursor: bulkSyncing ? "wait" : "pointer",
+                                }}
+                            >
+                                {bulkSyncing ? "Syncing..." : "Sync Sales Orders"}
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={() => handleBulkSync("invoice")}
+                                disabled={bulkSyncing}
+                                style={{
+                                    padding: "8px 14px",
+                                    borderRadius: "6px",
+                                    border: "none",
+                                    backgroundColor: "#005bd3",
+                                    color: "#ffffff",
+                                    fontSize: "13px",
+                                    fontWeight: 600,
+                                    cursor: bulkSyncing ? "wait" : "pointer",
+                                }}
+                            >
+                                {bulkSyncing ? "Syncing..." : "Sync Invoices"}
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={() => handleBulkSync("payment")}
+                                disabled={bulkSyncing}
+                                style={{
+                                    padding: "8px 14px",
+                                    borderRadius: "6px",
+                                    border: "none",
+                                    backgroundColor: "#5c6ac4",
+                                    color: "#ffffff",
+                                    fontSize: "13px",
+                                    fontWeight: 600,
+                                    cursor: bulkSyncing ? "wait" : "pointer",
+                                }}
+                            >
+                                {bulkSyncing ? "Syncing..." : "Sync Payments"}
+                            </button>
+                        </div>
+                    </div>
+                )}
+
                 {/* ORDERS TABLE */}
                 <div
                     style={{
@@ -527,6 +714,15 @@ export default function Orders({
                                     color: "#616a75",
                                 }}
                             >
+                                <th style={{ padding: "12px 16px", width: "40px" }}>
+                                    <input
+                                        type="checkbox"
+                                        ref={headerCheckboxRef}
+                                        checked={isAllSelected}
+                                        onChange={handleToggleSelectAll}
+                                        style={{ cursor: "pointer", width: "16px", height: "16px" }}
+                                    />
+                                </th>
                                 <th style={{ padding: "12px 16px" }}>ORDER #</th>
                                 <th style={{ padding: "12px 16px" }}>CUSTOMER</th>
                                 <th style={{ padding: "12px 16px" }}>DATE</th>
@@ -549,7 +745,7 @@ export default function Orders({
                             {loading ? (
                                 <tr>
                                     <td
-                                        colSpan={9}
+                                        colSpan={10}
                                         style={{
                                             textAlign: "center",
                                             padding: "40px",
@@ -562,6 +758,7 @@ export default function Orders({
                             ) : filteredOrders.length > 0 ? (
                                 filteredOrders.map((o) => {
                                     const isSyncing = syncingOrderId === o.id;
+                                    const isSelected = selectedIds.includes(o.id);
                                     const hasInvoice = !!o.invoice?.zoho_invoice_id;
                                     const paySummary = getPaymentSummary(o);
 
@@ -570,8 +767,17 @@ export default function Orders({
                                             key={o.id}
                                             style={{
                                                 borderBottom: "1px solid #f1f2f4",
+                                                backgroundColor: isSelected ? "#f4f6f8" : "transparent",
                                             }}
                                         >
+                                            <td style={{ padding: "12px 16px", width: "40px" }}>
+                                                <input
+                                                    type="checkbox"
+                                                    checked={isSelected}
+                                                    onChange={() => handleToggleSelectRow(o.id)}
+                                                    style={{ cursor: "pointer", width: "16px", height: "16px" }}
+                                                />
+                                            </td>
                                             <td
                                                 style={{
                                                     padding: "12px 16px",
@@ -602,33 +808,19 @@ export default function Orders({
                                                         </div>
                                                     </div>
                                                 ) : (
-                                                    <span style={{ color: "#8c9196" }}>
+                                                    <span style={{ color: "#616a75" }}>
                                                         Guest Customer
                                                     </span>
                                                 )}
                                             </td>
-                                            <td
-                                                style={{
-                                                    padding: "12px 16px",
-                                                    color: "#616a75",
-                                                }}
-                                            >
-                                                {o.order_date || o.created_at
-                                                    ? new Date(
-                                                          o.order_date || o.created_at,
-                                                      ).toLocaleDateString()
+                                            <td style={{ padding: "12px 16px", color: "#616a75" }}>
+                                                {o.created_at
+                                                    ? new Date(o.created_at).toLocaleDateString()
                                                     : "—"}
                                             </td>
-                                            <td
-                                                style={{
-                                                    padding: "12px 16px",
-                                                    fontWeight: 600,
-                                                }}
-                                            >
-                                                $
-                                                {parseFloat(
-                                                    o.total_price || 0,
-                                                ).toFixed(2)}
+                                            <td style={{ padding: "12px 16px", fontWeight: 600 }}>
+                                                ${parseFloat(o.total_price || 0).toFixed(2)}{" "}
+                                                {o.currency || "USD"}
                                             </td>
                                             <td
                                                 style={{
@@ -637,8 +829,8 @@ export default function Orders({
                                                     color: "#202223",
                                                 }}
                                             >
-                                                {o.zoho_sales_order_id || o.zoho_sales_order_number ? (
-                                                    o.zoho_sales_order_number || `SO-${o.zoho_sales_order_id}`
+                                                {o.zoho_salesorder_id ? (
+                                                    `SO-${o.zoho_salesorder_id}`
                                                 ) : (
                                                     <span style={{ color: "#8c9196" }}>
                                                         Not Created
@@ -721,9 +913,9 @@ export default function Orders({
                                                     <button
                                                         type="button"
                                                         onClick={() => handleSyncOrder(o.id)}
-                                                        disabled={isSyncing}
+                                                        disabled={isSyncing || bulkSyncing}
                                                         style={{
-                                                            padding: "6px 12px",
+                                                            padding: "5px 10px",
                                                             borderRadius: "6px",
                                                             border: "1px solid #c9cccf",
                                                             backgroundColor: "#ffffff",
@@ -735,14 +927,14 @@ export default function Orders({
                                                     >
                                                         {isSyncing && syncType === "order"
                                                             ? "Syncing..."
-                                                            : "Sync Sales Order"}
+                                                            : "Sync Order"}
                                                     </button>
                                                     <button
                                                         type="button"
                                                         onClick={() => handleSyncInvoice(o.id)}
-                                                        disabled={isSyncing}
+                                                        disabled={isSyncing || bulkSyncing}
                                                         style={{
-                                                            padding: "6px 12px",
+                                                            padding: "5px 10px",
                                                             borderRadius: "6px",
                                                             border: "1px solid #005bd3",
                                                             backgroundColor: "#005bd3",
@@ -764,7 +956,7 @@ export default function Orders({
                             ) : (
                                 <tr>
                                     <td
-                                        colSpan={9}
+                                        colSpan={10}
                                         style={{
                                             textAlign: "center",
                                             padding: "40px",
@@ -779,6 +971,128 @@ export default function Orders({
                     </table>
                 </div>
             </div>
+
+            {/* BULK RESULTS MODAL */}
+            {bulkResultsModal && (
+                <div
+                    style={{
+                        position: "fixed",
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        backgroundColor: "rgba(0,0,0,0.5)",
+                        display: "flex",
+                        justifyContent: "center",
+                        alignItems: "center",
+                        zIndex: 10000,
+                    }}
+                >
+                    <div
+                        style={{
+                            backgroundColor: "#ffffff",
+                            borderRadius: "12px",
+                            padding: "24px",
+                            width: "90%",
+                            maxWidth: "600px",
+                            maxHeight: "80vh",
+                            overflowY: "auto",
+                            boxShadow: "0 4px 20px rgba(0,0,0,0.2)",
+                        }}
+                    >
+                        <h2 style={{ fontSize: "18px", fontWeight: 700, margin: "0 0 12px 0" }}>
+                            Bulk Synchronization Results ({bulkResultsModal.syncType?.toUpperCase() || "ORDER"})
+                        </h2>
+
+                        <div style={{ display: "flex", gap: "10px", marginBottom: "16px" }}>
+                            <span style={{ padding: "4px 12px", borderRadius: "12px", fontSize: "12px", fontWeight: 600, backgroundColor: "#e4e5e7", color: "#202223" }}>
+                                Total: {bulkResultsModal.summary?.total || 0}
+                            </span>
+                            <span style={{ padding: "4px 12px", borderRadius: "12px", fontSize: "12px", fontWeight: 600, backgroundColor: "#eafbdf", color: "#108043" }}>
+                                Synced: {bulkResultsModal.summary?.synced || 0}
+                            </span>
+                            <span style={{ padding: "4px 12px", borderRadius: "12px", fontSize: "12px", fontWeight: 600, backgroundColor: "#fbeae8", color: "#d72c0d" }}>
+                                Failed: {bulkResultsModal.summary?.failed || 0}
+                            </span>
+                            {bulkResultsModal.summary?.skipped > 0 && (
+                                <span style={{ padding: "4px 12px", borderRadius: "12px", fontSize: "12px", fontWeight: 600, backgroundColor: "#fff8e6", color: "#b78103" }}>
+                                    Skipped: {bulkResultsModal.summary?.skipped}
+                                </span>
+                            )}
+                        </div>
+
+                        <div style={{ border: "1px solid #e1e3e5", borderRadius: "8px", overflow: "hidden", marginBottom: "20px" }}>
+                            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+                                <thead>
+                                    <tr style={{ backgroundColor: "#f8f9fa", borderBottom: "1px solid #e1e3e5", textAlign: "left" }}>
+                                        <th style={{ padding: "10px 14px" }}>Order # / ID</th>
+                                        <th style={{ padding: "10px 14px" }}>Status</th>
+                                        <th style={{ padding: "10px 14px" }}>Message</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {bulkResultsModal.results?.map((res, idx) => (
+                                        <tr key={idx} style={{ borderBottom: "1px solid #f1f2f4" }}>
+                                            <td style={{ padding: "10px 14px", fontWeight: 600, fontFamily: "monospace" }}>
+                                                {res.order_number ? `#${res.order_number}` : `ID #${res.id}`}
+                                            </td>
+                                            <td style={{ padding: "10px 14px" }}>
+                                                <span
+                                                    style={{
+                                                        padding: "2px 8px",
+                                                        borderRadius: "10px",
+                                                        fontSize: "11px",
+                                                        fontWeight: 600,
+                                                        backgroundColor:
+                                                            res.status === "success"
+                                                                ? "#eafbdf"
+                                                                : res.status === "skipped"
+                                                                ? "#fff8e6"
+                                                                : "#fbeae8",
+                                                        color:
+                                                            res.status === "success"
+                                                                ? "#108043"
+                                                                : res.status === "skipped"
+                                                                ? "#b78103"
+                                                                : "#d72c0d",
+                                                    }}
+                                                >
+                                                    {res.status}
+                                                </span>
+                                            </td>
+                                            <td style={{ padding: "10px 14px", color: "#616a75" }}>
+                                                {res.message}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <div style={{ textAlign: "right" }}>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setBulkResultsModal(null);
+                                    setSelectedIds([]);
+                                }}
+                                style={{
+                                    padding: "8px 18px",
+                                    borderRadius: "6px",
+                                    border: "none",
+                                    backgroundColor: "#202223",
+                                    color: "#ffffff",
+                                    fontSize: "13px",
+                                    fontWeight: 600,
+                                    cursor: "pointer",
+                                }}
+                            >
+                                Close &amp; Refresh
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* PAYMENT DETAILS MODAL */}
             {selectedOrderForPayment && (
@@ -802,7 +1116,7 @@ export default function Orders({
                         style={{
                             backgroundColor: "#ffffff",
                             borderRadius: "12px",
-                            maxWidth: "650px",
+                            maxWidth: "600px",
                             width: "100%",
                             maxHeight: "85vh",
                             overflowY: "auto",
@@ -840,9 +1154,11 @@ export default function Orders({
                                         margin: "4px 0 0 0",
                                     }}
                                 >
-                                    Shopify financial status:{" "}
-                                    <strong style={{ textTransform: "capitalize" }}>
-                                        {selectedOrderForPayment.financial_status || "pending"}
+                                    Associated Invoice:{" "}
+                                    <strong style={{ color: "#005bd3", fontFamily: "monospace" }}>
+                                        {selectedOrderForPayment.invoice?.zoho_invoice_id
+                                            ? `INV-${selectedOrderForPayment.invoice.zoho_invoice_id}`
+                                            : "Pending Invoice"}
                                     </strong>
                                 </p>
                             </div>
@@ -861,135 +1177,92 @@ export default function Orders({
                             </button>
                         </div>
 
-                        {/* ORDER SUMMARY STRIP */}
+                        {/* SUMMARY CARDS */}
                         <div
                             style={{
-                                backgroundColor: "#f8f9fa",
-                                borderRadius: "8px",
-                                padding: "12px 16px",
-                                display: "flex",
-                                justifyContent: "space-between",
+                                display: "grid",
+                                gridTemplateColumns: "1fr 1fr",
+                                gap: "12px",
                                 marginBottom: "20px",
                                 fontSize: "13px",
                             }}
                         >
-                            <div>
-                                <span style={{ color: "#616a75" }}>Customer: </span>
-                                <strong style={{ color: "#1a1d20" }}>
-                                    {selectedOrderForPayment.customer
-                                        ? `${selectedOrderForPayment.customer.first_name} ${selectedOrderForPayment.customer.last_name}`
-                                        : "Guest Customer"}
-                                </strong>
+                            <div style={{ backgroundColor: "#f8f9fa", padding: "12px", borderRadius: "8px" }}>
+                                <div style={{ color: "#616a75", fontSize: "12px" }}>Order Total</div>
+                                <div style={{ fontWeight: 700, color: "#1a1d20", marginTop: "2px", fontSize: "15px" }}>
+                                    ${parseFloat(selectedOrderForPayment.total_price || 0).toFixed(2)} {selectedOrderForPayment.currency || "USD"}
+                                </div>
                             </div>
-                            <div>
-                                <span style={{ color: "#616a75" }}>Total Amount: </span>
-                                <strong style={{ color: "#1a1d20" }}>
-                                    ${parseFloat(selectedOrderForPayment.total_price || 0).toFixed(2)} {selectedOrderForPayment.currency}
-                                </strong>
-                            </div>
-                            <div>
-                                <span style={{ color: "#616a75" }}>Zoho Invoice: </span>
-                                <strong style={{ color: "#1a1d20" }}>
-                                    {selectedOrderForPayment.invoice?.zoho_invoice_id
-                                        ? `INV-${selectedOrderForPayment.invoice.zoho_invoice_id}`
-                                        : "Not Created"}
-                                </strong>
+                            <div style={{ backgroundColor: "#f8f9fa", padding: "12px", borderRadius: "8px" }}>
+                                <div style={{ color: "#616a75", fontSize: "12px" }}>Financial Status</div>
+                                <div style={{ fontWeight: 600, color: "#1a1d20", marginTop: "2px", textTransform: "capitalize" }}>
+                                    {selectedOrderForPayment.financial_status || "pending"}
+                                </div>
                             </div>
                         </div>
 
-                        {/* TRANSACTIONS / PAYMENTS LIST */}
-                        <h3
-                            style={{
-                                fontSize: "14px",
-                                fontWeight: 600,
-                                color: "#1a1d20",
-                                marginBottom: "12px",
-                            }}
-                        >
-                            Payment Transactions ({(selectedOrderForPayment.payments || []).length})
+                        {/* PAYMENTS LIST */}
+                        <h3 style={{ fontSize: "14px", fontWeight: 600, color: "#1a1d20", marginBottom: "12px" }}>
+                            Payment Transactions ({selectedOrderForPayment.payments ? selectedOrderForPayment.payments.length : 0})
                         </h3>
 
-                        {(!selectedOrderForPayment.payments || selectedOrderForPayment.payments.length === 0) ? (
+                        {!selectedOrderForPayment.payments || selectedOrderForPayment.payments.length === 0 ? (
                             <div
                                 style={{
-                                    textAlign: "center",
-                                    padding: "24px",
+                                    fontSize: "13px",
+                                    color: "#616a75",
+                                    fontStyle: "italic",
+                                    padding: "16px",
                                     backgroundColor: "#fafafa",
                                     borderRadius: "8px",
                                     border: "1px dashed #c9cccf",
+                                    textAlign: "center",
                                 }}
                             >
-                                <p style={{ fontSize: "13px", color: "#616a75", margin: 0 }}>
-                                    No local payment records registered for this order yet.
-                                </p>
-                                {connectedState && (
-                                    <button
-                                        type="button"
-                                        onClick={() => handleSyncPayment(null, selectedOrderForPayment.id)}
-                                        disabled={syncingPaymentId === selectedOrderForPayment.id}
-                                        style={{
-                                            marginTop: "12px",
-                                            padding: "6px 14px",
-                                            borderRadius: "6px",
-                                            border: "1px solid #005bd3",
-                                            backgroundColor: "#005bd3",
-                                            color: "#ffffff",
-                                            fontSize: "12px",
-                                            fontWeight: 600,
-                                            cursor: syncingPaymentId === selectedOrderForPayment.id ? "wait" : "pointer",
-                                        }}
-                                    >
-                                        {syncingPaymentId === selectedOrderForPayment.id ? "Syncing..." : "Create & Sync Payment to Zoho"}
-                                    </button>
+                                No payment transaction recorded locally for this order.
+                                {selectedOrderForPayment.invoice && (
+                                    <div style={{ marginTop: "8px" }}>
+                                        <button
+                                            type="button"
+                                            onClick={() => handleSyncPayment(null, selectedOrderForPayment.id)}
+                                            disabled={syncingPaymentId === selectedOrderForPayment.id}
+                                            style={{
+                                                padding: "6px 14px",
+                                                borderRadius: "6px",
+                                                border: "1px solid #005bd3",
+                                                backgroundColor: "#005bd3",
+                                                color: "#ffffff",
+                                                fontSize: "12px",
+                                                fontWeight: 600,
+                                                cursor: syncingPaymentId === selectedOrderForPayment.id ? "wait" : "pointer",
+                                            }}
+                                        >
+                                            {syncingPaymentId === selectedOrderForPayment.id ? "Creating & Syncing Payment..." : "Record & Sync Payment to Zoho"}
+                                        </button>
+                                    </div>
                                 )}
                             </div>
                         ) : (
                             <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
                                 {selectedOrderForPayment.payments.map((p) => {
-                                    const isPaymentSyncing = syncingPaymentId === p.id;
-                                    const isSynced = p.sync_status === "synced";
+                                    const isPaymentSyncing = syncingPaymentId === p.id || syncingPaymentId === selectedOrderForPayment.id;
+                                    const isSynced = p.sync_status === "synced" || !!p.zoho_payment_id;
                                     const isFailed = p.sync_status === "failed";
 
                                     return (
                                         <div
                                             key={p.id}
                                             style={{
+                                                backgroundColor: "#ffffff",
                                                 border: "1px solid #e1e3e5",
                                                 borderRadius: "8px",
-                                                padding: "16px",
-                                                backgroundColor: "#ffffff",
+                                                padding: "14px",
                                             }}
                                         >
-                                            <div
-                                                style={{
-                                                    display: "flex",
-                                                    justifyContent: "space-between",
-                                                    alignItems: "flex-start",
-                                                    marginBottom: "8px",
-                                                }}
-                                            >
+                                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                                                 <div>
-                                                    <span
-                                                        style={{
-                                                            fontSize: "14px",
-                                                            fontWeight: 700,
-                                                            color: "#1a1d20",
-                                                        }}
-                                                    >
+                                                    <span style={{ fontWeight: 700, fontSize: "14px", color: "#1a1d20" }}>
                                                         ${parseFloat(p.amount || 0).toFixed(2)} {p.currency || "USD"}
-                                                    </span>
-                                                    <span
-                                                        style={{
-                                                            marginLeft: "8px",
-                                                            padding: "2px 8px",
-                                                            borderRadius: "10px",
-                                                            fontSize: "11px",
-                                                            fontWeight: 600,
-                                                            backgroundColor: p.status === "paid" ? "#eafbdf" : "#f1f2f4",
-                                                            color: p.status === "paid" ? "#108043" : "#616a75",
-                                                        }}
-                                                    >
-                                                        {p.status ? p.status.toUpperCase() : "PAID"}
                                                     </span>
                                                 </div>
                                                 <span
@@ -1058,7 +1331,7 @@ export default function Orders({
                                                     <button
                                                         type="button"
                                                         onClick={() => handleSyncPayment(p.id, selectedOrderForPayment.id)}
-                                                        disabled={isPaymentSyncing}
+                                                        disabled={isPaymentSyncing || bulkSyncing}
                                                         style={{
                                                             padding: "6px 14px",
                                                             borderRadius: "6px",

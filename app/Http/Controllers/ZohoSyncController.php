@@ -1774,4 +1774,325 @@ GRAPHQL;
             ], 500);
         }
     }
+
+    public function bulkSyncOrders(Request $request): JsonResponse
+    {
+        $shop = $request->attributes->get('shop') ?? $this->resolveShopModel($request);
+
+        if (!$shop) {
+            return response()->json(['success' => false, 'message' => 'No Shopify shop installed.'], 404);
+        }
+
+        if (!$shop->zohoConnection) {
+            return response()->json(['success' => false, 'message' => 'Zoho is not connected.'], 409);
+        }
+
+        $validated = $request->validate([
+            'order_ids' => ['required', 'array', 'min:1'],
+            'order_ids.*' => ['required', 'integer'],
+            'sync_type' => ['nullable', 'string', 'in:order,invoice,payment'],
+        ]);
+
+        $syncType = $validated['sync_type'] ?? 'order';
+        $orderIds = $validated['order_ids'];
+
+        $orders = Order::where('shop_id', $shop->id)
+            ->whereIn('id', $orderIds)
+            ->with(['invoice'])
+            ->get();
+
+        $zohoService = app()->bound(ZohoService::class) ? app(ZohoService::class) : new ZohoService($shop);
+        $results = [];
+        $syncedCount = 0;
+        $failedCount = 0;
+        $skippedCount = 0;
+
+        foreach ($orderIds as $orderId) {
+            $order = $orders->firstWhere('id', $orderId);
+
+            if (!$order) {
+                $results[] = [
+                    'id' => $orderId,
+                    'status' => 'failed',
+                    'message' => 'Order not found for current shop.',
+                ];
+                $failedCount++;
+                continue;
+            }
+
+            try {
+                if ($syncType === 'invoice') {
+                    $res = $zohoService->syncInvoice($order);
+                } elseif ($syncType === 'payment') {
+                    $payment = Payment::where('order_id', $order->id)
+                        ->where('shop_id', $shop->id)
+                        ->latest()
+                        ->first();
+
+                    if (!$payment && $order->invoice) {
+                        $payment = Payment::create([
+                            'shop_id' => $shop->id,
+                            'order_id' => $order->id,
+                            'invoice_id' => $order->invoice->id,
+                            'shopify_order_id' => $order->shopify_order_id,
+                            'shopify_transaction_id' => "gid://shopify/OrderTransaction/manual_{$order->id}_" . time(),
+                            'payment_reference' => "TXN-MANUAL-{$order->id}",
+                            'amount' => $order->total_price,
+                            'currency' => $order->currency ?? 'USD',
+                            'payment_date' => now(),
+                            'payment_method' => 'shopify_payments',
+                            'status' => Payment::STATUS_PAID,
+                            'sync_status' => Payment::SYNC_STATUS_PENDING,
+                        ]);
+                    }
+
+                    if ($payment) {
+                        $payment->unsetRelations();
+                        $payment->refresh();
+                        $res = $zohoService->syncPayment($payment);
+                    } else {
+                        $res = ['success' => false, 'message' => 'Invoice or payment record missing for order.'];
+                    }
+                } else {
+                    $res = $zohoService->syncOrder($order);
+                }
+
+                $isSuccess = !empty($res['success']);
+                $isSkipped = isset($res['skipped']) && $res['skipped'] === true;
+
+                if ($isSkipped) {
+                    $skippedCount++;
+                    $results[] = [
+                        'id' => $orderId,
+                        'order_number' => $order->order_number,
+                        'status' => 'skipped',
+                        'message' => $res['message'] ?? 'Skipped.',
+                    ];
+                } elseif ($isSuccess) {
+                    $syncedCount++;
+                    $results[] = [
+                        'id' => $orderId,
+                        'order_number' => $order->order_number,
+                        'status' => 'success',
+                        'message' => $res['message'] ?? 'Synced successfully.',
+                    ];
+                } else {
+                    $failedCount++;
+                    $results[] = [
+                        'id' => $orderId,
+                        'order_number' => $order->order_number,
+                        'status' => 'failed',
+                        'message' => $res['message'] ?? 'Sync failed.',
+                    ];
+                }
+            } catch (\Throwable $e) {
+                $failedCount++;
+                $results[] = [
+                    'id' => $orderId,
+                    'order_number' => $order->order_number,
+                    'status' => 'failed',
+                    'message' => $e->getMessage(),
+                ];
+            }
+        }
+
+        return response()->json([
+            'success' => true,
+            'results' => $results,
+            'summary' => [
+                'total' => count($orderIds),
+                'synced' => $syncedCount,
+                'failed' => $failedCount,
+                'skipped' => $skippedCount,
+            ],
+        ]);
+    }
+
+    public function bulkSyncCustomers(Request $request): JsonResponse
+    {
+        $shop = $request->attributes->get('shop') ?? $this->resolveShopModel($request);
+
+        if (!$shop) {
+            return response()->json(['success' => false, 'message' => 'No Shopify shop installed.'], 404);
+        }
+
+        if (!$shop->zohoConnection) {
+            return response()->json(['success' => false, 'message' => 'Zoho is not connected.'], 409);
+        }
+
+        $validated = $request->validate([
+            'customer_ids' => ['required', 'array', 'min:1'],
+            'customer_ids.*' => ['required', 'integer'],
+        ]);
+
+        $customerIds = $validated['customer_ids'];
+        $customers = Customer::where('shop_id', $shop->id)
+            ->whereIn('id', $customerIds)
+            ->get();
+
+        $zohoService = app()->bound(ZohoService::class) ? app(ZohoService::class) : new ZohoService($shop);
+        $results = [];
+        $syncedCount = 0;
+        $failedCount = 0;
+        $skippedCount = 0;
+
+        foreach ($customerIds as $customerId) {
+            $customer = $customers->firstWhere('id', $customerId);
+
+            if (!$customer) {
+                $results[] = [
+                    'id' => $customerId,
+                    'status' => 'failed',
+                    'message' => 'Customer record not found for current shop.',
+                ];
+                $failedCount++;
+                continue;
+            }
+
+            try {
+                $res = $zohoService->syncCustomer($customer);
+                $isSuccess = !empty($res['success']);
+                $isSkipped = isset($res['skipped']) && $res['skipped'] === true;
+
+                if ($isSkipped) {
+                    $skippedCount++;
+                    $results[] = [
+                        'id' => $customerId,
+                        'name' => trim("{$customer->first_name} {$customer->last_name}") ?: $customer->email,
+                        'status' => 'skipped',
+                        'message' => $res['message'] ?? 'Skipped.',
+                    ];
+                } elseif ($isSuccess) {
+                    $syncedCount++;
+                    $results[] = [
+                        'id' => $customerId,
+                        'name' => trim("{$customer->first_name} {$customer->last_name}") ?: $customer->email,
+                        'status' => 'success',
+                        'message' => $res['message'] ?? 'Synced successfully.',
+                    ];
+                } else {
+                    $failedCount++;
+                    $results[] = [
+                        'id' => $customerId,
+                        'name' => trim("{$customer->first_name} {$customer->last_name}") ?: $customer->email,
+                        'status' => 'failed',
+                        'message' => $res['message'] ?? 'Sync failed.',
+                    ];
+                }
+            } catch (\Throwable $e) {
+                $failedCount++;
+                $results[] = [
+                    'id' => $customerId,
+                    'name' => trim("{$customer->first_name} {$customer->last_name}") ?: $customer->email,
+                    'status' => 'failed',
+                    'message' => $e->getMessage(),
+                ];
+            }
+        }
+
+        return response()->json([
+            'success' => true,
+            'results' => $results,
+            'summary' => [
+                'total' => count($customerIds),
+                'synced' => $syncedCount,
+                'failed' => $failedCount,
+                'skipped' => $skippedCount,
+            ],
+        ]);
+    }
+
+    public function bulkSyncRefunds(Request $request): JsonResponse
+    {
+        $shop = $request->attributes->get('shop') ?? $this->resolveShopModel($request);
+
+        if (!$shop) {
+            return response()->json(['success' => false, 'message' => 'No Shopify shop installed.'], 404);
+        }
+
+        if (!$shop->zohoConnection) {
+            return response()->json(['success' => false, 'message' => 'Zoho is not connected.'], 409);
+        }
+
+        $validated = $request->validate([
+            'refund_ids' => ['required', 'array', 'min:1'],
+            'refund_ids.*' => ['required', 'integer'],
+        ]);
+
+        $refundIds = $validated['refund_ids'];
+        $refunds = \App\Models\Refund::where('shop_id', $shop->id)
+            ->whereIn('id', $refundIds)
+            ->get();
+
+        $zohoService = app()->bound(ZohoService::class) ? app(ZohoService::class) : new ZohoService($shop);
+        $results = [];
+        $syncedCount = 0;
+        $failedCount = 0;
+        $skippedCount = 0;
+
+        foreach ($refundIds as $refundId) {
+            $refund = $refunds->firstWhere('id', $refundId);
+
+            if (!$refund) {
+                $results[] = [
+                    'id' => $refundId,
+                    'status' => 'failed',
+                    'message' => 'Refund record not found for current shop.',
+                ];
+                $failedCount++;
+                continue;
+            }
+
+            try {
+                $res = $zohoService->syncRefund($refund);
+                $isSuccess = !empty($res['success']);
+                $isSkipped = isset($res['skipped']) && $res['skipped'] === true;
+
+                if ($isSkipped) {
+                    $skippedCount++;
+                    $results[] = [
+                        'id' => $refundId,
+                        'shopify_refund_id' => $refund->shopify_refund_id,
+                        'status' => 'skipped',
+                        'message' => $res['message'] ?? 'Skipped.',
+                    ];
+                } elseif ($isSuccess) {
+                    $syncedCount++;
+                    $results[] = [
+                        'id' => $refundId,
+                        'shopify_refund_id' => $refund->shopify_refund_id,
+                        'status' => 'success',
+                        'message' => $res['message'] ?? 'Synced successfully.',
+                    ];
+                } else {
+                    $failedCount++;
+                    $results[] = [
+                        'id' => $refundId,
+                        'shopify_refund_id' => $refund->shopify_refund_id,
+                        'status' => 'failed',
+                        'message' => $res['message'] ?? 'Sync failed.',
+                    ];
+                }
+            } catch (\Throwable $e) {
+                $failedCount++;
+                $results[] = [
+                    'id' => $refundId,
+                    'shopify_refund_id' => $refund->shopify_refund_id,
+                    'status' => 'failed',
+                    'message' => $e->getMessage(),
+                ];
+            }
+        }
+
+        return response()->json([
+            'success' => true,
+            'results' => $results,
+            'summary' => [
+                'total' => count($refundIds),
+                'synced' => $syncedCount,
+                'failed' => $failedCount,
+                'skipped' => $skippedCount,
+            ],
+        ]);
+    }
 }

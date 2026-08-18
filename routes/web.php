@@ -90,6 +90,15 @@ Route::middleware(['shopify.auth'])->group(function () {
     Route::post('/zoho/sync-refund', [ZohoSyncController::class, 'syncRefund'])
         ->name('zoho.sync.refund');
 
+    Route::post('/zoho/bulk-sync-orders', [ZohoSyncController::class, 'bulkSyncOrders'])
+        ->name('zoho.bulk-sync-orders');
+
+    Route::post('/zoho/bulk-sync-customers', [ZohoSyncController::class, 'bulkSyncCustomers'])
+        ->name('zoho.bulk-sync-customers');
+
+    Route::post('/zoho/bulk-sync-refunds', [ZohoSyncController::class, 'bulkSyncRefunds'])
+        ->name('zoho.bulk-sync-refunds');
+
     Route::post('/zoho/settings/payment-gateways', [ZohoSyncController::class, 'savePaymentSettings'])
         ->name('zoho.settings.payment-gateways');
 

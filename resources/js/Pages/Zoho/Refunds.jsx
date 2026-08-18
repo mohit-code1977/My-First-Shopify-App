@@ -1,8 +1,9 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import ZohoLayout from "@/Layouts/ZohoLayout";
 
 const REFUNDS_DATA_URL = "/api/zoho/refunds";
 const SYNC_REFUND_URL = "/zoho/sync-refund";
+const BULK_SYNC_REFUNDS_URL = "/zoho/bulk-sync-refunds";
 
 export default function Refunds({
     shop,
@@ -19,6 +20,13 @@ export default function Refunds({
     const [syncingRefundId, setSyncingRefundId] = useState(null);
     const [notification, setNotification] = useState(null);
     const [selectedRefund, setSelectedRefund] = useState(null);
+
+    // Bulk Selection State
+    const [selectedIds, setSelectedIds] = useState([]);
+    const [bulkSyncing, setBulkSyncing] = useState(false);
+    const [bulkResultsModal, setBulkResultsModal] = useState(null);
+
+    const headerCheckboxRef = useRef(null);
 
     const getCsrfToken = () =>
         document.querySelector('meta[name="csrf-token"]')?.getAttribute("content") || "";
@@ -135,6 +143,106 @@ export default function Refunds({
         if (filterStatus === "failed") return status === "failed";
         return true;
     });
+
+    const visibleIds = filteredRefunds.map((r) => r.id);
+    const isAllSelected =
+        visibleIds.length > 0 &&
+        visibleIds.every((id) => selectedIds.includes(id));
+    const isIndeterminate =
+        selectedIds.length > 0 && !isAllSelected;
+
+    useEffect(() => {
+        if (headerCheckboxRef.current) {
+            headerCheckboxRef.current.indeterminate = isIndeterminate;
+        }
+    }, [isIndeterminate]);
+
+    const handleToggleSelectAll = () => {
+        if (isAllSelected) {
+            setSelectedIds((prev) =>
+                prev.filter((id) => !visibleIds.includes(id))
+            );
+        } else {
+            const combined = Array.from(
+                new Set([...selectedIds, ...visibleIds])
+            );
+            setSelectedIds(combined);
+        }
+    };
+
+    const handleToggleSelectRow = (id) => {
+        setSelectedIds((prev) =>
+            prev.includes(id)
+                ? prev.filter((item) => item !== id)
+                : [...prev, id]
+        );
+    };
+
+    const handleBulkSync = async (onlyFailed = false) => {
+        let idsToSync = selectedIds;
+        if (onlyFailed) {
+            const failedSet = new Set(
+                refundList
+                    .filter((r) => (r.sync_status || "").toLowerCase() === "failed")
+                    .map((r) => r.id)
+            );
+            idsToSync = selectedIds.filter((id) => failedSet.has(id));
+            if (idsToSync.length === 0) {
+                idsToSync = selectedIds;
+            }
+        }
+
+        if (idsToSync.length === 0) return;
+
+        if (!connectedState) {
+            setNotification({
+                type: "error",
+                message: "Zoho is not connected. Please connect in Settings first.",
+            });
+            return;
+        }
+
+        setBulkSyncing(true);
+        setNotification(null);
+
+        try {
+            const token = await window.shopify?.idToken();
+            const response = await fetch(BULK_SYNC_REFUNDS_URL, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Accept: "application/json",
+                    "X-CSRF-TOKEN": getCsrfToken(),
+                    Authorization: token ? `Bearer ${token}` : "",
+                },
+                body: JSON.stringify({
+                    refund_ids: idsToSync,
+                }),
+            });
+
+            const data = await response.json();
+
+            if (response.ok && data.success) {
+                setBulkResultsModal({
+                    summary: data.summary || {},
+                    results: data.results || [],
+                });
+                await loadData();
+            } else {
+                setNotification({
+                    type: "error",
+                    message: data.message || "Bulk refund sync failed.",
+                });
+            }
+        } catch (error) {
+            setNotification({
+                type: "error",
+                message: "Network error during bulk refund sync.",
+            });
+        } finally {
+            setBulkSyncing(false);
+        }
+    };
 
     const counts = {
         all: refundList.length,
@@ -339,6 +447,80 @@ export default function Refunds({
                     />
                 </div>
 
+                {/* BULK ACTION TOOLBAR */}
+                {selectedIds.length > 0 && (
+                    <div
+                        style={{
+                            backgroundColor: "#002040",
+                            color: "#ffffff",
+                            borderRadius: "8px",
+                            padding: "12px 20px",
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+                        }}
+                    >
+                        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                            <span style={{ fontSize: "14px", fontWeight: 600 }}>
+                                ✓ {selectedIds.length} refund(s) selected
+                            </span>
+                            <button
+                                type="button"
+                                onClick={() => setSelectedIds([])}
+                                style={{
+                                    background: "none",
+                                    border: "none",
+                                    color: "#99ccee",
+                                    fontSize: "13px",
+                                    cursor: "pointer",
+                                    textDecoration: "underline",
+                                }}
+                            >
+                                Deselect all
+                            </button>
+                        </div>
+
+                        <div style={{ display: "flex", gap: "10px" }}>
+                            <button
+                                type="button"
+                                onClick={() => handleBulkSync(false)}
+                                disabled={bulkSyncing}
+                                style={{
+                                    padding: "8px 16px",
+                                    borderRadius: "6px",
+                                    border: "none",
+                                    backgroundColor: "#008060",
+                                    color: "#ffffff",
+                                    fontSize: "13px",
+                                    fontWeight: 600,
+                                    cursor: bulkSyncing ? "wait" : "pointer",
+                                }}
+                            >
+                                {bulkSyncing ? "Syncing..." : "Sync Selected Credit Notes"}
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={() => handleBulkSync(true)}
+                                disabled={bulkSyncing}
+                                style={{
+                                    padding: "8px 16px",
+                                    borderRadius: "6px",
+                                    border: "none",
+                                    backgroundColor: "#005bd3",
+                                    color: "#ffffff",
+                                    fontSize: "13px",
+                                    fontWeight: 600,
+                                    cursor: bulkSyncing ? "wait" : "pointer",
+                                }}
+                            >
+                                {bulkSyncing ? "Retrying..." : "Retry Failed Syncs"}
+                            </button>
+                        </div>
+                    </div>
+                )}
+
                 {/* REFUNDS TABLE */}
                 <div
                     style={{
@@ -364,6 +546,15 @@ export default function Refunds({
                                     color: "#616a75",
                                 }}
                             >
+                                <th style={{ padding: "12px 16px", width: "40px" }}>
+                                    <input
+                                        type="checkbox"
+                                        ref={headerCheckboxRef}
+                                        checked={isAllSelected}
+                                        onChange={handleToggleSelectAll}
+                                        style={{ cursor: "pointer", width: "16px", height: "16px" }}
+                                    />
+                                </th>
                                 <th style={{ padding: "12px 16px" }}>REFUND ID</th>
                                 <th style={{ padding: "12px 16px" }}>ORDER #</th>
                                 <th style={{ padding: "12px 16px" }}>CUSTOMER</th>
@@ -379,7 +570,7 @@ export default function Refunds({
                             {loading ? (
                                 <tr>
                                     <td
-                                        colSpan={9}
+                                        colSpan={10}
                                         style={{
                                             textAlign: "center",
                                             padding: "40px",
@@ -392,6 +583,7 @@ export default function Refunds({
                             ) : filteredRefunds.length > 0 ? (
                                 filteredRefunds.map((r) => {
                                     const isSyncing = syncingRefundId === r.id;
+                                    const isSelected = selectedIds.includes(r.id);
                                     const isFailedOrPending =
                                         (r.sync_status || "pending").toLowerCase() === "failed" ||
                                         (r.sync_status || "pending").toLowerCase() === "pending";
@@ -401,8 +593,17 @@ export default function Refunds({
                                             key={r.id}
                                             style={{
                                                 borderBottom: "1px solid #f1f2f4",
+                                                backgroundColor: isSelected ? "#f4f6f8" : "transparent",
                                             }}
                                         >
+                                            <td style={{ padding: "12px 16px", width: "40px" }}>
+                                                <input
+                                                    type="checkbox"
+                                                    checked={isSelected}
+                                                    onChange={() => handleToggleSelectRow(r.id)}
+                                                    style={{ cursor: "pointer", width: "16px", height: "16px" }}
+                                                />
+                                            </td>
                                             <td style={{ padding: "12px 16px", fontFamily: "monospace", fontWeight: 600 }}>
                                                 {r.shopify_refund_id ? `#${r.shopify_refund_id}` : `#RF-${r.id}`}
                                             </td>
@@ -466,7 +667,7 @@ export default function Refunds({
                                                         <button
                                                             type="button"
                                                             onClick={() => handleRetrySync(r.id)}
-                                                            disabled={isSyncing}
+                                                            disabled={isSyncing || bulkSyncing}
                                                             style={{
                                                                 padding: "6px 12px",
                                                                 borderRadius: "6px",
@@ -489,7 +690,7 @@ export default function Refunds({
                             ) : (
                                 <tr>
                                     <td
-                                        colSpan={9}
+                                        colSpan={10}
                                         style={{
                                             textAlign: "center",
                                             padding: "40px",
@@ -504,6 +705,128 @@ export default function Refunds({
                     </table>
                 </div>
             </div>
+
+            {/* BULK RESULTS MODAL */}
+            {bulkResultsModal && (
+                <div
+                    style={{
+                        position: "fixed",
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        backgroundColor: "rgba(0,0,0,0.5)",
+                        display: "flex",
+                        justifyContent: "center",
+                        alignItems: "center",
+                        zIndex: 10000,
+                    }}
+                >
+                    <div
+                        style={{
+                            backgroundColor: "#ffffff",
+                            borderRadius: "12px",
+                            padding: "24px",
+                            width: "90%",
+                            maxWidth: "600px",
+                            maxHeight: "80vh",
+                            overflowY: "auto",
+                            boxShadow: "0 4px 20px rgba(0,0,0,0.2)",
+                        }}
+                    >
+                        <h2 style={{ fontSize: "18px", fontWeight: 700, margin: "0 0 12px 0" }}>
+                            Bulk Synchronization Results
+                        </h2>
+
+                        <div style={{ display: "flex", gap: "10px", marginBottom: "16px" }}>
+                            <span style={{ padding: "4px 12px", borderRadius: "12px", fontSize: "12px", fontWeight: 600, backgroundColor: "#e4e5e7", color: "#202223" }}>
+                                Total: {bulkResultsModal.summary?.total || 0}
+                            </span>
+                            <span style={{ padding: "4px 12px", borderRadius: "12px", fontSize: "12px", fontWeight: 600, backgroundColor: "#eafbdf", color: "#108043" }}>
+                                Synced: {bulkResultsModal.summary?.synced || 0}
+                            </span>
+                            <span style={{ padding: "4px 12px", borderRadius: "12px", fontSize: "12px", fontWeight: 600, backgroundColor: "#fbeae8", color: "#d72c0d" }}>
+                                Failed: {bulkResultsModal.summary?.failed || 0}
+                            </span>
+                            {bulkResultsModal.summary?.skipped > 0 && (
+                                <span style={{ padding: "4px 12px", borderRadius: "12px", fontSize: "12px", fontWeight: 600, backgroundColor: "#fff8e6", color: "#b78103" }}>
+                                    Skipped: {bulkResultsModal.summary?.skipped}
+                                </span>
+                            )}
+                        </div>
+
+                        <div style={{ border: "1px solid #e1e3e5", borderRadius: "8px", overflow: "hidden", marginBottom: "20px" }}>
+                            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+                                <thead>
+                                    <tr style={{ backgroundColor: "#f8f9fa", borderBottom: "1px solid #e1e3e5", textAlign: "left" }}>
+                                        <th style={{ padding: "10px 14px" }}>Refund / ID</th>
+                                        <th style={{ padding: "10px 14px" }}>Status</th>
+                                        <th style={{ padding: "10px 14px" }}>Message</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {bulkResultsModal.results?.map((res, idx) => (
+                                        <tr key={idx} style={{ borderBottom: "1px solid #f1f2f4" }}>
+                                            <td style={{ padding: "10px 14px", fontWeight: 600, fontFamily: "monospace" }}>
+                                                {res.shopify_refund_id ? `#${res.shopify_refund_id}` : `ID #${res.id}`}
+                                            </td>
+                                            <td style={{ padding: "10px 14px" }}>
+                                                <span
+                                                    style={{
+                                                        padding: "2px 8px",
+                                                        borderRadius: "10px",
+                                                        fontSize: "11px",
+                                                        fontWeight: 600,
+                                                        backgroundColor:
+                                                            res.status === "success"
+                                                                ? "#eafbdf"
+                                                                : res.status === "skipped"
+                                                                ? "#fff8e6"
+                                                                : "#fbeae8",
+                                                        color:
+                                                            res.status === "success"
+                                                                ? "#108043"
+                                                                : res.status === "skipped"
+                                                                ? "#b78103"
+                                                                : "#d72c0d",
+                                                    }}
+                                                >
+                                                    {res.status}
+                                                </span>
+                                            </td>
+                                            <td style={{ padding: "10px 14px", color: "#616a75" }}>
+                                                {res.message}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <div style={{ textAlign: "right" }}>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setBulkResultsModal(null);
+                                    setSelectedIds([]);
+                                }}
+                                style={{
+                                    padding: "8px 18px",
+                                    borderRadius: "6px",
+                                    border: "none",
+                                    backgroundColor: "#202223",
+                                    color: "#ffffff",
+                                    fontSize: "13px",
+                                    fontWeight: 600,
+                                    cursor: "pointer",
+                                }}
+                            >
+                                Close &amp; Refresh
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* REFUND DETAILS MODAL */}
             {selectedRefund && (
@@ -720,7 +1043,7 @@ export default function Refunds({
                                 <button
                                     type="button"
                                     onClick={() => handleRetrySync(selectedRefund.id)}
-                                    disabled={syncingRefundId === selectedRefund.id}
+                                    disabled={syncingRefundId === selectedRefund.id || bulkSyncing}
                                     style={{
                                         padding: "8px 16px",
                                         borderRadius: "6px",
