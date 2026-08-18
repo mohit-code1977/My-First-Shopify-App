@@ -739,6 +739,56 @@ class ShopifyWebhookController extends Controller
 
         $couponCode = !empty($payload['discount_codes'][0]['code']) ? $payload['discount_codes'][0]['code'] : null;
 
+        $shippingLines = [];
+        $shippingMethod = null;
+        if (!empty($payload['shipping_lines']) && is_array($payload['shipping_lines'])) {
+            foreach ($payload['shipping_lines'] as $sl) {
+                $slTitle = $sl['title'] ?? '';
+                $slPrice = (float) ($sl['price'] ?? ($sl['price_set']['shop_money']['amount'] ?? 0.00));
+                $shippingLines[] = [
+                    'title' => $slTitle,
+                    'price' => $slPrice,
+                    'code' => $sl['code'] ?? null,
+                ];
+                if (empty($shippingMethod) && !empty($slTitle)) {
+                    $shippingMethod = $slTitle;
+                }
+            }
+        }
+
+        $shippingAddr = $payload['shipping_address'] ?? null;
+
+        $fulfillments = [];
+        $trackingNumber = null;
+        $trackingCompany = null;
+        $trackingUrl = null;
+
+        if (!empty($payload['fulfillments']) && is_array($payload['fulfillments'])) {
+            foreach ($payload['fulfillments'] as $ful) {
+                $fNumber = $ful['tracking_number'] ?? (!empty($ful['tracking_numbers'][0]) ? $ful['tracking_numbers'][0] : null);
+                $fCompany = $ful['tracking_company'] ?? (!empty($ful['tracking_companies'][0]) ? $ful['tracking_companies'][0] : null);
+                $fUrl = $ful['tracking_url'] ?? (!empty($ful['tracking_urls'][0]) ? $ful['tracking_urls'][0] : null);
+
+                if (!empty($fNumber) && empty($trackingNumber)) {
+                    $trackingNumber = $fNumber;
+                }
+                if (!empty($fCompany) && empty($trackingCompany)) {
+                    $trackingCompany = $fCompany;
+                }
+                if (!empty($fUrl) && empty($trackingUrl)) {
+                    $trackingUrl = $fUrl;
+                }
+
+                $fulfillments[] = [
+                    'id' => $ful['id'] ?? null,
+                    'status' => $ful['status'] ?? null,
+                    'tracking_number' => $fNumber,
+                    'tracking_company' => $fCompany,
+                    'tracking_url' => $fUrl,
+                ];
+            }
+        }
+
         $financialStatus = $payload['financial_status'] ?? null;
         if (!empty($payload['cancelled_at']) && !in_array(strtolower((string) $financialStatus), ['voided', 'cancelled', 'refunded'], true)) {
             $financialStatus = 'cancelled';
@@ -757,6 +807,13 @@ class ShopifyWebhookController extends Controller
                 'subtotal' => $subtotal,
                 'discount_total' => $discountTotal,
                 'shipping_total' => $shippingTotal,
+                'shipping_method' => $shippingMethod,
+                'shipping_address' => $shippingAddr,
+                'shipping_lines' => $shippingLines,
+                'tracking_number' => $trackingNumber,
+                'tracking_company' => $trackingCompany,
+                'tracking_url' => $trackingUrl,
+                'fulfillments' => $fulfillments,
                 'tax_total' => $taxTotal,
                 'total_price' => $totalPrice,
                 'taxes_included' => $taxesIncluded,
@@ -924,8 +981,16 @@ class ShopifyWebhookController extends Controller
 
         $kind = strtolower(trim((string) ($payload['kind'] ?? '')));
         $status = strtolower(trim((string) ($payload['status'] ?? '')));
-        $amount = (float) ($payload['amount'] ?? 0.00);
-        $currency = strtoupper(trim((string) ($payload['currency'] ?? 'USD')));
+        $rawAmount = (float) ($payload['amount'] ?? 0.00);
+        $rawCurrency = strtoupper(trim((string) ($payload['currency'] ?? 'USD')));
+
+        if (!empty($payload['shop_money']['amount']) && !empty($payload['shop_money']['currency_code'])) {
+            $amount = (float) $payload['shop_money']['amount'];
+            $currency = strtoupper(trim((string) $payload['shop_money']['currency_code']));
+        } else {
+            $amount = $rawAmount;
+            $currency = $rawCurrency;
+        }
         $gateway = $payload['gateway'] ?? 'shopify_payments';
         $processedAtStr = $payload['processed_at'] ?? ($payload['created_at'] ?? null);
         $paymentDate = !empty($processedAtStr) ? date('Y-m-d H:i:s', strtotime($processedAtStr)) : now();
@@ -1019,6 +1084,11 @@ class ShopifyWebhookController extends Controller
         */
         $numericTxnId = preg_replace('/^gid:\/\/shopify\/OrderTransaction\//', '', $shopifyTxnId);
         $paymentReference = "TXN-{$numericTxnId}";
+        if (empty($payload['shop_money']) && $order && !empty($order->currency)) {
+            if (strcasecmp($currency, $order->currency) !== 0 && (float) $amount === (float) $order->total_price) {
+                $currency = strtoupper(trim($order->currency));
+            }
+        }
 
         $payment = Payment::updateOrCreate(
             [
@@ -1304,6 +1374,61 @@ class ShopifyWebhookController extends Controller
             }
         }
 
+        $shippingLines = [];
+        $shippingMethod = null;
+        if (!empty($orderData['shipping_lines']) && is_array($orderData['shipping_lines'])) {
+            foreach ($orderData['shipping_lines'] as $sl) {
+                $slTitle = $sl['title'] ?? '';
+                $slPrice = (float) ($sl['price'] ?? ($sl['price_set']['shop_money']['amount'] ?? 0.00));
+                $shippingLines[] = [
+                    'title' => $slTitle,
+                    'price' => $slPrice,
+                    'code' => $sl['code'] ?? null,
+                ];
+                if (empty($shippingMethod) && !empty($slTitle)) {
+                    $shippingMethod = $slTitle;
+                }
+            }
+        }
+
+        $shippingAddr = $orderData['shipping_address'] ?? null;
+
+        $fulfillments = [];
+        $trackingNumber = null;
+        $trackingCompany = null;
+        $trackingUrl = null;
+
+        if (!empty($orderData['fulfillments']) && is_array($orderData['fulfillments'])) {
+            foreach ($orderData['fulfillments'] as $ful) {
+                $fNumber = $ful['tracking_number'] ?? (!empty($ful['tracking_numbers'][0]) ? $ful['tracking_numbers'][0] : null);
+                $fCompany = $ful['tracking_company'] ?? (!empty($ful['tracking_companies'][0]) ? $ful['tracking_companies'][0] : null);
+                $fUrl = $ful['tracking_url'] ?? (!empty($ful['tracking_urls'][0]) ? $ful['tracking_urls'][0] : null);
+
+                if (!empty($fNumber) && empty($trackingNumber)) {
+                    $trackingNumber = $fNumber;
+                }
+                if (!empty($fCompany) && empty($trackingCompany)) {
+                    $trackingCompany = $fCompany;
+                }
+                if (!empty($fUrl) && empty($trackingUrl)) {
+                    $trackingUrl = $fUrl;
+                }
+
+                $fulfillments[] = [
+                    'id' => $ful['id'] ?? null,
+                    'status' => $ful['status'] ?? null,
+                    'tracking_number' => $fNumber,
+                    'tracking_company' => $fCompany,
+                    'tracking_url' => $fUrl,
+                ];
+            }
+        }
+
+        $shippingTotal = (float) ($orderData['total_shipping_price_set']['shop_money']['amount'] ?? ($orderData['total_shipping_price'] ?? 0.00));
+        if ($shippingTotal === 0.00 && !empty($shippingLines)) {
+            $shippingTotal = (float) array_sum(array_column($shippingLines, 'price'));
+        }
+
         return Order::updateOrCreate(
             [
                 'shop_id' => $shop->id,
@@ -1317,6 +1442,14 @@ class ShopifyWebhookController extends Controller
                 'order_date' => !empty($orderData['created_at']) ? new \DateTime($orderData['created_at']) : now(),
                 'currency' => $orderData['currency'] ?? 'USD',
                 'subtotal' => (float) ($orderData['subtotal_price'] ?? 0.00),
+                'shipping_total' => $shippingTotal,
+                'shipping_method' => $shippingMethod,
+                'shipping_address' => $shippingAddr,
+                'shipping_lines' => $shippingLines,
+                'tracking_number' => $trackingNumber,
+                'tracking_company' => $trackingCompany,
+                'tracking_url' => $trackingUrl,
+                'fulfillments' => $fulfillments,
                 'total_price' => (float) ($orderData['total_price'] ?? 0.00),
                 'line_items' => $lineItems,
             ]

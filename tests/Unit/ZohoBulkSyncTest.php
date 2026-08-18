@@ -76,12 +76,12 @@ class ZohoBulkSyncTest extends TestCase
             $mock->shouldReceive('syncOrder')
                 ->with(\Mockery::on(fn($o) => (int)$o->id === (int)$order1->id))
                 ->once()
-                ->andReturn(['success' => true, 'message' => 'Sales order created', 'zoho_salesorder_id' => 'SO-1001']);
+                ->andReturn(['success' => true, 'message' => 'Sales order created', 'zoho_sales_order_id' => 'zoho_so_1001', 'zoho_sales_order_number' => 'SO-1001']);
 
             $mock->shouldReceive('syncOrder')
                 ->with(\Mockery::on(fn($o) => (int)$o->id === (int)$order2->id))
                 ->once()
-                ->andReturn(['success' => true, 'message' => 'Sales order created', 'zoho_salesorder_id' => 'SO-1002']);
+                ->andReturn(['success' => true, 'message' => 'Sales order created', 'zoho_sales_order_id' => 'zoho_so_1002', 'zoho_sales_order_number' => 'SO-1002']);
         });
 
         $url = route('zoho.bulk-sync-orders') . '?shop=' . $this->shop->shop_domain;

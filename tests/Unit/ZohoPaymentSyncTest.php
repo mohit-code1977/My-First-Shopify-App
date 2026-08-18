@@ -698,4 +698,120 @@ class ZohoPaymentSyncTest extends TestCase
         $this->assertNull($payment->error_message);
         $this->assertTrue($result['success']);
     }
+
+    public function test_matching_usd_payment_and_usd_invoice_syncs_successfully(): void
+    {
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/customerpayments*' => function (Request $request) {
+                if ($request->method() === 'GET') {
+                    return Http::response(['code' => 0, 'customerpayments' => []], 200);
+                }
+                return Http::response(['code' => 0, 'payment' => ['payment_id' => 'zoho_pay_usd_matching']], 201);
+            },
+        ]);
+
+        $payment = Payment::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $this->order->id,
+            'invoice_id' => $this->invoice->id,
+            'shopify_order_id' => $this->order->shopify_order_id,
+            'shopify_transaction_id' => 'gid://shopify/OrderTransaction/match_usd_1',
+            'payment_reference' => 'TXN-MATCH-USD-1',
+            'amount' => 100.00,
+            'currency' => 'USD',
+            'payment_method' => 'stripe',
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncPayment($payment);
+
+        $this->assertTrue($result['success']);
+        $this->assertEquals('zoho_pay_usd_matching', $result['zoho_payment_id']);
+        $payment->refresh();
+        $this->assertEquals(Payment::SYNC_STATUS_SYNCED, $payment->sync_status);
+    }
+
+    public function test_matching_inr_payment_and_inr_invoice_syncs_successfully(): void
+    {
+        $inrOrder = Order::create([
+            'shop_id' => $this->shop->id,
+            'customer_id' => $this->customer->id,
+            'shopify_order_id' => 'gid://shopify/Order/inr_9300',
+            'order_number' => '#ORD-INR-9300',
+            'zoho_sales_order_id' => 'zoho_so_inr_9300',
+            'order_date' => now(),
+            'currency' => 'INR',
+            'subtotal' => '1845.92',
+            'total_price' => '1845.92',
+        ]);
+
+        $inrInvoice = Invoice::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $inrOrder->id,
+            'shopify_order_id' => $inrOrder->shopify_order_id,
+            'zoho_invoice_id' => 'zoho_inv_inr_9300',
+            'invoice_number' => 'INV-INR-09300',
+            'status' => 'sent',
+            'amount' => '1845.92',
+            'currency' => 'INR',
+            'sync_status' => 'synced',
+        ]);
+
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/customerpayments*' => function (Request $request) {
+                if ($request->method() === 'GET') {
+                    return Http::response(['code' => 0, 'customerpayments' => []], 200);
+                }
+                return Http::response(['code' => 0, 'payment' => ['payment_id' => 'zoho_pay_inr_matching']], 201);
+            },
+        ]);
+
+        $payment = Payment::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $inrOrder->id,
+            'invoice_id' => $inrInvoice->id,
+            'shopify_order_id' => $inrOrder->shopify_order_id,
+            'shopify_transaction_id' => 'gid://shopify/OrderTransaction/match_inr_1',
+            'payment_reference' => 'TXN-MATCH-INR-1',
+            'amount' => 1845.92,
+            'currency' => 'INR',
+            'payment_method' => 'stripe',
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncPayment($payment);
+
+        $this->assertTrue($result['success']);
+        $this->assertEquals('zoho_pay_inr_matching', $result['zoho_payment_id']);
+        $payment->refresh();
+        $this->assertEquals(Payment::SYNC_STATUS_SYNCED, $payment->sync_status);
+    }
+
+    public function test_inr_payment_and_usd_invoice_mismatch_is_safely_rejected(): void
+    {
+        Http::fake();
+
+        $payment = Payment::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $this->order->id,
+            'invoice_id' => $this->invoice->id,
+            'shopify_order_id' => $this->order->shopify_order_id,
+            'shopify_transaction_id' => 'gid://shopify/OrderTransaction/mismatch_inr_usd_1',
+            'payment_reference' => 'TXN-MISMATCH-INR-USD',
+            'amount' => 1845.92,
+            'currency' => 'INR',
+            'payment_method' => 'stripe',
+        ]);
+
+        try {
+            $zohoService = new ZohoService($this->shop);
+            $zohoService->syncPayment($payment);
+            $this->fail("Expected currency mismatch exception was not thrown.");
+        } catch (\Throwable $e) {
+            $payment->refresh();
+            $this->assertEquals(Payment::SYNC_STATUS_FAILED, $payment->sync_status);
+            $this->assertStringContainsString("Currency mismatch (Payment: INR, Invoice: USD)", $payment->error_message);
+            Http::assertNothingSent();
+        }
+    }
 }

@@ -866,11 +866,42 @@ query fetchSingleOrder($id: ID!) {
         taxLines { title rate priceSet { shopMoney { amount } } }
         subtotalPriceSet { shopMoney { amount } }
         totalDiscountsSet { shopMoney { amount } }
+        totalShippingPriceSet { shopMoney { amount } }
         totalTaxSet { shopMoney { amount } }
         totalPriceSet { shopMoney { amount } }
         displayFinancialStatus
         displayFulfillmentStatus
         note
+        shippingAddress {
+            firstName
+            lastName
+            name
+            company
+            address1
+            address2
+            city
+            province
+            provinceCode
+            zip
+            country
+            phone
+        }
+        shippingLines(first: 10) {
+            nodes {
+                title
+                originalPriceSet { shopMoney { amount } }
+                code
+            }
+        }
+        fulfillments {
+            status
+            createdAt
+            trackingInfo {
+                company
+                number
+                url
+            }
+        }
         customer {
             id
             firstName
@@ -994,8 +1025,64 @@ GRAPHQL;
             ];
         }
 
+        $shippingAddress = !empty($node['shippingAddress']) ? [
+            'first_name' => $node['shippingAddress']['firstName'] ?? null,
+            'last_name' => $node['shippingAddress']['lastName'] ?? null,
+            'name' => $node['shippingAddress']['name'] ?? null,
+            'company' => $node['shippingAddress']['company'] ?? null,
+            'address1' => $node['shippingAddress']['address1'] ?? null,
+            'address2' => $node['shippingAddress']['address2'] ?? null,
+            'city' => $node['shippingAddress']['city'] ?? null,
+            'province' => $node['shippingAddress']['province'] ?? null,
+            'province_code' => $node['shippingAddress']['provinceCode'] ?? null,
+            'zip' => $node['shippingAddress']['zip'] ?? null,
+            'country' => $node['shippingAddress']['country'] ?? null,
+            'phone' => $node['shippingAddress']['phone'] ?? null,
+        ] : null;
+
+        $shippingLines = [];
+        $shippingMethod = null;
+        foreach ($node['shippingLines']['nodes'] ?? [] as $sl) {
+            $slPrice = (float) ($sl['originalPriceSet']['shopMoney']['amount'] ?? 0.00);
+            $slTitle = $sl['title'] ?? '';
+            $shippingLines[] = [
+                'title' => $slTitle,
+                'price' => $slPrice,
+                'code' => $sl['code'] ?? null,
+            ];
+            if (empty($shippingMethod) && !empty($slTitle)) {
+                $shippingMethod = $slTitle;
+            }
+        }
+
+        $fulfillments = [];
+        $trackingNumber = null;
+        $trackingCompany = null;
+        $trackingUrl = null;
+
+        foreach ($node['fulfillments'] ?? [] as $ful) {
+            $tInfos = $ful['trackingInfo'] ?? [];
+            foreach ($tInfos as $ti) {
+                if (!empty($ti['number']) && empty($trackingNumber)) {
+                    $trackingNumber = $ti['number'];
+                }
+                if (!empty($ti['company']) && empty($trackingCompany)) {
+                    $trackingCompany = $ti['company'];
+                }
+                if (!empty($ti['url']) && empty($trackingUrl)) {
+                    $trackingUrl = $ti['url'];
+                }
+            }
+            $fulfillments[] = [
+                'status' => $ful['status'] ?? null,
+                'created_at' => $ful['createdAt'] ?? null,
+                'tracking_info' => $tInfos,
+            ];
+        }
+
         $subtotal = (float) ($node['subtotalPriceSet']['shopMoney']['amount'] ?? 0.00);
         $discountTotal = (float) ($node['totalDiscountsSet']['shopMoney']['amount'] ?? 0.00);
+        $shippingTotal = (float) ($node['totalShippingPriceSet']['shopMoney']['amount'] ?? 0.00);
         $taxTotal = (float) ($node['totalTaxSet']['shopMoney']['amount'] ?? 0.00);
         $totalPrice = (float) ($node['totalPriceSet']['shopMoney']['amount'] ?? 0.00);
         $taxesIncluded = (bool) ($node['taxesIncluded'] ?? false);
@@ -1012,6 +1099,14 @@ GRAPHQL;
                 'currency' => $node['currencyCode'] ?? 'USD',
                 'subtotal' => $subtotal,
                 'discount_total' => $discountTotal,
+                'shipping_total' => $shippingTotal,
+                'shipping_method' => $shippingMethod,
+                'shipping_address' => $shippingAddress,
+                'shipping_lines' => $shippingLines,
+                'tracking_number' => $trackingNumber,
+                'tracking_company' => $trackingCompany,
+                'tracking_url' => $trackingUrl,
+                'fulfillments' => $fulfillments,
                 'tax_total' => $taxTotal,
                 'total_price' => $totalPrice,
                 'financial_status' => strtolower($node['displayFinancialStatus'] ?? 'pending'),

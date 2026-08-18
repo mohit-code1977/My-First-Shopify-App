@@ -15,6 +15,7 @@ import {
     Box,
     BlockStack,
     InlineStack,
+    Spinner,
     useIndexResourceState,
 } from "@shopify/polaris";
 import ZohoLayout from "@/Layouts/ZohoLayout";
@@ -29,7 +30,8 @@ export default function Customers({
     zohoConnected = false,
     host = "",
 }) {
-    const [loading, setLoading] = useState(true);
+    const [initialLoading, setInitialLoading] = useState(true);
+    const [refreshing, setRefreshing] = useState(false);
     const [shopData, setShopData] = useState(shop || {});
     const [connectedState, setConnectedState] = useState(zohoConnected);
     const [customerList, setCustomerList] = useState(customers || []);
@@ -43,8 +45,12 @@ export default function Customers({
     const [bulkSyncing, setBulkSyncing] = useState(false);
     const [bulkResultsModal, setBulkResultsModal] = useState(null);
 
-    const loadData = async () => {
-        setLoading(true);
+    const loadData = async (isRefresh = false) => {
+        if (isRefresh) {
+            setRefreshing(true);
+        } else {
+            setInitialLoading(true);
+        }
         try {
             const token = await window.shopify?.idToken();
             const headers = {
@@ -63,7 +69,8 @@ export default function Customers({
         } catch (error) {
             console.error("Failed to load customers:", error);
         } finally {
-            setLoading(false);
+            setInitialLoading(false);
+            setRefreshing(false);
         }
     };
 
@@ -102,7 +109,7 @@ export default function Customers({
                     type: "success",
                     message: data.message || "Customer synchronized to Zoho successfully.",
                 });
-                await loadData();
+                await loadData(true);
             } else {
                 setNotification({
                     type: "error",
@@ -182,7 +189,7 @@ export default function Customers({
                     summary: data.summary || {},
                     results: data.results || [],
                 });
-                await loadData();
+                await loadData(true);
             } else {
                 setNotification({
                     type: "error",
@@ -322,9 +329,10 @@ export default function Customers({
                 title="Customers"
                 subtitle="Manage Shopify customers and synchronize customer profiles to Zoho Books."
                 primaryAction={{
-                    content: loading ? "Refreshing..." : "Refresh",
-                    onAction: loadData,
-                    disabled: loading,
+                    content: "Refresh",
+                    onAction: () => loadData(true),
+                    loading: refreshing,
+                    disabled: refreshing || bulkSyncing,
                 }}
             >
                 <BlockStack gap="400">
@@ -352,19 +360,30 @@ export default function Customers({
                                     onClearButtonClick={() => setSearch("")}
                                 />
                             </Box>
-                            <IndexTable
-                                resourceName={{ singular: "customer", plural: "customers" }}
-                                itemCount={filteredCustomers.length}
-                                selectedItemsCount={
-                                    allResourcesSelected ? "All" : selectedResources.length
-                                }
-                                onSelectionChange={handleSelectionChange}
-                                headings={headings}
-                                promotedBulkActions={promotedBulkActions}
-                                loading={loading}
-                            >
-                                {rowMarkup}
-                            </IndexTable>
+                            {initialLoading ? (
+                                <Box padding="800">
+                                    <BlockStack align="center" inlineAlign="center" gap="300">
+                                        <Spinner accessibilityLabel="Loading customers" size="large" />
+                                        <Text tone="subdued" variant="bodyMd" as="p">
+                                            Loading customer profiles...
+                                        </Text>
+                                    </BlockStack>
+                                </Box>
+                            ) : (
+                                <IndexTable
+                                    resourceName={{ singular: "customer", plural: "customers" }}
+                                    itemCount={filteredCustomers.length}
+                                    selectedItemsCount={
+                                        allResourcesSelected ? "All" : selectedResources.length
+                                    }
+                                    onSelectionChange={handleSelectionChange}
+                                    headings={headings}
+                                    promotedBulkActions={promotedBulkActions}
+                                    loading={false}
+                                >
+                                    {rowMarkup}
+                                </IndexTable>
+                            )}
                         </Tabs>
                     </Card>
                 </BlockStack>

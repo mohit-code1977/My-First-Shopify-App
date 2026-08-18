@@ -440,6 +440,120 @@ class ZohoService
     }
 
     /**
+     * Format shipping address payload for Zoho API to respect 100-character constraints,
+     * deduplicate fields, and preserve critical address components.
+     *
+     * @param array $shipAddress Raw Shopify shipping address array
+     * @param Customer|null $contact Customer model associated with order
+     * @return array Formatted Zoho shipping address array
+     */
+    public function formatZohoShippingAddress(array $shipAddress, ?Customer $contact = null): array
+    {
+        $firstName = trim($shipAddress['first_name'] ?? '');
+        $lastName = trim($shipAddress['last_name'] ?? '');
+        $name = trim($shipAddress['name'] ?? '');
+        $company = trim($shipAddress['company'] ?? '');
+
+        $attention = trim($firstName . ' ' . $lastName);
+        if (empty($attention)) {
+            $attention = $name ?: $company;
+        }
+
+        // Deduplicate: If attention matches contact's name, email, or billing name, drop attention
+        if ($contact) {
+            $contactFirst = trim($contact->first_name ?? '');
+            $contactLast = trim($contact->last_name ?? '');
+            $contactFullName = trim($contactFirst . ' ' . $contactLast);
+            $billingName = trim($contact->billing_address['name'] ?? '');
+
+            if (
+                (!empty($contactFirst) && str_contains(strtolower($attention), strtolower($contactFirst))) ||
+                (!empty($contactFullName) && strcasecmp($attention, $contactFullName) === 0) ||
+                (!empty($billingName) && strcasecmp($attention, $billingName) === 0)
+            ) {
+                $attention = '';
+            }
+        }
+
+        $address1 = trim($shipAddress['address1'] ?? $shipAddress['address'] ?? '');
+        $address2 = trim($shipAddress['address2'] ?? $shipAddress['street2'] ?? '');
+        $city = trim($shipAddress['city'] ?? '');
+        $provinceCode = trim($shipAddress['province_code'] ?? '');
+        $province = trim($shipAddress['province'] ?? $shipAddress['state'] ?? '');
+        $zip = trim($shipAddress['zip'] ?? $shipAddress['postal_code'] ?? '');
+        $countryCode = trim($shipAddress['country_code'] ?? '');
+        $country = trim($shipAddress['country'] ?? '');
+        $phone = trim($shipAddress['phone'] ?? '');
+
+        $state = $province ?: $provinceCode;
+        $countryName = $country ?: $countryCode;
+
+        // Calculate total concatenated string length that Zoho internally constructs
+        $calcLen = function ($att, $a1, $a2, $c, $st, $z, $co) {
+            return strlen(implode(' ', array_filter([$att, $a1, $a2, $c, $st, $z, $co])));
+        };
+
+        // Step 1: If length > 75 and state is long, switch to province_code if available
+        if ($calcLen($attention, $address1, $address2, $city, $state, $zip, $countryName) > 75 && !empty($provinceCode)) {
+            $state = $provinceCode;
+        }
+
+        // Step 2: If length > 75 and country is long, switch to country_code if available
+        if ($calcLen($attention, $address1, $address2, $city, $state, $zip, $countryName) > 75 && !empty($countryCode)) {
+            $countryName = $countryCode;
+        }
+
+        // Step 3: If length > 75, drop attention if still present
+        if ($calcLen($attention, $address1, $address2, $city, $state, $zip, $countryName) > 75) {
+            $attention = '';
+        }
+
+        // Step 4: If length > 75, compress address2 into address1 or shorten address2
+        if ($calcLen($attention, $address1, $address2, $city, $state, $zip, $countryName) > 75 && !empty($address2)) {
+            $maxAddr2 = max(0, 75 - $calcLen($attention, $address1, '', $city, $state, $zip, $countryName));
+            if ($maxAddr2 < 5) {
+                $address2 = '';
+            } else {
+                $address2 = mb_substr($address2, 0, $maxAddr2);
+            }
+        }
+
+        // Step 5: If length > 75, shorten address1 safely preserving front part
+        if ($calcLen($attention, $address1, $address2, $city, $state, $zip, $countryName) > 75) {
+            $maxAddr1 = max(10, 75 - $calcLen($attention, '', $address2, $city, $state, $zip, $countryName));
+            $address1 = mb_substr($address1, 0, $maxAddr1);
+        }
+
+        $res = [];
+        if (!empty($attention)) {
+            $res['attention'] = $attention;
+        }
+        if (!empty($address1)) {
+            $res['address'] = $address1;
+        }
+        if (!empty($address2)) {
+            $res['street2'] = $address2;
+        }
+        if (!empty($city)) {
+            $res['city'] = $city;
+        }
+        if (!empty($state)) {
+            $res['state'] = $state;
+        }
+        if (!empty($zip)) {
+            $res['zip'] = $zip;
+        }
+        if (!empty($countryName)) {
+            $res['country'] = $countryName;
+        }
+        if (!empty($phone)) {
+            $res['phone'] = $phone;
+        }
+
+        return $res;
+    }
+
+    /**
      * Resolve Zoho Tax ID for a line item or order based on shop tax_settings and tax lines.
      */
     private function resolveZohoTaxId(array $taxLines = [], ?Order $order = null): ?string
@@ -462,7 +576,7 @@ class ZohoService
 
         $targetTaxLines = !empty($taxLines) ? $taxLines : ($order ? ($order->tax_lines ?? []) : []);
 
-        // Fetch taxes from Zoho to validate actual Zoho tax rates
+        // Fetch active taxes from Zoho to validate existence and rates
         $zohoTaxes = [];
         try {
             $zohoTaxes = $this->getTaxes();
@@ -477,7 +591,9 @@ class ZohoService
             }
         }
 
-        // 1. Try matching item/order tax lines against tax_mappings with strict rate validation
+        $orderRef = $order ? ($order->order_number ?? "#{$order->id}") : "Order";
+
+        // 1. Try matching item/order tax lines against tax_mappings with strict rate and existence validation
         if (!empty($targetTaxLines)) {
             foreach ($targetTaxLines as $tl) {
                 $title = strtolower(trim($tl['title'] ?? ''));
@@ -493,13 +609,17 @@ class ZohoService
                         $isRateMatch = ($mappedRate > 0 && abs($ratePct - $mappedRate) < 0.01);
 
                         if ($isTitleMatch || $isRateMatch) {
+                            // First verify that mapped Zoho tax actually exists and is active in Zoho Books
+                            if (!isset($zohoTaxMap[$mappedZohoTaxId])) {
+                                Log::warning("resolveZohoTaxId: Mapped Zoho tax ID '{$mappedZohoTaxId}' for rate {$ratePct}% no longer exists or is deleted in Zoho Books.");
+                                continue;
+                            }
+
                             // Validate Zoho tax rate parity
-                            if (isset($zohoTaxMap[$mappedZohoTaxId])) {
-                                $actualZohoRate = (float) ($zohoTaxMap[$mappedZohoTaxId]['tax_percentage'] ?? 0.0);
-                                if (abs($ratePct - $actualZohoRate) > 0.01) {
-                                    Log::warning("resolveZohoTaxId: Tax mapping rate mismatch. Shopify tax rate is {$ratePct}%, but mapped Zoho tax '{$zohoTaxMap[$mappedZohoTaxId]['tax_name']}' actual rate is {$actualZohoRate}%. Rejecting tax ID {$mappedZohoTaxId}.");
-                                    throw new \Exception("Tax mapping rate mismatch: Shopify tax rate ({$ratePct}%) does not match Zoho tax '{$zohoTaxMap[$mappedZohoTaxId]['tax_name']}' actual rate ({$actualZohoRate}%). Please update the tax mapping in Settings.");
-                                }
+                            $actualZohoRate = (float) ($zohoTaxMap[$mappedZohoTaxId]['tax_percentage'] ?? 0.0);
+                            if (abs($ratePct - $actualZohoRate) > 0.01) {
+                                Log::warning("resolveZohoTaxId: Tax mapping rate mismatch. Shopify tax rate is {$ratePct}%, but mapped Zoho tax '{$zohoTaxMap[$mappedZohoTaxId]['tax_name']}' actual rate is {$actualZohoRate}%. Rejecting tax ID {$mappedZohoTaxId}.");
+                                throw new \Exception("Tax mapping rate mismatch: Shopify tax rate ({$ratePct}%) does not match Zoho tax '{$zohoTaxMap[$mappedZohoTaxId]['tax_name']}' actual rate ({$actualZohoRate}%). Please update the tax mapping in Settings.");
                             }
                             return $mappedZohoTaxId;
                         }
@@ -508,7 +628,7 @@ class ZohoService
             }
         }
 
-        // 2. Fallback to default_tax_id if specified AND order has taxes
+        // 2. Fallback to default_tax_id if specified AND order has taxes AND tax exists in Zoho
         if (!empty($defaultTaxId) && ($hasTaxLines || $orderTaxTotal > 0)) {
             $defaultTaxIdStr = (string) $defaultTaxId;
             if (isset($zohoTaxMap[$defaultTaxIdStr])) {
@@ -520,11 +640,26 @@ class ZohoService
                         throw new \Exception("Default tax rate mismatch: Shopify tax rate ({$firstLineRate}%) does not match default Zoho tax '{$zohoTaxMap[$defaultTaxIdStr]['tax_name']}' actual rate ({$actualZohoRate}%).");
                     }
                 }
+                return $defaultTaxIdStr;
+            } else {
+                Log::warning("resolveZohoTaxId: Configured default Zoho tax ID '{$defaultTaxIdStr}' no longer exists or is deleted in Zoho Books.");
             }
-            return $defaultTaxIdStr;
         }
 
-        return null;
+        // 3. Order requires tax but no valid active Zoho tax ID could be resolved
+        $taxDetails = [];
+        foreach ($targetTaxLines as $tl) {
+            $name = $tl['title'] ?? 'Tax';
+            $rate = round(((float) ($tl['rate'] ?? 0.0)) * 100, 2);
+            $taxDetails[] = "{$name} ({$rate}%)";
+        }
+        $taxSummary = !empty($taxDetails) ? implode(', ', $taxDetails) : 'tax';
+
+        if (!empty($defaultTaxId) && !isset($zohoTaxMap[(string) $defaultTaxId])) {
+            throw new \Exception("Tax calculation failed for {$orderRef}: The order requires tax ({$taxSummary}), but configured default Zoho tax ID ({$defaultTaxId}) no longer exists or is deleted in Zoho Books. Please update tax settings in the application.");
+        }
+
+        throw new \Exception("Tax calculation failed for {$orderRef}: The order requires tax ({$taxSummary}), but no valid active Zoho tax mapping or default tax is configured in Settings.");
     }
 
     private function getShopifyVariantFieldId(): string
@@ -1880,7 +2015,9 @@ class ZohoService
             $salesOrders = $response['salesorders'] ?? [];
             foreach ($salesOrders as $so) {
                 if (!empty($so['reference_number']) && strcasecmp(trim($so['reference_number']), $trimmedRef) === 0) {
-                    return $so;
+                    if (($so['status'] ?? '') !== 'void') {
+                        return $so;
+                    }
                 }
             }
         } catch (\Throwable $e) {
@@ -2116,7 +2253,17 @@ class ZohoService
             'line_items' => $zohoLineItems,
             'is_inclusive_tax' => $isInclusive,
             'is_discount_before_tax' => $isDiscountBeforeTax,
+            'shipping_charge' => (float) ($order->shipping_total ?? 0.00),
         ];
+
+        if (!empty($order->shipping_method)) {
+            $payload['delivery_method'] = $order->shipping_method;
+        }
+
+        $shipAddress = $order->shipping_address ?? ($customer->shipping_address ?? null);
+        if (!empty($shipAddress) && is_array($shipAddress)) {
+            $payload['shipping_address'] = $this->formatZohoShippingAddress($shipAddress, $customer);
+        }
 
         if (!empty($order->currency)) {
             $payload['currency_code'] = strtoupper($order->currency);
@@ -2124,10 +2271,6 @@ class ZohoService
 
         if ((float) $order->discount_total > 0) {
             $payload['discount'] = (float) $order->discount_total;
-        }
-
-        if ((float) $order->shipping_total > 0) {
-            $payload['shipping_charge'] = (float) $order->shipping_total;
         }
 
         if ((float) $order->tax_total > 0) {
@@ -2140,6 +2283,13 @@ class ZohoService
         }
         if (!empty($order->coupon_code)) {
             $notesArray[] = "Coupon Code: " . $order->coupon_code;
+        }
+        if (!empty($order->tracking_number)) {
+            $carrierStr = !empty($order->tracking_company) ? " (Carrier: {$order->tracking_company})" : "";
+            $notesArray[] = "Tracking: #" . $order->tracking_number . $carrierStr;
+            if (!empty($order->tracking_url)) {
+                $notesArray[] = "Tracking URL: " . $order->tracking_url;
+            }
         }
         if (!empty($notesArray)) {
             $payload['notes'] = implode("\n", $notesArray);
@@ -2490,6 +2640,21 @@ class ZohoService
         $isInclusive = $order->taxes_included || (($taxSettings['tax_mode'] ?? '') === 'inclusive');
         $isDiscountBeforeTax = (($taxSettings['discount_tax_mode'] ?? 'before_tax') !== 'after_tax');
 
+        $invNotesArray = [];
+        if (!empty($order->notes)) {
+            $invNotesArray[] = "Order Note: " . $order->notes;
+        }
+        if (!empty($order->coupon_code)) {
+            $invNotesArray[] = "Coupon Code: " . $order->coupon_code;
+        }
+        if (!empty($order->tracking_number)) {
+            $carrierStr = !empty($order->tracking_company) ? " (Carrier: {$order->tracking_company})" : "";
+            $invNotesArray[] = "Tracking: #" . $order->tracking_number . $carrierStr;
+            if (!empty($order->tracking_url)) {
+                $invNotesArray[] = "Tracking URL: " . $order->tracking_url;
+            }
+        }
+
         $invoicePayload = [
             'customer_id' => $customer->zoho_contact_id,
             'reference_number' => $order->order_number,
@@ -2500,8 +2665,20 @@ class ZohoService
             'discount' => (float) ($order->discount_total ?? 0.00),
             'is_inclusive_tax' => $isInclusive,
             'is_discount_before_tax' => $isDiscountBeforeTax,
-            'notes' => trim(($order->notes ?? '') . ($order->coupon_code ? " (Coupon: {$order->coupon_code})" : '')),
         ];
+
+        if (!empty($invNotesArray)) {
+            $invoicePayload['notes'] = implode("\n", $invNotesArray);
+        }
+
+        if (!empty($order->shipping_method)) {
+            $invoicePayload['delivery_method'] = $order->shipping_method;
+        }
+
+        $shipAddress = $order->shipping_address ?? ($customer->shipping_address ?? null);
+        if (!empty($shipAddress) && is_array($shipAddress)) {
+            $invoicePayload['shipping_address'] = $this->formatZohoShippingAddress($shipAddress, $customer);
+        }
 
         if ((float) $order->tax_total > 0) {
             $invoicePayload['tax_total'] = (float) $order->tax_total;
@@ -2699,6 +2876,8 @@ class ZohoService
             'wire' => ['payment_mode' => 'banktransfer', 'account_id' => null],
             'ach' => ['payment_mode' => 'banktransfer', 'account_id' => null],
             'check' => ['payment_mode' => 'check', 'account_id' => null],
+            'bogus' => ['payment_mode' => 'creditcard', 'account_id' => null],
+            'bogus_gateway' => ['payment_mode' => 'creditcard', 'account_id' => null],
             'credit_card' => ['payment_mode' => 'creditcard', 'account_id' => null],
         ];
 

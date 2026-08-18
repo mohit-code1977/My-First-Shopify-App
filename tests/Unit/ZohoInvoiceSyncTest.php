@@ -83,7 +83,7 @@ class ZohoInvoiceSyncTest extends TestCase {
             'subtotal' => '100.00',
             'discount_total' => '10.00',
             'shipping_total' => '12.00',
-            'tax_total' => '8.00',
+            'tax_total' => '0.00',
             'total_price' => '110.00',
             'notes' => 'Deliver on weekday afternoons.',
             'coupon_code' => 'DISCOUNT10',

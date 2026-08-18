@@ -986,4 +986,43 @@ class ShopifyOrderTransactionWebhookTest extends TestCase
         $responseDuplicate->assertStatus(200);
         $this->assertEquals(1, Payment::where('shopify_transaction_id', 'gid://shopify/OrderTransaction/99887766')->count());
     }
+
+    // 28. Multi-currency shop_money normalization test
+    public function test_28_transaction_webhook_uses_shop_money_when_presentment_currency_differs()
+    {
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/customerpayments*' => function (HttpClientRequest $request) {
+                if ($request->method() === 'GET') return Http::response(['code' => 0, 'customerpayments' => []], 200);
+                return Http::response(['code' => 0, 'payment' => ['payment_id' => 'zoho_p_multi_cur_28']], 201);
+            },
+        ]);
+
+        $payload = [
+            'id' => 9443431481512,
+            'admin_graphql_api_id' => 'gid://shopify/OrderTransaction/9443431481512',
+            'order_id' => 7200,
+            'kind' => 'sale',
+            'status' => 'success',
+            'amount' => '1845.92',
+            'currency' => 'INR',
+            'shop_money' => [
+                'amount' => '200.00',
+                'currency_code' => 'USD',
+            ],
+            'presentment_money' => [
+                'amount' => '1845.92',
+                'currency_code' => 'INR',
+            ],
+            'gateway' => 'bogus',
+        ];
+
+        $response = $this->sendWebhook($payload);
+        $response->assertStatus(200);
+
+        $payment = Payment::where('shopify_transaction_id', 'gid://shopify/OrderTransaction/9443431481512')->first();
+        $this->assertNotNull($payment);
+        $this->assertEquals(200.00, (float) $payment->amount);
+        $this->assertEquals('USD', $payment->currency);
+        $this->assertEquals(Payment::SYNC_STATUS_SYNCED, $payment->sync_status);
+    }
 }

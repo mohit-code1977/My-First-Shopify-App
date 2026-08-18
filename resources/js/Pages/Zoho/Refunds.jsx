@@ -15,6 +15,7 @@ import {
     Box,
     BlockStack,
     InlineStack,
+    Spinner,
     useIndexResourceState,
 } from "@shopify/polaris";
 import ZohoLayout from "@/Layouts/ZohoLayout";
@@ -29,7 +30,8 @@ export default function Refunds({
     zohoConnected = false,
     host = "",
 }) {
-    const [loading, setLoading] = useState(true);
+    const [initialLoading, setInitialLoading] = useState(true);
+    const [refreshing, setRefreshing] = useState(false);
     const [shopData, setShopData] = useState(shop || {});
     const [connectedState, setConnectedState] = useState(zohoConnected);
     const [refundList, setRefundList] = useState(refunds || []);
@@ -47,8 +49,12 @@ export default function Refunds({
     const getCsrfToken = () =>
         document.querySelector('meta[name="csrf-token"]')?.getAttribute("content") || "";
 
-    const loadData = async () => {
-        setLoading(true);
+    const loadData = async (isRefresh = false) => {
+        if (isRefresh) {
+            setRefreshing(true);
+        } else {
+            setInitialLoading(true);
+        }
         try {
             const token = await window.shopify?.idToken();
             const headers = {
@@ -69,7 +75,8 @@ export default function Refunds({
         } catch (error) {
             console.error("Failed to load refunds:", error);
         } finally {
-            setLoading(false);
+            setInitialLoading(false);
+            setRefreshing(false);
         }
     };
 
@@ -119,7 +126,7 @@ export default function Refunds({
                     type: "success",
                     message: data.message || "Credit Note synchronized to Zoho successfully.",
                 });
-                await loadData();
+                await loadData(true);
             } else {
                 setNotification({
                     type: "error",
@@ -219,7 +226,7 @@ export default function Refunds({
                     summary: data.summary || {},
                     results: data.results || [],
                 });
-                await loadData();
+                await loadData(true);
             } else {
                 setNotification({
                     type: "error",
@@ -409,9 +416,10 @@ export default function Refunds({
                 title="Refunds & Credit Notes"
                 subtitle="View Shopify refunds and sync Credit Notes to Zoho Books."
                 primaryAction={{
-                    content: loading ? "Refreshing..." : "Refresh",
-                    onAction: loadData,
-                    disabled: loading,
+                    content: "Refresh",
+                    onAction: () => loadData(true),
+                    loading: refreshing,
+                    disabled: refreshing || bulkSyncing,
                 }}
             >
                 <BlockStack gap="400">
@@ -439,19 +447,30 @@ export default function Refunds({
                                     onClearButtonClick={() => setSearch("")}
                                 />
                             </Box>
-                            <IndexTable
-                                resourceName={{ singular: "refund", plural: "refunds" }}
-                                itemCount={filteredRefunds.length}
-                                selectedItemsCount={
-                                    allResourcesSelected ? "All" : selectedResources.length
-                                }
-                                onSelectionChange={handleSelectionChange}
-                                headings={headings}
-                                promotedBulkActions={promotedBulkActions}
-                                loading={loading}
-                            >
-                                {rowMarkup}
-                            </IndexTable>
+                            {initialLoading ? (
+                                <Box padding="800">
+                                    <BlockStack align="center" inlineAlign="center" gap="300">
+                                        <Spinner accessibilityLabel="Loading refunds" size="large" />
+                                        <Text tone="subdued" variant="bodyMd" as="p">
+                                            Loading refunds and credit notes...
+                                        </Text>
+                                    </BlockStack>
+                                </Box>
+                            ) : (
+                                <IndexTable
+                                    resourceName={{ singular: "refund", plural: "refunds" }}
+                                    itemCount={filteredRefunds.length}
+                                    selectedItemsCount={
+                                        allResourcesSelected ? "All" : selectedResources.length
+                                    }
+                                    onSelectionChange={handleSelectionChange}
+                                    headings={headings}
+                                    promotedBulkActions={promotedBulkActions}
+                                    loading={false}
+                                >
+                                    {rowMarkup}
+                                </IndexTable>
+                            )}
                         </Tabs>
                     </Card>
                 </BlockStack>

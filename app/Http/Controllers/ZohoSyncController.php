@@ -1743,6 +1743,16 @@ GRAPHQL;
             }
         }
 
+        if (!empty($validated['default_tax_id'])) {
+            $defaultTaxIdStr = (string) $validated['default_tax_id'];
+            if (!empty($zohoTaxes) && !isset($zohoTaxMap[$defaultTaxIdStr])) {
+                return response()->json([
+                    'success' => false,
+                    'message' => "The selected default tax (ID '{$defaultTaxIdStr}') no longer exists or is deleted in Zoho Books. Please select a valid active tax.",
+                ], 422);
+            }
+        }
+
         if (!empty($validated['tax_mappings'])) {
             if (count($validated['tax_mappings']) > 50) {
                 return response()->json([
@@ -1769,14 +1779,23 @@ GRAPHQL;
                     $seen[$key] = true;
                 }
 
-                if ($zohoTaxId && $rate !== null && isset($zohoTaxMap[$zohoTaxId])) {
-                    $actualZohoRate = (float) ($zohoTaxMap[$zohoTaxId]['tax_percentage'] ?? 0.0);
-                    if (abs($rate - $actualZohoRate) > 0.01) {
-                        $zohoTaxName = $zohoTaxMap[$zohoTaxId]['tax_name'] ?? 'Zoho Tax';
+                if ($zohoTaxId) {
+                    if (!empty($zohoTaxes) && !isset($zohoTaxMap[$zohoTaxId])) {
                         return response()->json([
                             'success' => false,
-                            'message' => "Tax mapping rate mismatch: Mapped Zoho tax '{$zohoTaxName}' has an actual API rate of {$actualZohoRate}%, which does not match the Shopify tax rate of {$rate}%.",
+                            'message' => "Mapped Zoho tax (ID '{$zohoTaxId}') no longer exists or is deleted in Zoho Books. Please select a valid active tax.",
                         ], 422);
+                    }
+
+                    if ($rate !== null && isset($zohoTaxMap[$zohoTaxId])) {
+                        $actualZohoRate = (float) ($zohoTaxMap[$zohoTaxId]['tax_percentage'] ?? 0.0);
+                        if (abs($rate - $actualZohoRate) > 0.01) {
+                            $zohoTaxName = $zohoTaxMap[$zohoTaxId]['tax_name'] ?? 'Zoho Tax';
+                            return response()->json([
+                                'success' => false,
+                                'message' => "Tax mapping rate mismatch: Mapped Zoho tax '{$zohoTaxName}' has an actual API rate of {$actualZohoRate}%, which does not match the Shopify tax rate of {$rate}%.",
+                            ], 422);
+                        }
                     }
                 }
             }

@@ -15,6 +15,7 @@ import {
     Box,
     BlockStack,
     InlineStack,
+    Spinner,
     useIndexResourceState,
 } from "@shopify/polaris";
 import ZohoLayout from "@/Layouts/ZohoLayout";
@@ -31,7 +32,8 @@ export default function Orders({
     zohoConnected = false,
     host = "",
 }) {
-    const [loading, setLoading] = useState(true);
+    const [initialLoading, setInitialLoading] = useState(true);
+    const [refreshing, setRefreshing] = useState(false);
     const [shopData, setShopData] = useState(shop || {});
     const [connectedState, setConnectedState] = useState(zohoConnected);
     const [orderList, setOrderList] = useState(orders || []);
@@ -48,8 +50,12 @@ export default function Orders({
     const [bulkSyncing, setBulkSyncing] = useState(false);
     const [bulkResultsModal, setBulkResultsModal] = useState(null);
 
-    const loadData = async () => {
-        setLoading(true);
+    const loadData = async (isRefresh = false) => {
+        if (isRefresh) {
+            setRefreshing(true);
+        } else {
+            setInitialLoading(true);
+        }
         try {
             const token = await window.shopify?.idToken();
             const headers = {
@@ -68,7 +74,8 @@ export default function Orders({
         } catch (error) {
             console.error("Failed to load orders:", error);
         } finally {
-            setLoading(false);
+            setInitialLoading(false);
+            setRefreshing(false);
         }
     };
 
@@ -118,7 +125,7 @@ export default function Orders({
                     type: "success",
                     message: data.message || "Sales Order synchronized successfully.",
                 });
-                await loadData();
+                await loadData(true);
             } else {
                 setNotification({
                     type: "error",
@@ -168,7 +175,7 @@ export default function Orders({
                     type: "success",
                     message: data.message || "Invoice created/synchronized successfully.",
                 });
-                await loadData();
+                await loadData(true);
             } else {
                 setNotification({
                     type: "error",
@@ -220,7 +227,7 @@ export default function Orders({
                     type: "success",
                     message: data.message || "Payment synchronized to Zoho successfully.",
                 });
-                await loadData();
+                await loadData(true);
             } else {
                 setNotification({
                     type: "error",
@@ -368,7 +375,7 @@ export default function Orders({
                     results: data.results || [],
                     syncType: type,
                 });
-                await loadData();
+                await loadData(true);
             } else {
                 setNotification({
                     type: "error",
@@ -479,10 +486,10 @@ export default function Orders({
                     </Text>
                 </IndexTable.Cell>
                 <IndexTable.Cell>
-                    {o.zoho_salesorder_id ? (
+                    {o.zoho_sales_order_number || o.zoho_sales_order_id ? (
                         <Text variant="bodySm" tone="subdued" as="span">
                             <code style={{ fontSize: "11px", backgroundColor: "#f1f2f4", padding: "2px 6px", borderRadius: "4px", color: "#616a75" }}>
-                                SO-{o.zoho_salesorder_id}
+                                {o.zoho_sales_order_number || (o.zoho_sales_order_id?.startsWith("SO-") ? o.zoho_sales_order_id : `SO-${o.zoho_sales_order_id}`)}
                             </code>
                         </Text>
                     ) : (
@@ -577,9 +584,10 @@ export default function Orders({
                 title="Orders & Invoices"
                 subtitle="Manage Shopify orders, invoices, and payment synchronization to Zoho Books."
                 primaryAction={{
-                    content: loading ? "Refreshing..." : "Refresh",
-                    onAction: loadData,
-                    disabled: loading,
+                    content: "Refresh",
+                    onAction: () => loadData(true),
+                    loading: refreshing,
+                    disabled: refreshing || bulkSyncing,
                 }}
             >
                 <BlockStack gap="400">
@@ -607,19 +615,30 @@ export default function Orders({
                                     onClearButtonClick={() => setSearch("")}
                                 />
                             </Box>
-                            <IndexTable
-                                resourceName={{ singular: "order", plural: "orders" }}
-                                itemCount={filteredOrders.length}
-                                selectedItemsCount={
-                                    allResourcesSelected ? "All" : selectedResources.length
-                                }
-                                onSelectionChange={handleSelectionChange}
-                                headings={headings}
-                                promotedBulkActions={promotedBulkActions}
-                                loading={loading}
-                            >
-                                {rowMarkup}
-                            </IndexTable>
+                            {initialLoading ? (
+                                <Box padding="800">
+                                    <BlockStack align="center" inlineAlign="center" gap="300">
+                                        <Spinner accessibilityLabel="Loading orders" size="large" />
+                                        <Text tone="subdued" variant="bodyMd" as="p">
+                                            Loading orders and invoices...
+                                        </Text>
+                                    </BlockStack>
+                                </Box>
+                            ) : (
+                                <IndexTable
+                                    resourceName={{ singular: "order", plural: "orders" }}
+                                    itemCount={filteredOrders.length}
+                                    selectedItemsCount={
+                                        allResourcesSelected ? "All" : selectedResources.length
+                                    }
+                                    onSelectionChange={handleSelectionChange}
+                                    headings={headings}
+                                    promotedBulkActions={promotedBulkActions}
+                                    loading={false}
+                                >
+                                    {rowMarkup}
+                                </IndexTable>
+                            )}
                         </Tabs>
                     </Card>
                 </BlockStack>
@@ -708,19 +727,91 @@ export default function Orders({
                                 </Text>
 
                                 <InlineStack gap="400">
-                                    <Box padding="300" background="bg-surface-secondary" borderRadius="200">
+                                    <Box padding="300" background="bg-surface-secondary" borderRadius="200" style={{ flex: 1 }}>
                                         <Text tone="subdued" variant="bodySm" as="p">Order Total</Text>
                                         <Text variant="headingSm" as="p">
                                             ${parseFloat(selectedOrderForPayment.total_price || 0).toFixed(2)} {selectedOrderForPayment.currency || "USD"}
                                         </Text>
                                     </Box>
-                                    <Box padding="300" background="bg-surface-secondary" borderRadius="200">
+                                    <Box padding="300" background="bg-surface-secondary" borderRadius="200" style={{ flex: 1 }}>
                                         <Text tone="subdued" variant="bodySm" as="p">Financial Status</Text>
                                         <Text variant="headingSm" as="p" style={{ textTransform: "capitalize" }}>
                                             {selectedOrderForPayment.financial_status || "pending"}
                                         </Text>
                                     </Box>
+                                    <Box padding="300" background="bg-surface-secondary" borderRadius="200" style={{ flex: 1 }}>
+                                        <Text tone="subdued" variant="bodySm" as="p">Shipping Charge</Text>
+                                        <Text variant="headingSm" as="p">
+                                            {parseFloat(selectedOrderForPayment.shipping_total || 0) > 0 
+                                                ? `$${parseFloat(selectedOrderForPayment.shipping_total).toFixed(2)} ${selectedOrderForPayment.currency || "USD"}` 
+                                                : "Free Shipping"}
+                                        </Text>
+                                    </Box>
                                 </InlineStack>
+
+                                {/* SHIPPING & TRACKING SECTION */}
+                                <Card>
+                                    <BlockStack gap="300">
+                                        <Text variant="headingSm" as="h3">
+                                            🚚 Shipping &amp; Tracking Details
+                                        </Text>
+                                        <InlineStack gap="400" wrap={false}>
+                                            <Box style={{ flex: 1 }}>
+                                                <Text tone="subdued" variant="bodySm" as="p">Shipping Method</Text>
+                                                <Text variant="bodyMd" fontWeight="semibold" as="p">
+                                                    {selectedOrderForPayment.shipping_method || "Standard Delivery"}
+                                                </Text>
+                                            </Box>
+                                            <Box style={{ flex: 1 }}>
+                                                <Text tone="subdued" variant="bodySm" as="p">Carrier / Courier</Text>
+                                                <Text variant="bodyMd" fontWeight="semibold" as="p">
+                                                    {selectedOrderForPayment.tracking_company || "Not Specified"}
+                                                </Text>
+                                            </Box>
+                                            <Box style={{ flex: 1 }}>
+                                                <Text tone="subdued" variant="bodySm" as="p">Tracking Number</Text>
+                                                {selectedOrderForPayment.tracking_number ? (
+                                                    selectedOrderForPayment.tracking_url ? (
+                                                        <a href={selectedOrderForPayment.tracking_url} target="_blank" rel="noopener noreferrer" style={{ color: "#005bd3", fontWeight: 600, fontSize: "13px" }}>
+                                                            #{selectedOrderForPayment.tracking_number} 🔗
+                                                        </a>
+                                                    ) : (
+                                                        <Text variant="bodyMd" fontWeight="semibold" as="p">
+                                                            #{selectedOrderForPayment.tracking_number}
+                                                        </Text>
+                                                    )
+                                                ) : (
+                                                    <Text tone="subdued" variant="bodyMd" as="p">No tracking yet</Text>
+                                                )}
+                                            </Box>
+                                        </InlineStack>
+
+                                        {selectedOrderForPayment.shipping_address && typeof selectedOrderForPayment.shipping_address === "object" && (
+                                            <Box padding="300" background="bg-surface-secondary" borderRadius="200" marginTop="200">
+                                                <Text tone="subdued" variant="bodySm" as="p" fontWeight="semibold">Shipping Destination:</Text>
+                                                <Text variant="bodySm" as="p">
+                                                    {selectedOrderForPayment.shipping_address.first_name || selectedOrderForPayment.shipping_address.name} {selectedOrderForPayment.shipping_address.last_name || ""}
+                                                    {selectedOrderForPayment.shipping_address.company ? ` (${selectedOrderForPayment.shipping_address.company})` : ""}
+                                                </Text>
+                                                <Text variant="bodySm" tone="subdued" as="p">
+                                                    {[
+                                                        selectedOrderForPayment.shipping_address.address1,
+                                                        selectedOrderForPayment.shipping_address.address2,
+                                                        selectedOrderForPayment.shipping_address.city,
+                                                        selectedOrderForPayment.shipping_address.province || selectedOrderForPayment.shipping_address.state,
+                                                        selectedOrderForPayment.shipping_address.zip,
+                                                        selectedOrderForPayment.shipping_address.country
+                                                    ].filter(Boolean).join(", ")}
+                                                </Text>
+                                                {selectedOrderForPayment.shipping_address.phone && (
+                                                    <Text variant="bodySm" tone="subdued" as="p">
+                                                        📞 {selectedOrderForPayment.shipping_address.phone}
+                                                    </Text>
+                                                )}
+                                            </Box>
+                                        )}
+                                    </BlockStack>
+                                </Card>
 
                                 <Text variant="headingSm" as="h3">
                                     Payment Transactions ({selectedOrderForPayment.payments ? selectedOrderForPayment.payments.length : 0})

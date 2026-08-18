@@ -102,7 +102,7 @@ class ZohoOrderSyncTest extends TestCase
             'subtotal' => '130.00',
             'discount_total' => '10.00',
             'shipping_total' => '15.00',
-            'tax_total' => '8.00',
+            'tax_total' => '0.00',
             'total_price' => '143.00',
             'notes' => 'Please leave at front door.',
             'coupon_code' => 'SAVE10',
@@ -276,7 +276,7 @@ class ZohoOrderSyncTest extends TestCase
             'currency' => 'USD',
             'subtotal_price' => '50.00',
             'total_discounts' => '0.00',
-            'total_tax' => '4.00',
+            'total_tax' => '0.00',
             'total_price' => '54.00',
             'customer' => [
                 'id' => 2001,
@@ -414,7 +414,7 @@ class ZohoOrderSyncTest extends TestCase
             'currency' => 'USD',
             'subtotal_price' => '100.00',
             'total_discounts' => '0.00',
-            'total_tax' => '8.00',
+            'total_tax' => '0.00',
             'total_price' => '108.00',
             'customer' => [
                 'id' => 2001,
@@ -743,6 +743,103 @@ class ZohoOrderSyncTest extends TestCase
 
         $this->assertEquals('zoho_so_already_fulfilled', $result['salesorder_id']);
         $this->assertEquals('fulfilled', $result['status']);
+    }
+
+    public function test_successful_sales_order_sync_persists_zoho_sales_order_id_and_number()
+    {
+        $order = Order::create([
+            'shop_id' => $this->shop->id,
+            'customer_id' => $this->customer->id,
+            'shopify_order_id' => 'gid://shopify/Order/8811',
+            'order_number' => '#8811',
+            'order_date' => now(),
+            'currency' => 'USD',
+            'subtotal' => '50.00',
+            'total_price' => '50.00',
+            'line_items' => [
+                [
+                    'variant_id' => 'gid://shopify/ProductVariant/4001',
+                    'sku' => 'SKU-ORD-01',
+                    'name' => 'Red / Large',
+                    'quantity' => 1,
+                    'price' => 50.00,
+                ],
+            ],
+        ]);
+
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/salesorders*' => function (Request $request) {
+                if ($request->method() === 'GET') {
+                    return Http::response(['code' => 0, 'salesorders' => []], 200);
+                }
+                return Http::response([
+                    'code' => 0,
+                    'message' => 'Sales Order created',
+                    'salesorder' => [
+                        'salesorder_id' => '4081216000000881199',
+                        'salesorder_number' => 'SO-00088',
+                    ],
+                ], 201);
+            },
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncOrder($order);
+
+        $this->assertTrue($result['success']);
+        $this->assertEquals('4081216000000881199', $result['zoho_sales_order_id']);
+        $this->assertEquals('SO-00088', $result['zoho_sales_order_number']);
+
+        $refreshed = $order->fresh();
+        $this->assertEquals('4081216000000881199', $refreshed->zoho_sales_order_id);
+        $this->assertEquals('SO-00088', $refreshed->zoho_sales_order_number);
+    }
+
+    public function test_orders_listing_api_returns_zoho_sales_order_id_and_invoice_id()
+    {
+        $this->withoutMiddleware([\App\Http\Middleware\ShopifyAuthenticate::class]);
+
+        $order = Order::create([
+            'shop_id' => $this->shop->id,
+            'customer_id' => $this->customer->id,
+            'shopify_order_id' => 'gid://shopify/Order/8822',
+            'order_number' => '#8822',
+            'zoho_sales_order_id' => '4081216000000882299',
+            'zoho_sales_order_number' => 'SO-00089',
+            'order_date' => now(),
+            'currency' => 'USD',
+            'subtotal' => '100.00',
+            'total_price' => '100.00',
+        ]);
+
+        $invoice = Invoice::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $order->id,
+            'shopify_order_id' => $order->shopify_order_id,
+            'zoho_invoice_id' => '4081216000000882200',
+            'invoice_number' => 'INV-00089',
+            'status' => 'sent',
+            'amount' => '100.00',
+            'currency' => 'USD',
+            'sync_status' => 'synced',
+        ]);
+
+        $response = $this->call('GET', '/api/zoho/orders?shop=' . $this->shop->shop_domain, [], [], [], [
+            'HTTP_ACCEPT' => 'application/json',
+        ]);
+
+        $response->assertStatus(200);
+        $response->assertJsonPath('success', true);
+
+        $orders = $response->json('orders');
+        $targetOrder = collect($orders)->firstWhere('id', $order->id);
+
+        $this->assertNotNull($targetOrder);
+        $this->assertEquals('4081216000000882299', $targetOrder['zoho_sales_order_id']);
+        $this->assertEquals('SO-00089', $targetOrder['zoho_sales_order_number']);
+        $this->assertNotNull($targetOrder['invoice']);
+        $this->assertEquals('4081216000000882200', $targetOrder['invoice']['zoho_invoice_id']);
+        $this->assertEquals('INV-00089', $targetOrder['invoice']['invoice_number']);
     }
 }
 

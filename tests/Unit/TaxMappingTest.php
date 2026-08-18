@@ -78,6 +78,17 @@ class TaxMappingTest extends \Tests\TestCase
     public function test_sales_order_payload_includes_mapped_line_tax_and_tax_mode(): void
     {
         Http::fake([
+            'https://www.zohoapis.com/books/v3/settings/taxes*' => Http::response([
+                'code' => 0,
+                'taxes' => [
+                    [
+                        'tax_id' => 'zoho_tax_gst_5',
+                        'tax_name' => 'GST 5%',
+                        'tax_percentage' => 5,
+                        'status' => 'Active',
+                    ],
+                ],
+            ], 200),
             'https://www.zohoapis.com/books/v3/contacts*' => Http::response([
                 'code' => 0,
                 'contacts' => [['contact_id' => 'zoho_contact_tax_1']],
@@ -181,6 +192,17 @@ class TaxMappingTest extends \Tests\TestCase
     public function test_invoice_payload_includes_inclusive_tax_flag_when_taxes_included(): void
     {
         Http::fake([
+            'https://www.zohoapis.com/books/v3/settings/taxes*' => Http::response([
+                'code' => 0,
+                'taxes' => [
+                    [
+                        'tax_id' => 'zoho_tax_vat_20',
+                        'tax_name' => 'VAT 20%',
+                        'tax_percentage' => 20,
+                        'status' => 'Active',
+                    ],
+                ],
+            ], 200),
             'https://www.zohoapis.com/books/v3/contacts*' => Http::response([
                 'code' => 0,
                 'contacts' => [['contact_id' => 'zoho_contact_tax_2']],
@@ -620,6 +642,174 @@ class TaxMappingTest extends \Tests\TestCase
         $resolvedTaxId = $method->invoke($service, [], $order);
 
         $this->assertNull($resolvedTaxId);
+    }
+
+    public function test_deleted_zoho_tax_id_is_rejected_and_throws_exception_for_taxed_orders(): void
+    {
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/settings/taxes*' => Http::response([
+                'code' => 0,
+                'taxes' => [
+                    [
+                        'tax_id' => 'active_tax_555',
+                        'tax_name' => 'GST 18%',
+                        'tax_percentage' => 18,
+                        'status' => 'Active',
+                    ],
+                ],
+            ], 200),
+        ]);
+
+        $this->shop->update([
+            'tax_settings' => [
+                'tax_mode' => 'exclusive',
+                'default_tax_id' => 'deleted_tax_4081216000000161193',
+                'tax_mappings' => [],
+            ],
+        ]);
+
+        $order = Order::create([
+            'shop_id' => $this->shop->id,
+            'shopify_order_id' => 'gid://shopify/Order/8014',
+            'order_number' => '#8014',
+            'currency' => 'INR',
+            'subtotal' => 1000.00,
+            'tax_total' => 180.00,
+            'total_price' => 1180.00,
+            'tax_lines' => [['title' => 'IGST', 'rate' => 0.18, 'price' => 180.00]],
+            'line_items' => [],
+        ]);
+
+        $service = new ZohoService($this->shop);
+        $reflection = new \ReflectionClass($service);
+        $method = $reflection->getMethod('resolveZohoTaxId');
+        $method->setAccessible(true);
+
+        $this->expectException(\Exception::class);
+        $this->expectExceptionMessage('The order requires tax');
+        $method->invoke($service, $order->tax_lines, $order);
+    }
+
+    public function test_valid_zoho_tax_id_resolves_correctly(): void
+    {
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/settings/taxes*' => Http::response([
+                'code' => 0,
+                'taxes' => [
+                    [
+                        'tax_id' => 'valid_tax_18',
+                        'tax_name' => 'GST 18%',
+                        'tax_percentage' => 18,
+                        'status' => 'Active',
+                    ],
+                ],
+            ], 200),
+        ]);
+
+        $this->shop->update([
+            'tax_settings' => [
+                'tax_mode' => 'exclusive',
+                'default_tax_id' => 'valid_tax_18',
+                'tax_mappings' => [],
+            ],
+        ]);
+
+        $order = Order::create([
+            'shop_id' => $this->shop->id,
+            'shopify_order_id' => 'gid://shopify/Order/8015',
+            'order_number' => '#8015',
+            'currency' => 'INR',
+            'subtotal' => 1000.00,
+            'tax_total' => 180.00,
+            'total_price' => 1180.00,
+            'tax_lines' => [['title' => 'IGST', 'rate' => 0.18, 'price' => 180.00]],
+            'line_items' => [],
+        ]);
+
+        $service = new ZohoService($this->shop);
+        $reflection = new \ReflectionClass($service);
+        $method = $reflection->getMethod('resolveZohoTaxId');
+        $method->setAccessible(true);
+        $resolvedTaxId = $method->invoke($service, $order->tax_lines, $order);
+
+        $this->assertEquals('valid_tax_18', $resolvedTaxId);
+    }
+
+    public function test_stale_mapping_with_deleted_zoho_tax_is_ignored(): void
+    {
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/settings/taxes*' => Http::response([
+                'code' => 0,
+                'taxes' => [],
+            ], 200),
+        ]);
+
+        $this->shop->update([
+            'tax_settings' => [
+                'tax_mode' => 'exclusive',
+                'default_tax_id' => '',
+                'tax_mappings' => [
+                    [
+                        'shopify_tax_name' => 'GST',
+                        'shopify_rate' => 18,
+                        'zoho_tax_id' => 'old_deleted_zoho_tax_999',
+                    ],
+                ],
+            ],
+        ]);
+
+        $order = Order::create([
+            'shop_id' => $this->shop->id,
+            'shopify_order_id' => 'gid://shopify/Order/8016',
+            'order_number' => '#8016',
+            'currency' => 'INR',
+            'subtotal' => 500.00,
+            'tax_total' => 90.00,
+            'total_price' => 590.00,
+            'tax_lines' => [['title' => 'GST', 'rate' => 0.18, 'price' => 90.00]],
+            'line_items' => [],
+        ]);
+
+        $service = new ZohoService($this->shop);
+        $reflection = new \ReflectionClass($service);
+        $method = $reflection->getMethod('resolveZohoTaxId');
+        $method->setAccessible(true);
+
+        $this->expectException(\Exception::class);
+        $this->expectExceptionMessage('The order requires tax');
+        $method->invoke($service, $order->tax_lines, $order);
+    }
+
+    public function test_saving_tax_settings_with_deleted_default_tax_id_returns_validation_error(): void
+    {
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/settings/taxes*' => Http::response([
+                'code' => 0,
+                'taxes' => [
+                    [
+                        'tax_id' => 'active_tax_1',
+                        'tax_name' => 'Active Tax',
+                        'tax_percentage' => 10,
+                        'status' => 'Active',
+                    ],
+                ],
+            ], 200),
+        ]);
+
+        $payload = [
+            'tax_mode' => 'exclusive',
+            'default_tax_id' => 'deleted_tax_4081216000000161193',
+            'shipping_tax_mode' => 'use_order_tax',
+            'discount_tax_mode' => 'before_tax',
+            'tax_mappings' => [],
+        ];
+
+        $response = $this->actingAsShop()
+            ->postJson('/zoho/settings/tax', $payload);
+
+        $response->assertStatus(422);
+        $response->assertJsonFragment(['success' => false]);
+        $this->assertStringContainsString('no longer exists or is deleted', $response->json('message'));
     }
 
     private function actingAsShop()
