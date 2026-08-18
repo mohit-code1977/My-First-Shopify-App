@@ -33,7 +33,7 @@ class ShopifyAuthController extends Controller
             ], 400);
         }
 
-        $scopes = env('SHOPIFY_SCOPES');
+        $scopes = config('services.shopify.scopes', env('SHOPIFY_SCOPES', 'read_products,write_products,read_orders,write_orders,read_customers,write_customers,read_inventory,write_inventory,read_locations'));
         $apiKey = env('SHOPIFY_API_KEY');
 
 

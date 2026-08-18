@@ -171,10 +171,22 @@ class ZohoSyncController extends Controller {
     public function sync(Request $request)
     {
         $context = $this->resolveShopContext($request);
+        $shopModel = $this->resolveShopModel($request);
+        $inventoryCapability = 'unavailable';
+
+        if ($shopModel && $shopModel->zohoConnection) {
+            try {
+                $zohoService = new ZohoService($shopModel);
+                $inventoryCapability = $zohoService->detectInventoryCapability();
+            } catch (\Throwable $e) {
+                $inventoryCapability = 'unavailable';
+            }
+        }
 
         return Inertia::render('Zoho/Sync', array_merge($context, [
             'variants' => [],
             'failedCount' => 0,
+            'inventoryCapability' => $inventoryCapability,
         ]));
     }
 
@@ -484,6 +496,16 @@ class ZohoSyncController extends Controller {
             ->take(50)
             ->get();
 
+        $inventoryCapability = 'unavailable';
+        if ($zohoConnection !== null) {
+            try {
+                $zohoService = new ZohoService($shop);
+                $inventoryCapability = $zohoService->detectInventoryCapability();
+            } catch (\Throwable $e) {
+                $inventoryCapability = 'unavailable';
+            }
+        }
+
         return response()->json([
             'success' => true,
             'shop' => [
@@ -493,6 +515,7 @@ class ZohoSyncController extends Controller {
             'variants' => $variants,
             'orders' => $orders,
             'zohoConnected' => $zohoConnection !== null,
+            'inventoryCapability' => $inventoryCapability,
         ]);
     }
 
@@ -763,30 +786,52 @@ GRAPHQL;
         }
 
         $validated = $request->validate([
-            'variant_id' => ['required', 'integer'],
+            'variant_id' => ['nullable', 'integer'],
             'location_id' => ['nullable', 'string'],
         ]);
 
-        $variant = ProductVariant::where('id', $validated['variant_id'])
-            ->whereHas('product', function ($query) use ($shop) {
-                $query->where('shop_id', $shop->id);
-            })
-            ->first();
+        $zohoService = new ZohoService($shop);
 
-        if (!$variant) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Product variant not found.',
-            ], 404);
+        if (!empty($validated['variant_id'])) {
+            $variant = ProductVariant::where('id', $validated['variant_id'])
+                ->whereHas('product', function ($query) use ($shop) {
+                    $query->where('shop_id', $shop->id);
+                })
+                ->first();
+
+            if (!$variant) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Product variant not found.',
+                ], 404);
+            }
+
+            try {
+                $result = $zohoService->syncZohoInventoryToShopify($variant, $validated['location_id'] ?? null);
+
+                return response()->json([
+                    'success' => true,
+                    'message' => $result['message'] ?? 'Zoho inventory synchronized to Shopify successfully.',
+                    'data' => $result,
+                ]);
+            } catch (\Throwable $e) {
+                return response()->json([
+                    'success' => false,
+                    'message' => $e->getMessage(),
+                ], 500);
+            }
         }
 
         try {
-            $zohoService = new ZohoService($shop);
-            $result = $zohoService->syncZohoInventoryToShopify($variant, $validated['location_id'] ?? null);
+            $result = $zohoService->syncAllZohoInventoryToShopify($shop);
 
             return response()->json([
                 'success' => true,
-                'message' => $result['message'] ?? 'Zoho inventory synchronized to Shopify successfully.',
+                'message' => "Bulk Zoho inventory sync complete: {$result['synced']} synced, {$result['failed']} failed, {$result['skipped']} skipped.",
+                'synced' => $result['synced'],
+                'failed' => $result['failed'],
+                'skipped' => $result['skipped'],
+                'total' => $result['total'],
                 'data' => $result,
             ]);
         } catch (\Throwable $e) {

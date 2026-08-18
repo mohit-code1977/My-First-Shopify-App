@@ -89,6 +89,8 @@ Route::middleware(['shopify.auth'])->group(function () {
         ->name('zoho.settings.disconnect');
 });
 
+use App\Http\Controllers\ZohoWebhookController;
+
 Route::post('/webhooks/products', [ShopifyWebhookController::class, 'productsUpdate'])
     ->name('shopify.webhooks.products');
 
@@ -103,5 +105,9 @@ Route::post('/webhooks/orders', [ShopifyWebhookController::class, 'ordersUpdate'
 
 Route::post('/webhooks/order-transactions', [ShopifyWebhookController::class, 'orderTransactionsCreate'])
     ->name('shopify.webhooks.order_transactions');
+
+Route::post('/webhooks/zoho/inventory', [ZohoWebhookController::class, 'inventoryUpdate'])
+    ->name('zoho.webhooks.inventory');
+
 
 

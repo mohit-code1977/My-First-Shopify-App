@@ -72,12 +72,17 @@ class ZohoAuthController extends Controller {
             'ZohoBooks.invoices.UPDATE',
             'ZohoBooks.customerpayments.READ',
             'ZohoBooks.customerpayments.CREATE',
+            'ZohoInventory.settings.READ',
             'ZohoInventory.items.READ',
             'ZohoInventory.items.CREATE',
             'ZohoInventory.items.UPDATE',
             'ZohoInventory.inventoryadjustments.READ',
             'ZohoInventory.inventoryadjustments.CREATE',
             'ZohoInventory.inventoryadjustments.UPDATE',
+            'ERP.settings.READ',
+            'ERP.inventoryadjustments.READ',
+            'ERP.inventoryadjustments.CREATE',
+            'ERP.inventoryadjustments.UPDATE',
         ]);
 
         $params = http_build_query([

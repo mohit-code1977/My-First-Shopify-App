@@ -112,6 +112,47 @@ class ZohoDatacenter
     }
 
     /**
+     * Resolve API URL for a given ZohoConnection model cleanly.
+     */
+    public static function resolveApiUrlForConnection(?\App\Models\ZohoConnection $connection): ?string
+    {
+        if ($connection) {
+            $apiUrl = self::validateApiUrl($connection->api_url);
+            if ($apiUrl) {
+                return $apiUrl;
+            }
+
+            if (!empty($connection->api_domain)) {
+                $apiUrl = self::validateApiUrl("https://{$connection->api_domain}");
+                if ($apiUrl) {
+                    return $apiUrl;
+                }
+            }
+
+            return null;
+        }
+
+        return self::validateApiUrl(config('services.zoho.api_url') ?: env('ZOHO_API_URL'));
+    }
+
+    /**
+     * Resolve Accounts URL for a given ZohoConnection model cleanly.
+     */
+    public static function resolveAccountsUrlForConnection(?\App\Models\ZohoConnection $connection): ?string
+    {
+        if ($connection) {
+            $accountsUrl = self::validateAccountsUrl($connection->accounts_url);
+            if ($accountsUrl) {
+                return $accountsUrl;
+            }
+
+            return null;
+        }
+
+        return self::validateAccountsUrl(config('services.zoho.accounts_url') ?: env('ZOHO_ACCOUNTS_URL')) ?? self::GLOBAL_ACCOUNTS_URL;
+    }
+
+    /**
      * Resolve Accounts URL from callback parameters (accounts-server, location).
      */
     public static function resolveAccountsUrl(?string $accountsServer, ?string $location): ?string

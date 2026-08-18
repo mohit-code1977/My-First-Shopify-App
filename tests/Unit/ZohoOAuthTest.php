@@ -67,8 +67,11 @@ class ZohoOAuthTest extends TestCase
         $this->assertStringContainsString('ZohoBooks.settings.READ', $content['redirect_url']);
         $this->assertStringContainsString('ZohoBooks.customerpayments.READ', $content['redirect_url']);
         $this->assertStringContainsString('ZohoBooks.customerpayments.CREATE', $content['redirect_url']);
+        $this->assertStringContainsString('ZohoInventory.settings.READ', $content['redirect_url']);
         $this->assertStringContainsString('ZohoInventory.items.READ', $content['redirect_url']);
         $this->assertStringContainsString('ZohoInventory.inventoryadjustments.READ', $content['redirect_url']);
+        $this->assertStringContainsString('ERP.settings.READ', $content['redirect_url']);
+        $this->assertStringContainsString('ERP.inventoryadjustments.CREATE', $content['redirect_url']);
         $this->assertStringContainsString('access_type=offline', $content['redirect_url']);
         $this->assertStringContainsString('prompt=consent', $content['redirect_url']);
     }
@@ -342,7 +345,7 @@ class ZohoOAuthTest extends TestCase
 
     public function test_granted_scopes_including_books_and_inventory_are_persisted()
     {
-        $grantedScopeStr = 'ZohoBooks.settings.READ,ZohoBooks.settings.CREATE,ZohoBooks.settings.UPDATE,ZohoBooks.customerpayments.READ,ZohoBooks.customerpayments.CREATE,ZohoInventory.items.READ,ZohoInventory.items.CREATE,ZohoInventory.items.UPDATE,ZohoInventory.inventoryadjustments.READ,ZohoInventory.inventoryadjustments.CREATE,ZohoInventory.inventoryadjustments.UPDATE';
+        $grantedScopeStr = 'ZohoBooks.settings.READ,ZohoBooks.settings.CREATE,ZohoBooks.settings.UPDATE,ZohoBooks.customerpayments.READ,ZohoBooks.customerpayments.CREATE,ZohoInventory.settings.READ,ZohoInventory.items.READ,ZohoInventory.items.CREATE,ZohoInventory.items.UPDATE,ZohoInventory.inventoryadjustments.READ,ZohoInventory.inventoryadjustments.CREATE,ZohoInventory.inventoryadjustments.UPDATE,ERP.settings.READ,ERP.inventoryadjustments.READ,ERP.inventoryadjustments.CREATE,ERP.inventoryadjustments.UPDATE';
 
         Http::fake([
             'https://accounts.zoho.in/oauth/v2/token' => Http::response([
@@ -389,7 +392,10 @@ class ZohoOAuthTest extends TestCase
         $this->assertStringContainsString('ZohoBooks.settings.READ', $connection->scope);
         $this->assertStringContainsString('ZohoBooks.customerpayments.READ', $connection->scope);
         $this->assertStringContainsString('ZohoBooks.customerpayments.CREATE', $connection->scope);
+        $this->assertStringContainsString('ZohoInventory.settings.READ', $connection->scope);
         $this->assertStringContainsString('ZohoInventory.items.READ', $connection->scope);
         $this->assertStringContainsString('ZohoInventory.inventoryadjustments.READ', $connection->scope);
+        $this->assertStringContainsString('ERP.settings.READ', $connection->scope);
+        $this->assertStringContainsString('ERP.inventoryadjustments.CREATE', $connection->scope);
     }
 }

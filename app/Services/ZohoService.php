@@ -18,8 +18,128 @@ class ZohoService
     private const SHOPIFY_VARIANT_FIELD_API_NAME =
     'cf_shopify_variant_id';
 
+    public const CAPABILITY_ZOHO_INVENTORY = 'zoho_inventory';
+    public const CAPABILITY_ZOHO_ERP = 'zoho_erp';
+    public const CAPABILITY_BOOKS_NATIVE = 'books_native';
+    public const CAPABILITY_UNAVAILABLE = 'unavailable';
+
+    public const BOOKS_NATIVE_ERROR_MESSAGE = 'Automatic inventory adjustment requires Zoho Inventory/ERP API access. Zoho Books native inventory adjustments are available in the UI but are not exposed through the current documented Books REST API.';
+
     // Current Shopify shop
     protected Shop $shop;
+
+    /**
+     * Detect which Zoho inventory capability is available for this connection using safe read-only probes.
+     */
+    /**
+     * Detect which Zoho inventory capability is available for this connection using safe read-only probes.
+     */
+    public function detectInventoryCapability(bool $forceRefresh = false): string
+    {
+        $connection = $this->getConnection();
+
+        if (!$forceRefresh && !empty($connection->inventory_capability) && $connection->inventory_capability !== 'unknown') {
+            return $connection->inventory_capability;
+        }
+
+        // Probe 1: Zoho Inventory API
+        $probe1 = $this->probeEndpoint('/inventory/v1/items');
+        if ($probe1['status'] === 'success') {
+            $connection->update(['inventory_capability' => self::CAPABILITY_ZOHO_INVENTORY]);
+            return self::CAPABILITY_ZOHO_INVENTORY;
+        }
+
+        if ($probe1['status'] === 'auth_error' || $probe1['status'] === 'transient_error') {
+            // Do NOT fall through to ERP or Books, and do NOT persist false capability.
+            return self::CAPABILITY_UNAVAILABLE;
+        }
+
+        // Probe 1 is explicitly unprovisioned (404 / 6018). Try Probe 2: Zoho ERP API
+        $probe2 = $this->probeEndpoint('/erp/v3/items');
+        if ($probe2['status'] === 'success') {
+            $connection->update(['inventory_capability' => self::CAPABILITY_ZOHO_ERP]);
+            return self::CAPABILITY_ZOHO_ERP;
+        }
+
+        if ($probe2['status'] === 'auth_error' || $probe2['status'] === 'transient_error') {
+            // Do NOT fall through to Books, and do NOT persist false capability.
+            return self::CAPABILITY_UNAVAILABLE;
+        }
+
+        // Both Inventory and ERP are explicitly unprovisioned. Try Probe 3: Zoho Books Native
+        $probe3 = $this->probeEndpoint('/books/v3/items');
+        if ($probe3['status'] === 'success') {
+            $connection->update(['inventory_capability' => self::CAPABILITY_BOOKS_NATIVE]);
+            return self::CAPABILITY_BOOKS_NATIVE;
+        }
+
+        // All probes failed or unprovisioned
+        $connection->update(['inventory_capability' => self::CAPABILITY_UNAVAILABLE]);
+        return self::CAPABILITY_UNAVAILABLE;
+    }
+
+    /**
+     * Safe endpoint probe for capability detection.
+     * Categorizes outcomes: 'success', 'unprovisioned' (404/6018), 'auth_error' (401/403/57), 'transient_error' (5xx/timeout/429).
+     */
+    protected function probeEndpoint(string $endpoint): array
+    {
+        try {
+            $connection = $this->getConnection();
+            $apiUrl = ZohoDatacenter::resolveApiUrlForConnection($connection);
+            if (!$apiUrl) {
+                return ['status' => 'transient_error', 'message' => 'Invalid API URL configuration.'];
+            }
+
+            $token = $this->getAccessToken();
+            $url = rtrim($apiUrl, '/') . $endpoint;
+            $query = [
+                'organization_id' => $connection->organization_id,
+                'per_page' => 1,
+            ];
+
+            $response = Http::withHeaders([
+                'Authorization' => 'Zoho-oauthtoken ' . $token,
+                'Accept' => 'application/json',
+            ])->get($url, $query);
+
+            $httpStatus = $response->status();
+            $responseData = $response->json() ?? [];
+            $zohoCode = isset($responseData['code']) ? (int) $responseData['code'] : null;
+
+            if ($response->successful() && $zohoCode === 0) {
+                return ['status' => 'success', 'data' => $responseData];
+            }
+
+            // Check for Unprovisioned / Not Available (404, Zoho code 6018) FIRST
+            if ($httpStatus === 404 || $zohoCode === 6018) {
+                return ['status' => 'unprovisioned', 'message' => $responseData['message'] ?? 'Module not provisioned or unavailable (404/code 6018).'];
+            }
+
+            // Check for Auth / Scope error (401, 403, Zoho code 57 / 5700)
+            if ($httpStatus === 401 || $httpStatus === 403 || $zohoCode === 57 || $zohoCode === 5700) {
+                return ['status' => 'auth_error', 'message' => $responseData['message'] ?? 'Zoho authorization/scope error (401/403/code 57).'];
+            }
+
+            // Check for Transient / Server / Rate-limit errors (5xx, 429)
+            if ($httpStatus >= 500 || $httpStatus === 429) {
+                return ['status' => 'transient_error', 'message' => "Zoho server/rate-limit error (HTTP {$httpStatus})."];
+            }
+
+            return ['status' => 'unprovisioned', 'message' => $responseData['message'] ?? 'Endpoint unavailable.'];
+        } catch (\Illuminate\Http\Client\ConnectionException $e) {
+            return ['status' => 'transient_error', 'message' => 'Network timeout or connection error: ' . $e->getMessage()];
+        } catch (\Throwable $e) {
+            $msg = $e->getMessage();
+            if (str_contains($msg, '401') || str_contains($msg, '403') || $e->getCode() === 57) {
+                return ['status' => 'auth_error', 'message' => $msg];
+            }
+            if (str_contains($msg, '404') || $e->getCode() === 6018) {
+                return ['status' => 'unprovisioned', 'message' => $msg];
+            }
+            return ['status' => 'transient_error', 'message' => $msg];
+        }
+    }
 
     // Store the Shopify shop when creating the service
     public function __construct(Shop $shop)
@@ -56,7 +176,7 @@ class ZohoService
     {
         $connection = $this->getConnection();
 
-        $accountsUrl = ZohoDatacenter::validateAccountsUrl($connection->accounts_url);
+        $accountsUrl = ZohoDatacenter::resolveAccountsUrlForConnection($connection);
 
         if (!$accountsUrl) {
             throw new \RuntimeException('Zoho connection is missing or has an invalid accounts_url endpoint configuration.');
@@ -105,7 +225,7 @@ class ZohoService
     ): array {
         $connection = $this->getConnection();
 
-        $apiUrl = ZohoDatacenter::validateApiUrl($connection->api_url);
+        $apiUrl = ZohoDatacenter::resolveApiUrlForConnection($connection);
 
         if (!$apiUrl) {
             throw new \RuntimeException('Zoho connection is missing or has an invalid api_url endpoint configuration.');
@@ -113,7 +233,7 @@ class ZohoService
 
         $token = $this->getAccessToken();
 
-        $url = rtrim($connection->api_url, '/') . $endpoint;
+        $url = rtrim($apiUrl, '/') . $endpoint;
 
         // Send organization ID as a query parameter
         $query = [
@@ -999,7 +1119,43 @@ class ZohoService
             Log::error("syncInventory: Zoho item ID {$variant->zoho_item_id} not found for variant ID {$variant->id}.");
             return [
                 'success' => false,
+                'capability' => $this->detectInventoryCapability(),
+                'item_inventory_tracked' => false,
+                'sync_available' => false,
+                'reason' => "Zoho item ID {$variant->zoho_item_id} not found.",
                 'message' => "Zoho item ID {$variant->zoho_item_id} not found.",
+            ];
+        }
+
+        $capability = $this->detectInventoryCapability();
+        $isInventoryTracked = isset($zohoItem['track_inventory']) ? (bool) $zohoItem['track_inventory'] : true;
+
+        if (!$isInventoryTracked) {
+            $reason = "Mapped Zoho item {$variant->zoho_item_id} is not configured for inventory tracking (track_inventory = false).";
+            Log::warning("syncInventory: Variant ID {$variant->id} (Zoho Item: {$variant->zoho_item_id}) is not inventory-tracked in Zoho.");
+
+            SyncHistory::create([
+                'shop_id' => $this->shop->id,
+                'product_variant_id' => $variant->id,
+                'action' => 'sync_inventory',
+                'status' => 'skipped',
+                'zoho_item_id' => $variant->zoho_item_id,
+                'message' => $reason,
+                'synced_at' => now(),
+            ]);
+
+            return [
+                'success' => false,
+                'skipped' => true,
+                'capability' => $capability,
+                'item_inventory_tracked' => false,
+                'sync_available' => false,
+                'adjusted' => false,
+                'shopify_quantity' => $targetQuantity,
+                'zoho_quantity' => (int) ($zohoItem['actual_available_stock'] ?? $zohoItem['stock_on_hand'] ?? 0),
+                'delta' => 0,
+                'reason' => $reason,
+                'message' => $reason,
             ];
         }
 
@@ -1019,12 +1175,72 @@ class ZohoService
             return [
                 'success' => true,
                 'adjusted' => false,
+                'capability' => $capability,
+                'item_inventory_tracked' => true,
+                'sync_available' => true,
                 'shopify_quantity' => $targetQuantity,
                 'zoho_quantity' => $currentZohoQuantity,
                 'delta' => 0,
+                'reason' => null,
                 'message' => 'Inventory is already in sync.',
             ];
         }
+
+        if ($capability === self::CAPABILITY_BOOKS_NATIVE) {
+            SyncHistory::create([
+                'shop_id' => $this->shop->id,
+                'product_variant_id' => $variant->id,
+                'action' => 'sync_inventory',
+                'status' => 'skipped',
+                'zoho_item_id' => $variant->zoho_item_id,
+                'message' => self::BOOKS_NATIVE_ERROR_MESSAGE,
+                'synced_at' => now(),
+            ]);
+
+            return [
+                'success' => false,
+                'capability' => $capability,
+                'item_inventory_tracked' => true,
+                'sync_available' => false,
+                'adjusted' => false,
+                'shopify_quantity' => $targetQuantity,
+                'zoho_quantity' => $currentZohoQuantity,
+                'delta' => 0,
+                'reason' => self::BOOKS_NATIVE_ERROR_MESSAGE,
+                'message' => self::BOOKS_NATIVE_ERROR_MESSAGE,
+            ];
+        }
+
+        if ($capability === self::CAPABILITY_UNAVAILABLE) {
+            SyncHistory::create([
+                'shop_id' => $this->shop->id,
+                'product_variant_id' => $variant->id,
+                'action' => 'sync_inventory',
+                'status' => 'failed',
+                'zoho_item_id' => $variant->zoho_item_id,
+                'message' => 'Zoho inventory sync is unavailable for this organization connection.',
+                'synced_at' => now(),
+            ]);
+
+            return [
+                'success' => false,
+                'capability' => $capability,
+                'item_inventory_tracked' => true,
+                'sync_available' => false,
+                'adjusted' => false,
+                'shopify_quantity' => $targetQuantity,
+                'zoho_quantity' => $currentZohoQuantity,
+                'delta' => 0,
+                'reason' => 'Zoho inventory sync is unavailable for this organization connection.',
+                'message' => 'Zoho inventory sync is unavailable for this organization connection.',
+            ];
+        }
+
+        $endpoint = match ($capability) {
+            self::CAPABILITY_ZOHO_INVENTORY => '/inventory/v1/inventoryadjustments',
+            self::CAPABILITY_ZOHO_ERP => '/erp/v3/inventoryadjustments',
+            default => '/inventory/v1/inventoryadjustments',
+        };
 
         $payload = [
             'date' => now()->format('Y-m-d'),
@@ -1039,17 +1255,21 @@ class ZohoService
         ];
 
         try {
-            $response = $this->makeRequest('POST', '/books/v3/inventoryadjustments', $payload);
+            $response = $this->makeRequest('POST', $endpoint, $payload);
 
             Log::info("syncInventory: Successfully created Zoho inventory adjustment for variant ID {$variant->id}. Delta: {$delta}");
 
             return [
                 'success' => true,
                 'adjusted' => true,
+                'capability' => $capability,
+                'item_inventory_tracked' => true,
+                'sync_available' => true,
                 'shopify_quantity' => $targetQuantity,
                 'zoho_quantity' => $currentZohoQuantity,
                 'delta' => $delta,
                 'zoho_response' => $response,
+                'reason' => null,
                 'message' => 'Inventory adjustment created successfully.',
             ];
         } catch (\Throwable $e) {
@@ -1062,64 +1282,210 @@ class ZohoService
      * Synchronize inventory quantity from Zoho Books back to Shopify.
      * Prevents overselling by clamping stock to non-negative quantities.
      */
+    /**
+     * Synchronize inventory quantity from Zoho Books back to Shopify.
+     * Prevents overselling by clamping stock to non-negative quantities.
+     */
     public function syncZohoInventoryToShopify(ProductVariant $variant, ?string $locationId = null): array {
         if (!$variant->zoho_item_id) {
             Log::warning("syncZohoInventoryToShopify: Variant ID {$variant->id} is not linked to a Zoho item.");
+            $message = 'Variant is not linked to a Zoho item.';
+            SyncHistory::create([
+                'shop_id' => $this->shop->id,
+                'product_variant_id' => $variant->id,
+                'action' => 'inventory_update',
+                'status' => 'skipped',
+                'zoho_item_id' => null,
+                'message' => $message,
+                'synced_at' => now(),
+            ]);
             return [
                 'success' => false,
                 'skipped' => true,
-                'message' => 'Variant is not linked to a Zoho item.',
+                'message' => $message,
             ];
         }
 
         if (!$variant->shopify_inventory_item_id) {
             Log::warning("syncZohoInventoryToShopify: Variant ID {$variant->id} does not have a mapped shopify_inventory_item_id.");
+            $message = 'Variant does not have a mapped Shopify inventory item ID.';
+            SyncHistory::create([
+                'shop_id' => $this->shop->id,
+                'product_variant_id' => $variant->id,
+                'action' => 'inventory_update',
+                'status' => 'skipped',
+                'zoho_item_id' => $variant->zoho_item_id,
+                'message' => $message,
+                'synced_at' => now(),
+            ]);
             return [
                 'success' => false,
                 'skipped' => true,
-                'message' => 'Variant does not have a mapped Shopify inventory item ID.',
+                'message' => $message,
             ];
         }
 
-        $zohoItem = $this->getItem($variant->zoho_item_id);
+        try {
+            $zohoItem = $this->getItem($variant->zoho_item_id);
 
-        if (!$zohoItem) {
-            Log::error("syncZohoInventoryToShopify: Zoho item ID {$variant->zoho_item_id} not found for variant ID {$variant->id}.");
+            if (!$zohoItem) {
+                Log::error("syncZohoInventoryToShopify: Zoho item ID {$variant->zoho_item_id} not found for variant ID {$variant->id}.");
+                $message = "Zoho item ID {$variant->zoho_item_id} not found.";
+                SyncHistory::create([
+                    'shop_id' => $this->shop->id,
+                    'product_variant_id' => $variant->id,
+                    'action' => 'inventory_update',
+                    'status' => 'failed',
+                    'zoho_item_id' => $variant->zoho_item_id,
+                    'message' => $message,
+                    'synced_at' => now(),
+                ]);
+                return [
+                    'success' => false,
+                    'capability' => $this->detectInventoryCapability(),
+                    'item_inventory_tracked' => false,
+                    'sync_available' => false,
+                    'reason' => $message,
+                    'message' => $message,
+                ];
+            }
+
+            if (isset($zohoItem['track_inventory']) && !$zohoItem['track_inventory']) {
+                $reason = "Mapped Zoho item {$variant->zoho_item_id} is not configured for inventory tracking (track_inventory = false).";
+                Log::warning("syncZohoInventoryToShopify: Variant ID {$variant->id} (Zoho Item: {$variant->zoho_item_id}) is not inventory-tracked in Zoho.");
+
+                SyncHistory::create([
+                    'shop_id' => $this->shop->id,
+                    'product_variant_id' => $variant->id,
+                    'action' => 'inventory_update',
+                    'status' => 'skipped',
+                    'zoho_item_id' => $variant->zoho_item_id,
+                    'message' => $reason,
+                    'synced_at' => now(),
+                ]);
+
+                return [
+                    'success' => false,
+                    'skipped' => true,
+                    'capability' => $this->detectInventoryCapability(),
+                    'item_inventory_tracked' => false,
+                    'sync_available' => false,
+                    'reason' => $reason,
+                    'message' => $reason,
+                ];
+            }
+
+            $zohoQuantity = (int) (
+                $zohoItem['actual_available_stock'] ??
+                $zohoItem['stock_on_hand'] ??
+                $zohoItem['available_stock'] ??
+                0
+            );
+
+            $safeQuantity = max(0, $zohoQuantity);
+
+            $shopifyService = app(ShopifyService::class);
+            $result = $shopifyService->setInventoryQuantity(
+                $this->shop,
+                $variant->shopify_inventory_item_id,
+                $safeQuantity,
+                $locationId
+            );
+
+            $variant->inventory_quantity = $safeQuantity;
+            $variant->save();
+
+            Log::info("syncZohoInventoryToShopify: Updated variant ID {$variant->id} inventory to {$safeQuantity} on Shopify (Zoho stock: {$zohoQuantity}).");
+
+            SyncHistory::create([
+                'shop_id' => $this->shop->id,
+                'product_variant_id' => $variant->id,
+                'action' => 'inventory_update',
+                'status' => 'success',
+                'zoho_item_id' => $variant->zoho_item_id,
+                'message' => "Updated inventory for variant #{$variant->id} to {$safeQuantity} on Shopify (Zoho stock: {$zohoQuantity}).",
+                'synced_at' => now(),
+            ]);
+
+            return [
+                'success' => true,
+                'variant_id' => $variant->id,
+                'zoho_quantity' => $zohoQuantity,
+                'shopify_quantity' => $safeQuantity,
+                'shopify_response' => $result,
+                'message' => 'Inventory synchronized from Zoho to Shopify successfully.',
+            ];
+        } catch (\Throwable $e) {
+            Log::error("syncZohoInventoryToShopify: Failed to sync inventory for variant ID {$variant->id}: " . $e->getMessage());
+
+            SyncHistory::create([
+                'shop_id' => $this->shop->id,
+                'product_variant_id' => $variant->id,
+                'action' => 'inventory_update',
+                'status' => 'failed',
+                'zoho_item_id' => $variant->zoho_item_id ?? null,
+                'message' => 'Zoho to Shopify inventory sync failed: ' . $e->getMessage(),
+                'synced_at' => now(),
+            ]);
+
             return [
                 'success' => false,
-                'message' => "Zoho item ID {$variant->zoho_item_id} not found.",
+                'variant_id' => $variant->id,
+                'message' => $e->getMessage(),
             ];
         }
+    }
 
-        $zohoQuantity = (int) (
-            $zohoItem['actual_available_stock'] ??
-            $zohoItem['stock_on_hand'] ??
-            $zohoItem['available_stock'] ??
-            0
-        );
+    /**
+     * Synchronize inventory quantity for all mapped variants from Zoho to Shopify.
+     */
+    public function syncAllZohoInventoryToShopify(?Shop $shop = null): array {
+        $targetShop = $shop ?? $this->shop;
 
-        $safeQuantity = max(0, $zohoQuantity);
+        if (!$targetShop) {
+            throw new \InvalidArgumentException('No shop specified for bulk Zoho inventory sync.');
+        }
 
-        $shopifyService = app(ShopifyService::class);
-        $result = $shopifyService->setInventoryQuantity(
-            $this->shop,
-            $variant->shopify_inventory_item_id,
-            $safeQuantity,
-            $locationId
-        );
+        $this->shop = $targetShop;
 
-        $variant->inventory_quantity = $safeQuantity;
-        $variant->save();
+        $variants = ProductVariant::whereHas('product', function ($query) use ($targetShop) {
+            $query->where('shop_id', $targetShop->id);
+        })->get();
 
-        Log::info("syncZohoInventoryToShopify: Updated variant ID {$variant->id} inventory to {$safeQuantity} on Shopify (Zoho stock: {$zohoQuantity}).");
+        $synced = 0;
+        $failed = 0;
+        $skipped = 0;
+        $results = [];
+
+        foreach ($variants as $variant) {
+            try {
+                $res = $this->syncZohoInventoryToShopify($variant);
+                if (!empty($res['skipped'])) {
+                    $skipped++;
+                } elseif (!empty($res['success'])) {
+                    $synced++;
+                } else {
+                    $failed++;
+                }
+                $results[] = $res;
+            } catch (\Throwable $e) {
+                $failed++;
+                $results[] = [
+                    'success' => false,
+                    'variant_id' => $variant->id,
+                    'message' => $e->getMessage(),
+                ];
+            }
+        }
 
         return [
             'success' => true,
-            'variant_id' => $variant->id,
-            'zoho_quantity' => $zohoQuantity,
-            'shopify_quantity' => $safeQuantity,
-            'shopify_response' => $result,
-            'message' => 'Inventory synchronized from Zoho to Shopify successfully.',
+            'total' => $variants->count(),
+            'synced' => $synced,
+            'success_count' => $synced,
+            'failed' => $failed,
+            'skipped' => $skipped,
+            'details' => $results,
         ];
     }
 
@@ -1938,24 +2304,15 @@ class ZohoService
      */
     public function fetchAccounts(): array {
         try {
-            $accessToken = $this->getAccessToken();
-            $response = Http::withHeaders([
-                'Authorization' => "Zoho-oauthtoken {$accessToken}",
-            ])->get("{$this->connection->api_url}/books/v3/bankaccounts", [
-                'organization_id' => $this->connection->organization_id,
-            ]);
-
-            if ($response->successful()) {
-                $data = $response->json();
-                if (($data['code'] ?? -1) === 0 && !empty($data['bankaccounts']) && is_array($data['bankaccounts'])) {
-                    return array_map(function ($acc) {
-                        return [
-                            'account_id' => (string) ($acc['account_id'] ?? ''),
-                            'account_name' => (string) ($acc['account_name'] ?? 'Account ' . ($acc['account_id'] ?? '')),
-                            'account_type' => (string) ($acc['account_type'] ?? 'bank'),
-                        ];
-                    }, $data['bankaccounts']);
-                }
+            $data = $this->makeRequest('GET', '/books/v3/bankaccounts');
+            if (($data['code'] ?? -1) === 0 && !empty($data['bankaccounts']) && is_array($data['bankaccounts'])) {
+                return array_map(function ($acc) {
+                    return [
+                        'account_id' => (string) ($acc['account_id'] ?? ''),
+                        'account_name' => (string) ($acc['account_name'] ?? 'Account ' . ($acc['account_id'] ?? '')),
+                        'account_type' => (string) ($acc['account_type'] ?? 'bank'),
+                    ];
+                }, $data['bankaccounts']);
             }
         } catch (\Throwable $e) {
             Log::warning('Failed to fetch Zoho bank accounts: ' . $e->getMessage());

@@ -38,12 +38,14 @@ return [
     'shopify' => [
         'api_key' => env('SHOPIFY_API_KEY'),
         'api_secret' => env('SHOPIFY_API_SECRET'),
+        'scopes' => env('SHOPIFY_SCOPES', 'read_products,write_products,read_orders,write_orders,read_customers,write_customers,read_inventory,write_inventory,read_locations'),
     ],
 
     'zoho' => [
         'client_id' => env('ZOHO_CLIENT_ID'),
         'client_secret' => env('ZOHO_CLIENT_SECRET'),
         'redirect_uri' => env('ZOHO_REDIRECT_URI'),
+        'webhook_secret' => env('ZOHO_WEBHOOK_SECRET'),
         'oauth_initiation_url' => env('ZOHO_OAUTH_INITIATION_URL', 'https://accounts.zoho.com'),
         'accounts_url' => env('ZOHO_ACCOUNTS_URL', 'https://accounts.zoho.in'),
         'api_url' => env('ZOHO_API_URL', 'https://www.zohoapis.in'),
@@ -62,12 +64,17 @@ return [
             'ZohoBooks.invoices.UPDATE',
             'ZohoBooks.customerpayments.READ',
             'ZohoBooks.customerpayments.CREATE',
+            'ZohoInventory.settings.READ',
             'ZohoInventory.items.READ',
             'ZohoInventory.items.CREATE',
             'ZohoInventory.items.UPDATE',
             'ZohoInventory.inventoryadjustments.READ',
             'ZohoInventory.inventoryadjustments.CREATE',
             'ZohoInventory.inventoryadjustments.UPDATE',
+            'ERP.settings.READ',
+            'ERP.inventoryadjustments.READ',
+            'ERP.inventoryadjustments.CREATE',
+            'ERP.inventoryadjustments.UPDATE',
         ],
         'payment_gateways' => [
             'shopify_payments' => ['payment_mode' => 'creditcard', 'account_id' => null],

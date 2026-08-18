@@ -18,6 +18,7 @@ class ZohoConnection extends Model
         'api_domain',
         'data_center',
         'scope',
+        'inventory_capability',
         'expires_at',
         'connected_at',
         'disconnected_at',

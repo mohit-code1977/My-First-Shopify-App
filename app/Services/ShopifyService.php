@@ -44,15 +44,15 @@ class ShopifyService
                     'client_secret' => env('SHOPIFY_API_SECRET'),
 
                     'grant_type' =>
-                    'urn:ietf:params:oauth:grant-type:token-exchange',
+                        'urn:ietf:params:oauth:grant-type:token-exchange',
 
                     'subject_token' => $idToken,
 
                     'subject_token_type' =>
-                    'urn:ietf:params:oauth:token-type:id_token',
+                        'urn:ietf:params:oauth:token-type:id_token',
 
                     'requested_token_type' =>
-                    'urn:shopify:params:oauth:token-type:offline-access-token',
+                        'urn:shopify:params:oauth:token-type:offline-access-token',
 
                     'expiring' => 1,
                 ]
@@ -67,7 +67,7 @@ class ShopifyService
         if (!$response->successful()) {
             throw new \Exception(
                 'Shopify token exchange failed: ' .
-                    $response->body()
+                $response->body()
             );
         }
 
@@ -87,13 +87,13 @@ class ShopifyService
                 'access_token' => $data['access_token'],
 
                 'refresh_token' =>
-                $data['refresh_token'] ?? null,
+                    $data['refresh_token'] ?? null,
 
                 'scope' =>
-                $data['scope'] ?? null,
+                    $data['scope'] ?? null,
 
                 'access_token_expires_at' =>
-                isset($data['expires_in'])
+                    isset($data['expires_in'])
                     ? now()->addSeconds($data['expires_in'])
                     : null,
             ]
@@ -130,7 +130,7 @@ class ShopifyService
         if (!$response->successful()) {
             throw new \Exception(
                 'Shopify token refresh failed: ' .
-                    $response->body()
+                $response->body()
             );
         }
 
@@ -146,13 +146,13 @@ class ShopifyService
             'access_token' => $data['access_token'],
 
             'refresh_token' =>
-            $data['refresh_token'] ?? $shop->refresh_token,
+                $data['refresh_token'] ?? $shop->refresh_token,
 
             'scope' =>
-            $data['scope'] ?? $shop->scope,
+                $data['scope'] ?? $shop->scope,
 
             'access_token_expires_at' =>
-            isset($data['expires_in'])
+                isset($data['expires_in'])
                 ? now()->addSeconds($data['expires_in'])
                 : null,
         ]);
@@ -214,11 +214,11 @@ GRAPHQL;
             'X-Shopify-Access-Token' => $accessToken,
             'Content-Type' => 'application/json',
         ])->post(
-            "https://{$shop->shop_domain}/admin/api/2026-07/graphql.json",
-            [
-                'query' => $query,
-            ]
-        );
+                "https://{$shop->shop_domain}/admin/api/2026-07/graphql.json",
+                [
+                    'query' => $query,
+                ]
+            );
 
         if (!$checkResponse->successful()) {
             throw new \Exception(
@@ -280,17 +280,17 @@ GRAPHQL;
                 'X-Shopify-Access-Token' => $accessToken,
                 'Content-Type' => 'application/json',
             ])->post(
-                "https://{$shop->shop_domain}/admin/api/2026-07/graphql.json",
-                [
-                    'query' => $updateMutation,
-                    'variables' => [
-                        'id' => $existingWebhookToUpdate['id'],
-                        'webhookSubscription' => [
-                            'uri' => $webhookUrl,
+                    "https://{$shop->shop_domain}/admin/api/2026-07/graphql.json",
+                    [
+                        'query' => $updateMutation,
+                        'variables' => [
+                            'id' => $existingWebhookToUpdate['id'],
+                            'webhookSubscription' => [
+                                'uri' => $webhookUrl,
+                            ],
                         ],
-                    ],
-                ]
-            );
+                    ]
+                );
 
             if (!$updateResponse->successful()) {
                 throw new \Exception(
@@ -343,17 +343,17 @@ GRAPHQL;
             'X-Shopify-Access-Token' => $accessToken,
             'Content-Type' => 'application/json',
         ])->post(
-            "https://{$shop->shop_domain}/admin/api/2026-07/graphql.json",
-            [
-                'query' => $mutation,
-                'variables' => [
-                    'topic' => $topic,
-                    'webhookSubscription' => [
-                        'uri' => $webhookUrl,
+                "https://{$shop->shop_domain}/admin/api/2026-07/graphql.json",
+                [
+                    'query' => $mutation,
+                    'variables' => [
+                        'topic' => $topic,
+                        'webhookSubscription' => [
+                            'uri' => $webhookUrl,
+                        ],
                     ],
-                ],
-            ]
-        );
+                ]
+            );
 
         if (!$response->successful()) {
             throw new \Exception(
@@ -416,11 +416,11 @@ GRAPHQL;
             'X-Shopify-Access-Token' => $accessToken,
             'Content-Type' => 'application/json',
         ])->post(
-            "https://{$shop->shop_domain}/admin/api/2026-07/graphql.json",
-            [
-                'query' => $query,
-            ]
-        );
+                "https://{$shop->shop_domain}/admin/api/2026-07/graphql.json",
+                [
+                    'query' => $query,
+                ]
+            );
 
         if (!$response->successful()) {
             throw new \Exception('Failed to fetch Shopify locations: ' . $response->body());
@@ -443,8 +443,98 @@ GRAPHQL;
     }
 
     /**
+     * Retrieve current available inventory quantity for a specific InventoryItem ID and Location ID.
+     */
+    public function getCurrentAvailableQuantity(Shop $shop, string $inventoryItemId, string $locationId): ?int
+    {
+        $accessToken = $this->getValidAccessToken($shop);
+
+        $formattedInventoryItemId = str_starts_with($inventoryItemId, 'gid://')
+            ? $inventoryItemId
+            : "gid://shopify/InventoryItem/{$inventoryItemId}";
+
+        $formattedLocationId = str_starts_with($locationId, 'gid://')
+            ? $locationId
+            : "gid://shopify/Location/{$locationId}";
+
+        $query = <<<'GRAPHQL'
+query GetInventoryItemQuantity($id: ID!) {
+    inventoryItem(id: $id) {
+        id
+        inventoryLevels(first: 25) {
+            nodes {
+                location {
+                    id
+                }
+                quantities(names: ["available"]) {
+                    name
+                    quantity
+                }
+            }
+        }
+    }
+}
+GRAPHQL;
+
+        $response = Http::withHeaders([
+            'X-Shopify-Access-Token' => $accessToken,
+            'Content-Type' => 'application/json',
+        ])->post(
+                "https://{$shop->shop_domain}/admin/api/2026-07/graphql.json",
+                [
+                    'query' => $query,
+                    'variables' => [
+                        'id' => $formattedInventoryItemId,
+                    ],
+                ]
+            );
+
+        if (!$response->successful()) {
+            Log::error("getCurrentAvailableQuantity: HTTP request failed: " . $response->body());
+            return null;
+        }
+
+        $data = $response->json();
+
+        if (!empty($data['errors'])) {
+            Log::error("getCurrentAvailableQuantity: GraphQL error: " . json_encode($data['errors']));
+            return null;
+        }
+
+        $inventoryItem = $data['data']['inventoryItem'] ?? null;
+        if (!$inventoryItem) {
+            Log::warning("getCurrentAvailableQuantity: inventoryItem null for ID {$formattedInventoryItemId}");
+            return null;
+        }
+
+        $nodes = $inventoryItem['inventoryLevels']['nodes'] ?? [];
+
+        foreach ($nodes as $node) {
+            $nodeLocationId = $node['location']['id'] ?? '';
+            if ($nodeLocationId === $formattedLocationId) {
+                $quantities = $node['quantities'] ?? [];
+                foreach ($quantities as $q) {
+                    if (($q['name'] ?? '') === 'available' && isset($q['quantity'])) {
+                        return (int) $q['quantity'];
+                    }
+                }
+                if (isset($quantities[0]['quantity'])) {
+                    return (int) $quantities[0]['quantity'];
+                }
+            }
+        }
+
+        if (!empty($nodes) && isset($nodes[0]['quantities'][0]['quantity'])) {
+            return (int) $nodes[0]['quantities'][0]['quantity'];
+        }
+
+        return null;
+    }
+
+    /**
      * Update inventory quantity on Shopify for a specific InventoryItem ID.
      * Clamps quantity to max(0, $quantity) to prevent overselling.
+     * Uses compare-and-swap via changeFromQuantity and retries once on race conditions.
      */
     public function setInventoryQuantity(
         Shop $shop,
@@ -468,66 +558,105 @@ GRAPHQL;
             ? $targetLocationId
             : "gid://shopify/Location/{$targetLocationId}";
 
-        $mutation = <<<'GRAPHQL'
-mutation inventorySetQuantities($input: InventorySetQuantitiesInput!) {
-    inventorySetQuantities(input: $input) {
+        $maxAttempts = 2;
+        $attempt = 0;
+        $lastException = null;
+
+        while ($attempt < $maxAttempts) {
+            $attempt++;
+
+            $currentQuantity = $this->getCurrentAvailableQuantity($shop, $formattedInventoryItemId, $formattedLocationId);
+
+            if ($currentQuantity === null) {
+                throw new \Exception("Could not fetch current Shopify inventory quantity for item {$formattedInventoryItemId} at location {$formattedLocationId}.");
+            }
+
+            $mutation = <<<'GRAPHQL'
+mutation inventorySetQuantities(
+    $input: InventorySetQuantitiesInput!
+    $idempotencyKey: String!
+) {
+    inventorySetQuantities(input: $input) @idempotent(key: $idempotencyKey) {
         inventoryAdjustmentGroup {
             id
         }
         userErrors {
             field
             message
+            code
         }
     }
 }
 GRAPHQL;
 
-        $response = Http::withHeaders([
-            'X-Shopify-Access-Token' => $accessToken,
-            'Content-Type' => 'application/json',
-        ])->post(
-            "https://{$shop->shop_domain}/admin/api/2026-07/graphql.json",
-            [
-                'query' => $mutation,
-                'variables' => [
-                    'input' => [
-                        'reason' => 'correction',
-                        'name' => 'available',
-                        'ignoreCompareQuantity' => true,
-                        'quantities' => [
-                            [
-                                'inventoryItemId' => $formattedInventoryItemId,
-                                'locationId' => $formattedLocationId,
-                                'quantity' => $safeQuantity,
+            $response = Http::withHeaders([
+                'X-Shopify-Access-Token' => $accessToken,
+                'Content-Type' => 'application/json',
+            ])->post(
+                    "https://{$shop->shop_domain}/admin/api/2026-07/graphql.json",
+                    [
+                        'query' => $mutation,
+                        'variables' => [
+                            'input' => [
+                                'reason' => 'correction',
+                                'name' => 'available',
+                                'quantities' => [
+                                    [
+                                        'inventoryItemId' => $formattedInventoryItemId,
+                                        'locationId' => $formattedLocationId,
+                                        'quantity' => $safeQuantity,
+                                        'changeFromQuantity' => $currentQuantity,
+                                    ],
+                                ],
                             ],
+                            'idempotencyKey' => bin2hex(random_bytes(16)),
                         ],
-                    ],
-                ],
-            ]
-        );
+                    ]
+                );
 
-        if (!$response->successful()) {
-            throw new \Exception('Shopify inventory set quantities API request failed: ' . $response->body());
+            if (!$response->successful()) {
+                throw new \Exception('Shopify inventory set quantities API request failed: ' . $response->body());
+            }
+
+            $data = $response->json();
+
+            if (!empty($data['errors'])) {
+                throw new \Exception('Shopify GraphQL inventory update failed: ' . json_encode($data['errors']));
+            }
+
+            $result = $data['data']['inventorySetQuantities'] ?? [];
+            $userErrors = $result['userErrors'] ?? [];
+
+            if (!empty($userErrors)) {
+                $isCompareMismatch = false;
+                foreach ($userErrors as $uErr) {
+                    $msg = strtolower($uErr['message'] ?? '');
+                    $fieldStr = json_encode($uErr['field'] ?? []);
+                    if (str_contains($msg, 'changefromquantity') || str_contains($msg, 'compare') || str_contains($msg, 'mismatch') || str_contains($fieldStr, 'changeFromQuantity')) {
+                        $isCompareMismatch = true;
+                        break;
+                    }
+                }
+
+                if ($isCompareMismatch && $attempt < $maxAttempts) {
+                    Log::warning("setInventoryQuantity: compare-and-swap mismatch on attempt {$attempt} for item {$formattedInventoryItemId}. Retrying once...");
+                    continue;
+                }
+
+                throw new \Exception('Shopify inventory update user errors: ' . json_encode($userErrors));
+            }
+
+            return [
+                'success' => true,
+                'shopify_inventory_item_id' => $formattedInventoryItemId,
+                'location_id' => $formattedLocationId,
+                'quantity' => $safeQuantity,
+                'change_from_quantity' => $currentQuantity,
+                'response' => $data,
+            ];
         }
 
-        $data = $response->json();
-
-        if (!empty($data['errors'])) {
-            throw new \Exception('Shopify GraphQL inventory update failed: ' . json_encode($data['errors']));
-        }
-
-        $result = $data['data']['inventorySetQuantities'] ?? [];
-        if (!empty($result['userErrors'])) {
-            throw new \Exception('Shopify inventory update user errors: ' . json_encode($result['userErrors']));
-        }
-
-        return [
-            'success' => true,
-            'shopify_inventory_item_id' => $formattedInventoryItemId,
-            'location_id' => $formattedLocationId,
-            'quantity' => $safeQuantity,
-            'response' => $data,
-        ];
+        throw $lastException ?? new \Exception('Shopify inventory update failed after retry.');
     }
 
     /**
@@ -586,9 +715,9 @@ GRAPHQL;
             'X-Shopify-Access-Token' => $token,
             'Content-Type' => 'application/json',
         ])->post("https://{$shop->shop_domain}/admin/api/2026-07/graphql.json", [
-            'query' => $query,
-            'variables' => ['first' => $limit],
-        ]);
+                    'query' => $query,
+                    'variables' => ['first' => $limit],
+                ]);
 
         if (!$response->successful()) {
             Log::error('Failed to fetch Shopify orders via GraphQL', [
@@ -725,9 +854,9 @@ GRAPHQL;
             'X-Shopify-Access-Token' => $token,
             'Content-Type' => 'application/json',
         ])->post("https://{$shop->shop_domain}/admin/api/2026-07/graphql.json", [
-            'query' => $query,
-            'variables' => ['id' => $gid],
-        ]);
+                    'query' => $query,
+                    'variables' => ['id' => $gid],
+                ]);
 
         if (!$response->successful()) {
             Log::error("Failed to fetch Shopify order {$gid} via GraphQL", [
@@ -868,9 +997,9 @@ GRAPHQL;
             'X-Shopify-Access-Token' => $token,
             'Content-Type' => 'application/json',
         ])->post("https://{$shop->shop_domain}/admin/api/2026-07/graphql.json", [
-            'query' => $query,
-            'variables' => ['first' => $limit],
-        ]);
+                    'query' => $query,
+                    'variables' => ['first' => $limit],
+                ]);
 
         if (!$response->successful()) {
             Log::error('Failed to fetch Shopify customers via GraphQL', [

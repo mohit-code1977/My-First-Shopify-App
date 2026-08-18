@@ -5,10 +5,11 @@ const DATA_URL = "/api/zoho/sync";
 const BULK_SYNC_URL = "/zoho/sync-all";
 const INVENTORY_SYNC_URL = "/zoho/sync-inventory";
 
-export default function Sync({ shop, zohoConnected = false, host = "" }) {
+export default function Sync({ shop, zohoConnected = false, host = "", inventoryCapability = "unavailable" }) {
     const [loading, setLoading] = useState(true);
     const [shopData, setShopData] = useState(shop || {});
     const [connectedState, setConnectedState] = useState(zohoConnected);
+    const [capabilityState, setCapabilityState] = useState(inventoryCapability);
     const [direction, setDirection] = useState("shopify_to_zoho");
     const [syncingType, setSyncingType] = useState(null);
     const [notification, setNotification] = useState(null);
@@ -27,6 +28,7 @@ export default function Sync({ shop, zohoConnected = false, host = "" }) {
             if (response.ok && data.success) {
                 if (data.shop) setShopData(data.shop);
                 if (typeof data.zohoConnected === "boolean") setConnectedState(data.zohoConnected);
+                if (data.inventoryCapability) setCapabilityState(data.inventoryCapability);
             }
         } catch (error) {
             console.error("Failed to load sync data:", error);
@@ -99,9 +101,20 @@ export default function Sync({ shop, zohoConnected = false, host = "" }) {
             const data = await response.json();
 
             if (response.ok && data.success) {
-                setNotification({ type: "success", message: data.message || "Inventory stock levels synchronized successfully." });
+                const synced = data.synced ?? data.data?.synced ?? 0;
+                const failed = data.failed ?? data.data?.failed ?? 0;
+                const skipped = data.skipped ?? data.data?.skipped ?? 0;
+                const isWarning = skipped > 0 && synced === 0;
+                setNotification({
+                    type: isWarning ? "warning" : "success",
+                    message: `Bulk Zoho inventory sync complete! Synced: ${synced}, Failed: ${failed}, Skipped: ${skipped}`,
+                });
             } else {
-                setNotification({ type: "error", message: data.message || "Inventory sync failed." });
+                const isWarning = data.sync_available === false || data.item_inventory_tracked === false;
+                setNotification({
+                    type: isWarning ? "warning" : "error",
+                    message: data.reason || data.message || "Inventory sync failed.",
+                });
             }
         } catch (error) {
             setNotification({ type: "error", message: "Network error during inventory sync." });
@@ -127,9 +140,24 @@ export default function Sync({ shop, zohoConnected = false, host = "" }) {
                             borderRadius: "8px",
                             fontSize: "14px",
                             fontWeight: 500,
-                            backgroundColor: notification.type === "success" ? "#eafbdf" : "#fbeae8",
-                            color: notification.type === "success" ? "#108043" : "#d72c0d",
-                            border: notification.type === "success" ? "1px solid #b7eb8f" : "1px solid #f3baba",
+                            backgroundColor:
+                                notification.type === "success"
+                                    ? "#eafbdf"
+                                    : notification.type === "warning"
+                                    ? "#fff8e6"
+                                    : "#fbeae8",
+                            color:
+                                notification.type === "success"
+                                    ? "#108043"
+                                    : notification.type === "warning"
+                                    ? "#744210"
+                                    : "#d72c0d",
+                            border:
+                                notification.type === "success"
+                                    ? "1px solid #b7eb8f"
+                                    : notification.type === "warning"
+                                    ? "1px solid #fbd38d"
+                                    : "1px solid #f3baba",
                             display: "flex",
                             justifyContent: "space-between",
                             alignItems: "center",
@@ -305,13 +333,60 @@ export default function Sync({ shop, zohoConnected = false, host = "" }) {
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: "20px" }}>
                         {/* INVENTORY SYNC CARD */}
                         <div style={{ backgroundColor: "#ffffff", borderRadius: "10px", padding: "24px", border: "1px solid #e1e3e5", boxShadow: "0 1px 2px rgba(0,0,0,0.05)" }}>
-                            <div style={{ fontSize: "32px", marginBottom: "12px" }}>📊</div>
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                                <div style={{ fontSize: "32px", marginBottom: "12px" }}>📊</div>
+                                <span
+                                    style={{
+                                        fontSize: "12px",
+                                        fontWeight: 600,
+                                        padding: "4px 8px",
+                                        borderRadius: "12px",
+                                        backgroundColor:
+                                            capabilityState === "zoho_inventory" || capabilityState === "zoho_erp"
+                                                ? "#eafbdf"
+                                                : capabilityState === "books_native"
+                                                ? "#fff8e6"
+                                                : "#fbeae8",
+                                        color:
+                                            capabilityState === "zoho_inventory" || capabilityState === "zoho_erp"
+                                                ? "#108043"
+                                                : capabilityState === "books_native"
+                                                ? "#b7791f"
+                                                : "#d72c0d",
+                                        border:
+                                            capabilityState === "zoho_inventory" || capabilityState === "zoho_erp"
+                                                ? "1px solid #b7eb8f"
+                                                : capabilityState === "books_native"
+                                                ? "1px solid #fbd38d"
+                                                : "1px solid #f3baba",
+                                    }}
+                                >
+                                    {capabilityState === "zoho_inventory" && "Available (Zoho Inventory API)"}
+                                    {capabilityState === "zoho_erp" && "Available (Zoho ERP API)"}
+                                    {capabilityState === "books_native" && "Requires Zoho Inventory/ERP"}
+                                    {capabilityState === "unavailable" && "Unavailable"}
+                                </span>
+                            </div>
+
                             <h3 style={{ fontSize: "16px", fontWeight: 700, color: "#1a1d20", margin: 0 }}>
                                 Inventory Stock Levels
                             </h3>
-                            <p style={{ fontSize: "13px", color: "#616a75", margin: "8px 0 20px 0", lineHeight: "1.4" }}>
+                            <p style={{ fontSize: "13px", color: "#616a75", margin: "8px 0 16px 0", lineHeight: "1.4" }}>
                                 Synchronize stock quantities between Zoho Books inventory adjustments and Shopify inventory levels.
                             </p>
+
+                            {capabilityState === "books_native" && (
+                                <div style={{ padding: "10px 12px", borderRadius: "6px", backgroundColor: "#fff8e6", border: "1px solid #fbd38d", fontSize: "12px", color: "#744210", marginBottom: "16px", lineHeight: "1.4" }}>
+                                    <strong>Notice:</strong> Automatic inventory adjustment requires Zoho Inventory/ERP API access. Zoho Books native inventory adjustments are available in the UI but are not exposed through the current documented Books REST API.
+                                </div>
+                            )}
+
+                            {capabilityState === "unavailable" && (
+                                <div style={{ padding: "10px 12px", borderRadius: "6px", backgroundColor: "#fbeae8", border: "1px solid #f3baba", fontSize: "12px", color: "#9b2c2c", marginBottom: "16px", lineHeight: "1.4" }}>
+                                    <strong>Unavailable:</strong> Zoho inventory endpoints are unavailable or permission is disabled for this organization.
+                                </div>
+                            )}
+
                             <button
                                 type="button"
                                 onClick={handleInventorySync}
@@ -321,14 +396,14 @@ export default function Sync({ shop, zohoConnected = false, host = "" }) {
                                     padding: "10px",
                                     borderRadius: "6px",
                                     border: "none",
-                                    backgroundColor: "#005bd3",
+                                    backgroundColor: capabilityState === "books_native" ? "#616a75" : "#005bd3",
                                     color: "#ffffff",
                                     fontSize: "13px",
                                     fontWeight: 600,
                                     cursor: syncingType === "inventory" ? "wait" : "pointer",
                                 }}
                             >
-                                {syncingType === "inventory" ? "Syncing Stock..." : "Run Inventory Stock Sync"}
+                                {syncingType === "inventory" ? "Syncing Stock..." : "Sync All Zoho Inventory"}
                             </button>
                         </div>
                     </div>
