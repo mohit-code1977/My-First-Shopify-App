@@ -98,6 +98,7 @@ export default function ZohoLayout({
             <ui-nav-menu>
                 <a href={`/zoho/products${queryString}`}>Products</a>
                 <a href={`/zoho/orders${queryString}`}>Orders &amp; Invoices</a>
+                <a href={`/zoho/refunds${queryString}`}>Refunds &amp; Credit Notes</a>
                 <a href={`/zoho/customers${queryString}`}>Customers</a>
                 <a href={`/zoho/sync/history${queryString}`}>Sync History</a>
                 <a href={`/zoho/settings${queryString}`}>Settings</a>

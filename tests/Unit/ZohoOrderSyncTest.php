@@ -3,6 +3,7 @@
 namespace Tests\Unit;
 
 use App\Models\Customer;
+use App\Models\Invoice;
 use App\Models\Order;
 use App\Models\Product;
 use App\Models\ProductVariant;
@@ -15,7 +16,8 @@ use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 
-class ZohoOrderSyncTest extends TestCase {
+class ZohoOrderSyncTest extends TestCase
+{
     use RefreshDatabase;
 
     private Shop $shop;
@@ -23,7 +25,8 @@ class ZohoOrderSyncTest extends TestCase {
     private ProductVariant $variant1;
     private ProductVariant $variant2;
 
-    protected function setUp(): void {
+    protected function setUp(): void
+    {
         parent::setUp();
 
         $this->shop = Shop::create([
@@ -82,11 +85,13 @@ class ZohoOrderSyncTest extends TestCase {
         ]);
     }
 
-    private function calculateHmac(string $payload, string $secret): string {
+    private function calculateHmac(string $payload, string $secret): string
+    {
         return base64_encode(hash_hmac('sha256', $payload, $secret, true));
     }
 
-    public function test_order_creation_in_zoho_books() {
+    public function test_order_creation_in_zoho_books()
+    {
         $order = Order::create([
             'shop_id' => $this->shop->id,
             'customer_id' => $this->customer->id,
@@ -158,7 +163,8 @@ class ZohoOrderSyncTest extends TestCase {
         });
     }
 
-    public function test_order_update_modifies_existing_zoho_sales_order() {
+    public function test_order_update_modifies_existing_zoho_sales_order()
+    {
         $order = Order::create([
             'shop_id' => $this->shop->id,
             'customer_id' => $this->customer->id,
@@ -208,7 +214,8 @@ class ZohoOrderSyncTest extends TestCase {
         });
     }
 
-    public function test_order_sync_fails_on_unmapped_variant() {
+    public function test_order_sync_fails_on_unmapped_variant()
+    {
         $order = Order::create([
             'shop_id' => $this->shop->id,
             'customer_id' => $this->customer->id,
@@ -236,7 +243,8 @@ class ZohoOrderSyncTest extends TestCase {
         $zohoService->syncOrder($order);
     }
 
-    public function test_order_webhook_creates_and_syncs_order() {
+    public function test_order_webhook_creates_and_syncs_order()
+    {
         config(['services.shopify.api_secret' => 'test_secret']);
 
         Http::fake([
@@ -313,7 +321,8 @@ class ZohoOrderSyncTest extends TestCase {
         ]);
     }
 
-    public function test_order_webhook_idempotency() {
+    public function test_order_webhook_idempotency()
+    {
         config(['services.shopify.api_secret' => 'test_secret']);
 
         Http::fake([
@@ -372,7 +381,8 @@ class ZohoOrderSyncTest extends TestCase {
         $response2->assertJson(['message' => 'Webhook already processed.']);
     }
 
-    public function test_new_order_create_webhook_creates_local_order_and_zoho_sales_order() {
+    public function test_new_order_create_webhook_creates_local_order_and_zoho_sales_order()
+    {
         config(['services.shopify.api_secret' => 'test_secret']);
 
         Http::fake([
@@ -449,7 +459,8 @@ class ZohoOrderSyncTest extends TestCase {
         ]);
     }
 
-    public function test_duplicate_order_create_webhook_does_not_create_duplicates() {
+    public function test_duplicate_order_create_webhook_does_not_create_duplicates()
+    {
         config(['services.shopify.api_secret' => 'test_secret']);
 
         Http::fake([
@@ -510,7 +521,8 @@ class ZohoOrderSyncTest extends TestCase {
         $this->assertEquals(1, Order::where('shopify_order_id', 'gid://shopify/Order/8889')->count());
     }
 
-    public function test_order_tenant_isolation() {
+    public function test_order_tenant_isolation()
+    {
         config(['services.shopify.api_secret' => 'test_secret']);
 
         $otherShop = Shop::create([
@@ -547,7 +559,8 @@ class ZohoOrderSyncTest extends TestCase {
         ]);
     }
 
-    public function test_fetch_orders_success() {
+    public function test_fetch_orders_success()
+    {
         Http::fake([
             'https://order-test.myshopify.com/admin/api/2026-07/graphql.json*' => Http::response([
                 'data' => [
@@ -578,7 +591,8 @@ class ZohoOrderSyncTest extends TestCase {
         $this->assertNull($orders[0]['customer']['phone']);
     }
 
-    public function test_fetch_orders_failure_throws_exception() {
+    public function test_fetch_orders_failure_throws_exception()
+    {
         Http::fake([
             'https://order-test.myshopify.com/admin/api/2026-07/graphql.json*' => Http::response([
                 'errors' => '[API] Access denied',
@@ -589,4 +603,146 @@ class ZohoOrderSyncTest extends TestCase {
         $this->expectException(\Exception::class);
         $shopifyService->fetchOrders($this->shop);
     }
+
+    public function test_sync_cancelled_order_voids_zoho_sales_order_and_invoice()
+    {
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/salesorders/zoho_so_999/status/void*' => Http::response([
+                'code' => 0,
+                'message' => 'The sales order has been voided.',
+                'salesorder' => ['salesorder_id' => 'zoho_so_999', 'status' => 'void'],
+            ], 200),
+            'https://www.zohoapis.com/books/v3/invoices/zoho_inv_999/status/void*' => Http::response([
+                'code' => 0,
+                'message' => 'The invoice has been voided.',
+                'invoice' => ['invoice_id' => 'zoho_inv_999', 'status' => 'void'],
+            ], 200),
+        ]);
+
+        $order = Order::create([
+            'shop_id' => $this->shop->id,
+            'customer_id' => $this->customer->id,
+            'shopify_order_id' => '99999',
+            'order_number' => '#ORD-999',
+            'zoho_sales_order_id' => 'zoho_so_999',
+            'financial_status' => 'voided',
+            'fulfillment_status' => 'unfulfilled',
+            'order_date' => now(),
+            'currency' => 'USD',
+            'subtotal' => 100.00,
+            'total_price' => 100.00,
+            'line_items' => [],
+        ]);
+
+        Invoice::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $order->id,
+            'shopify_order_id' => '99999',
+            'zoho_invoice_id' => 'zoho_inv_999',
+            'invoice_number' => 'INV-999',
+            'status' => 'sent',
+            'amount' => 100.00,
+            'currency' => 'USD',
+            'sync_status' => 'synced',
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $orderRes = $zohoService->syncOrder($order);
+        $invRes = $zohoService->syncInvoice($order);
+
+        $this->assertTrue($orderRes['success']);
+        $this->assertTrue($orderRes['voided']);
+        $this->assertTrue($invRes['success']);
+        $this->assertTrue($invRes['voided']);
+
+        $invoice = Invoice::find($order->id);
+        $this->assertEquals('void', Invoice::where('order_id', $order->id)->first()->status);
+
+        Http::assertSent(function (\Illuminate\Http\Client\Request $request) {
+            return str_contains($request->url(), '/books/v3/salesorders/zoho_so_999/status/void');
+        });
+        Http::assertSent(function (\Illuminate\Http\Client\Request $request) {
+            return str_contains($request->url(), '/books/v3/invoices/zoho_inv_999/status/void');
+        });
+    }
+
+    public function test_sync_fulfilled_order_marks_zoho_sales_order_as_fulfilled()
+    {
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/salesorders/zoho_so_888*' => Http::response([
+                'code' => 0,
+                'salesorder' => ['salesorder_id' => 'zoho_so_888', 'salesorder_number' => 'SO-888'],
+            ], 200),
+            'https://www.zohoapis.com/books/v3/salesorders/zoho_so_888/status/fulfilled*' => Http::response([
+                'code' => 0,
+                'message' => 'Sales order status marked as fulfilled.',
+                'salesorder' => ['salesorder_id' => 'zoho_so_888', 'status' => 'fulfilled'],
+            ], 200),
+        ]);
+
+        $order = Order::create([
+            'shop_id' => $this->shop->id,
+            'customer_id' => $this->customer->id,
+            'shopify_order_id' => '88888',
+            'order_number' => '#ORD-888',
+            'zoho_sales_order_id' => 'zoho_so_888',
+            'financial_status' => 'paid',
+            'fulfillment_status' => 'fulfilled',
+            'order_date' => now(),
+            'currency' => 'USD',
+            'subtotal' => 150.00,
+            'total_price' => 150.00,
+            'line_items' => [
+                ['variant_id' => $this->variant1->shopify_variant_id, 'quantity' => 1, 'price' => '150.00'],
+            ],
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $res = $zohoService->syncOrder($order);
+
+        $this->assertTrue($res['success']);
+
+        Http::assertSent(function (\Illuminate\Http\Client\Request $request) {
+            return str_contains($request->url(), '/books/v3/salesorders/zoho_so_888/status/fulfilled');
+        });
+    }
+
+    public function test_mark_sales_order_as_fulfilled_sends_valid_json_object_body()
+    {
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/salesorders/zoho_so_json_check/status/fulfilled*' => Http::response([
+                'code' => 0,
+                'message' => 'Status marked as fulfilled',
+                'salesorder' => ['salesorder_id' => 'zoho_so_json_check', 'status' => 'fulfilled'],
+            ], 200),
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->markSalesOrderAsFulfilled('zoho_so_json_check');
+
+        $this->assertEquals('fulfilled', $result['status'] ?? null);
+
+        Http::assertSent(function (\Illuminate\Http\Client\Request $request) {
+            return $request->method() === 'POST' &&
+                str_contains($request->url(), '/books/v3/salesorders/zoho_so_json_check/status/fulfilled') &&
+                $request->body() === '{}';
+        });
+    }
+
+    public function test_mark_sales_order_as_fulfilled_handles_already_fulfilled_idempotently()
+    {
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/salesorders/zoho_so_already_fulfilled/status/fulfilled*' => Http::response([
+                'code' => 100001,
+                'message' => 'The sales order status is already fulfilled.',
+            ], 400),
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->markSalesOrderAsFulfilled('zoho_so_already_fulfilled');
+
+        $this->assertEquals('zoho_so_already_fulfilled', $result['salesorder_id']);
+        $this->assertEquals('fulfilled', $result['status']);
+    }
 }
+

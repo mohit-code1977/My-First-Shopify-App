@@ -409,4 +409,77 @@ class ZohoInvoiceSyncTest extends TestCase {
             'order_id' => $failedOrder->id,
         ]);
     }
+
+    public function test_sent_invoice_update_includes_reason_query_parameter_and_body_field()
+    {
+        $invoice = Invoice::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $this->order->id,
+            'shopify_order_id' => $this->order->shopify_order_id,
+            'zoho_invoice_id' => 'zoho_inv_sent_777',
+            'invoice_number' => 'INV-00777',
+            'status' => 'sent',
+            'amount' => '110.00',
+        ]);
+
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/invoices/zoho_inv_sent_777*' => Http::response([
+                'code' => 0,
+                'message' => 'Invoice updated',
+                'invoice' => [
+                    'invoice_id' => 'zoho_inv_sent_777',
+                    'status' => 'sent',
+                ],
+            ], 200),
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncInvoice($this->order);
+
+        $this->assertTrue($result['success']);
+        $this->assertTrue($result['updated']);
+
+        Http::assertSent(function (Request $request) {
+            return $request->method() === 'PUT' &&
+                str_contains($request->url(), '/books/v3/invoices/zoho_inv_sent_777') &&
+                str_contains(urldecode($request->url()), 'reason=Shopify order status update') &&
+                str_contains($request->url(), 'organization_id=12345678') &&
+                ($request->data()['reason'] ?? null) === 'Shopify order status update';
+        });
+    }
+
+    public function test_unsent_invoice_update_works_normally()
+    {
+        $invoice = Invoice::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $this->order->id,
+            'shopify_order_id' => $this->order->shopify_order_id,
+            'zoho_invoice_id' => 'zoho_inv_draft_888',
+            'invoice_number' => 'INV-00888',
+            'status' => 'draft',
+            'amount' => '110.00',
+        ]);
+
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/invoices/zoho_inv_draft_888*' => Http::response([
+                'code' => 0,
+                'message' => 'Invoice updated',
+                'invoice' => [
+                    'invoice_id' => 'zoho_inv_draft_888',
+                    'status' => 'draft',
+                ],
+            ], 200),
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncInvoice($this->order);
+
+        $this->assertTrue($result['success']);
+        $this->assertTrue($result['updated']);
+
+        Http::assertSent(function (Request $request) {
+            return $request->method() === 'PUT' &&
+                str_contains($request->url(), '/books/v3/invoices/zoho_inv_draft_888');
+        });
+    }
 }

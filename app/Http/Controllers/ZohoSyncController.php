@@ -72,6 +72,10 @@ class ZohoSyncController extends Controller {
                 ?? Shop::first();
         }
 
+        if ($shop) {
+            $this->shopifyService->ensureWebhooksRegistered($shop);
+        }
+
         return $shop;
     }
 
@@ -197,7 +201,7 @@ class ZohoSyncController extends Controller {
         $orders = [];
 
         if ($shopModel) {
-            $orders = Order::with(['customer', 'invoice', 'payments'])
+            $orders = Order::with(['customer', 'invoice', 'payments', 'refunds'])
                 ->where('shop_id', $shopModel->id)
                 ->latest()
                 ->take(50)
@@ -267,6 +271,25 @@ class ZohoSyncController extends Controller {
 
         return Inertia::render('Zoho/Orders', array_merge($context, [
             'orders' => $orders,
+        ]));
+    }
+
+    public function refunds(Request $request)
+    {
+        $context = $this->resolveShopContext($request);
+        $shopModel = $this->resolveShopModel($request);
+        $refunds = [];
+
+        if ($shopModel) {
+            $refunds = \App\Models\Refund::with(['order.customer'])
+                ->where('shop_id', $shopModel->id)
+                ->latest()
+                ->take(50)
+                ->get();
+        }
+
+        return Inertia::render('Zoho/Refunds', array_merge($context, [
+            'refunds' => $refunds,
         ]));
     }
 
@@ -396,7 +419,7 @@ class ZohoSyncController extends Controller {
             ], 404);
         }
 
-        $orders = Order::with(['customer', 'invoice', 'payments'])
+        $orders = Order::with(['customer', 'invoice', 'payments', 'refunds'])
             ->where('shop_id', $shop->id)
             ->latest()
             ->take(50)
@@ -473,6 +496,65 @@ class ZohoSyncController extends Controller {
             ],
             'orders' => $orders,
             'zohoConnected' => $zohoConnection !== null,
+        ]);
+    }
+
+    public function refundsData(Request $request): JsonResponse
+    {
+        $shop = $request->attributes->get('shop') ?? $this->resolveShopModel($request);
+
+        if (!$shop) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No Shopify shop installed.',
+            ], 404);
+        }
+
+        $refunds = \App\Models\Refund::with(['order.customer'])
+            ->where('shop_id', $shop->id)
+            ->latest()
+            ->take(50)
+            ->get();
+
+        $zohoConnection = $shop->zohoConnection;
+
+        return response()->json([
+            'success' => true,
+            'shop' => [
+                'id' => $shop->id,
+                'shop_domain' => $shop->shop_domain,
+            ],
+            'refunds' => $refunds,
+            'zohoConnected' => $zohoConnection !== null,
+        ]);
+    }
+
+    public function refundDetail(Request $request, $id): JsonResponse
+    {
+        $shop = $request->attributes->get('shop') ?? $this->resolveShopModel($request);
+
+        if (!$shop) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No Shopify shop installed.',
+            ], 404);
+        }
+
+        $refund = \App\Models\Refund::with(['order.customer', 'syncHistories'])
+            ->where('shop_id', $shop->id)
+            ->where('id', $id)
+            ->first();
+
+        if (!$refund) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Refund record not found.',
+            ], 404);
+        }
+
+        return response()->json([
+            'success' => true,
+            'refund' => $refund,
         ]);
     }
 
@@ -1638,5 +1720,58 @@ GRAPHQL;
             'success' => true,
             'message' => 'Zoho disconnected successfully.',
         ]);
+    }
+
+    public function syncRefund(Request $request): JsonResponse
+    {
+        $shop = $request->attributes->get('shop') ?? $this->resolveShopModel($request);
+
+        if (!$shop) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No Shopify shop installed.',
+            ], 404);
+        }
+
+        if (!$shop->zohoConnection) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Zoho is not connected.',
+            ], 409);
+        }
+
+        $validated = $request->validate([
+            'refund_id' => ['nullable', 'integer'],
+            'order_id' => ['nullable', 'integer'],
+        ]);
+
+        try {
+            $refund = null;
+            if (!empty($validated['refund_id'])) {
+                $refund = \App\Models\Refund::where('shop_id', $shop->id)->find($validated['refund_id']);
+            } elseif (!empty($validated['order_id'])) {
+                $refund = \App\Models\Refund::where('shop_id', $shop->id)
+                    ->where('order_id', $validated['order_id'])
+                    ->latest()
+                    ->first();
+            }
+
+            if (!$refund) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Refund record not found.',
+                ], 404);
+            }
+
+            $zohoService = new ZohoService($shop);
+            $result = $zohoService->syncRefund($refund);
+
+            return response()->json($result);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Refund sync failed: ' . $e->getMessage(),
+            ], 500);
+        }
     }
 }

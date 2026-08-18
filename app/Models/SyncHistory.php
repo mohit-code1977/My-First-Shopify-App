@@ -11,11 +11,13 @@ class SyncHistory extends Model {
         'order_id',
         'invoice_id',
         'payment_id',
+        'refund_id',
         'action',
         'status',
         'zoho_item_id',
         'zoho_invoice_id',
         'zoho_payment_id',
+        'zoho_creditnote_id',
         'message',
         'synced_at',
     ];
@@ -42,5 +44,9 @@ class SyncHistory extends Model {
 
     public function payment() {
         return $this->belongsTo(Payment::class);
+    }
+
+    public function refund() {
+        return $this->belongsTo(Refund::class);
     }
 }

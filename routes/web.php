@@ -42,6 +42,9 @@ Route::get('/zoho/sync', [ZohoSyncController::class, 'sync'])
 Route::get('/zoho/orders', [ZohoSyncController::class, 'orders'])
     ->name('zoho.orders');
 
+Route::get('/zoho/refunds', [ZohoSyncController::class, 'refunds'])
+    ->name('zoho.refunds');
+
 Route::get('/zoho/customers', [ZohoSyncController::class, 'customers'])
     ->name('zoho.customers');
 
@@ -55,6 +58,8 @@ Route::middleware(['shopify.auth'])->group(function () {
     Route::post('/api/zoho/connect', [ZohoAuthController::class, 'initiate']);
     Route::get('/api/zoho/sync', [ZohoSyncController::class, 'data']);
     Route::get('/api/zoho/orders', [ZohoSyncController::class, 'ordersData']);
+    Route::get('/api/zoho/refunds', [ZohoSyncController::class, 'refundsData']);
+    Route::get('/api/zoho/refunds/{id}', [ZohoSyncController::class, 'refundDetail']);
     Route::get('/api/zoho/customers', [ZohoSyncController::class, 'customersData']);
     Route::get('/api/zoho/sync/history', [ZohoSyncController::class, 'historyData']);
     Route::get('/api/zoho/settings', [ZohoSyncController::class, 'settingsData']);
@@ -82,6 +87,9 @@ Route::middleware(['shopify.auth'])->group(function () {
     Route::post('/zoho/sync-payment', [ZohoSyncController::class, 'syncPayment'])
         ->name('zoho.sync.payment');
 
+    Route::post('/zoho/sync-refund', [ZohoSyncController::class, 'syncRefund'])
+        ->name('zoho.sync.refund');
+
     Route::post('/zoho/settings/payment-gateways', [ZohoSyncController::class, 'savePaymentSettings'])
         ->name('zoho.settings.payment-gateways');
 
@@ -105,6 +113,9 @@ Route::post('/webhooks/orders', [ShopifyWebhookController::class, 'ordersUpdate'
 
 Route::post('/webhooks/order-transactions', [ShopifyWebhookController::class, 'orderTransactionsCreate'])
     ->name('shopify.webhooks.order_transactions');
+
+Route::post('/webhooks/refunds', [ShopifyWebhookController::class, 'refundsCreate'])
+    ->name('shopify.webhooks.refunds');
 
 Route::post('/webhooks/zoho/inventory', [ZohoWebhookController::class, 'inventoryUpdate'])
     ->name('zoho.webhooks.inventory');

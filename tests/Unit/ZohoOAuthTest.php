@@ -67,6 +67,8 @@ class ZohoOAuthTest extends TestCase
         $this->assertStringContainsString('ZohoBooks.settings.READ', $content['redirect_url']);
         $this->assertStringContainsString('ZohoBooks.customerpayments.READ', $content['redirect_url']);
         $this->assertStringContainsString('ZohoBooks.customerpayments.CREATE', $content['redirect_url']);
+        $this->assertStringContainsString('ZohoBooks.creditnotes.READ', $content['redirect_url']);
+        $this->assertStringContainsString('ZohoBooks.creditnotes.CREATE', $content['redirect_url']);
         $this->assertStringContainsString('ZohoInventory.settings.READ', $content['redirect_url']);
         $this->assertStringContainsString('ZohoInventory.items.READ', $content['redirect_url']);
         $this->assertStringContainsString('ZohoInventory.inventoryadjustments.READ', $content['redirect_url']);

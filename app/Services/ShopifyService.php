@@ -792,6 +792,31 @@ GRAPHQL;
     }
 
     /**
+     * Fetch a single order by Shopify Order ID (numeric or GID) via REST API.
+     */
+    public function fetchOrderById(Shop $shop, string $orderId): ?array
+    {
+        $numericId = preg_replace('/^gid:\/\/shopify\/Order\//', '', $orderId);
+        $token = $this->getValidAccessToken($shop);
+
+        $response = Http::withHeaders([
+            'X-Shopify-Access-Token' => $token,
+            'Content-Type' => 'application/json',
+        ])->get("https://{$shop->shop_domain}/admin/api/2026-07/orders/{$numericId}.json");
+
+        if ($response->successful()) {
+            return $response->json('order');
+        }
+
+        Log::warning("fetchOrderById: Failed to fetch order {$numericId} for shop {$shop->shop_domain}", [
+            'status' => $response->status(),
+            'body' => $response->body(),
+        ]);
+
+        return null;
+    }
+
+    /**
      * Fetch a single order by ID from Shopify Admin GraphQL API and sync it locally & to Zoho.
      */
     public function fetchAndSyncOrder(Shop $shop, string $orderId): ?Order
@@ -1092,19 +1117,34 @@ GRAPHQL;
     }
 
     /**
-     * Register all order-related webhooks (orders/create, orders/updated, order_transactions/create).
+     * Register refunds/create webhook.
+     */
+    public function registerRefundCreateWebhook(Shop $shop): array
+    {
+        return $this->registerWebhookSubscription(
+            $shop,
+            'REFUNDS_CREATE',
+            '/webhooks/refunds',
+            'Refund create'
+        );
+    }
+
+    /**
+     * Register all order-related webhooks (orders/create, orders/updated, order_transactions/create, refunds/create).
      */
     public function registerOrderWebhooks(Shop $shop): array
     {
         $createResult = $this->registerOrderCreateWebhook($shop);
         $updateResult = $this->registerOrderUpdateWebhook($shop);
         $txnResult = $this->registerOrderTransactionCreateWebhook($shop);
+        $refundResult = $this->registerRefundCreateWebhook($shop);
 
         return [
-            'success' => ($createResult['success'] ?? false) && ($updateResult['success'] ?? false) && ($txnResult['success'] ?? false),
+            'success' => ($createResult['success'] ?? false) && ($updateResult['success'] ?? false) && ($txnResult['success'] ?? false) && ($refundResult['success'] ?? false),
             'create' => $createResult,
             'update' => $updateResult,
             'transaction' => $txnResult,
+            'refund' => $refundResult,
         ];
     }
 
@@ -1119,6 +1159,7 @@ GRAPHQL;
         $orderCreateResult = $this->registerOrderCreateWebhook($shop);
         $orderUpdateResult = $this->registerOrderUpdateWebhook($shop);
         $txnResult = $this->registerOrderTransactionCreateWebhook($shop);
+        $refundResult = $this->registerRefundCreateWebhook($shop);
 
         return [
             'success' => ($productResult['success'] ?? false)
@@ -1126,14 +1167,34 @@ GRAPHQL;
                 && ($customerResult['success'] ?? false)
                 && ($orderCreateResult['success'] ?? false)
                 && ($orderUpdateResult['success'] ?? false)
-                && ($txnResult['success'] ?? false),
+                && ($txnResult['success'] ?? false)
+                && ($refundResult['success'] ?? false),
             'product' => $productResult,
             'inventory' => $inventoryResult,
             'customer' => $customerResult,
             'order_create' => $orderCreateResult,
             'order_update' => $orderUpdateResult,
             'transaction' => $txnResult,
+            'refund' => $refundResult,
         ];
+    }
+
+    /**
+     * Ensure all webhooks are registered for a shop, cached per shop & app URL.
+     */
+    public function ensureWebhooksRegistered(Shop $shop): array
+    {
+        $appUrl = env('SHOPIFY_APP_URL', '');
+        $cacheKey = 'shopify_webhooks_registered_' . $shop->id . '_' . md5($appUrl);
+
+        return \Illuminate\Support\Facades\Cache::remember($cacheKey, 3600, function () use ($shop) {
+            try {
+                return $this->registerAllWebhooks($shop);
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::error("ensureWebhooksRegistered failed for shop {$shop->shop_domain}: " . $e->getMessage());
+                return ['success' => false, 'error' => $e->getMessage()];
+            }
+        });
     }
 }
 

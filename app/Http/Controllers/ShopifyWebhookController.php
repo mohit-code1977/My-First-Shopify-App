@@ -10,20 +10,23 @@ use App\Models\ProductVariant;
 use App\Models\Shop;
 use App\Models\ShopifyProcessedWebhook;
 use App\Services\ZohoService;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 
-class ShopifyWebhookController extends Controller {
+class ShopifyWebhookController extends Controller
+{
     /**
      * Handle Shopify products/update webhook.
      */
-    public function productsUpdate(Request $request) {
+    public function productsUpdate(Request $request)
+    {
         Log::info('Shopify products/update webhook received', [
-    'shop' => $request->header('X-Shopify-Shop-Domain'),
-    'webhook_id' => $request->header('X-Shopify-Webhook-Id'),
-    'topic' => $request->header('X-Shopify-Topic'),
-    'payload' => $request->getContent(),
-]);
+            'shop' => $request->header('X-Shopify-Shop-Domain'),
+            'webhook_id' => $request->header('X-Shopify-Webhook-Id'),
+            'topic' => $request->header('X-Shopify-Topic'),
+            'payload' => $request->getContent(),
+        ]);
         /*
         |--------------------------------------------------------------------------
         | 1. Verify HMAC Signature
@@ -712,6 +715,11 @@ class ShopifyWebhookController extends Controller {
 
         $couponCode = !empty($payload['discount_codes'][0]['code']) ? $payload['discount_codes'][0]['code'] : null;
 
+        $financialStatus = $payload['financial_status'] ?? null;
+        if (!empty($payload['cancelled_at']) && !in_array(strtolower((string) $financialStatus), ['voided', 'cancelled', 'refunded'], true)) {
+            $financialStatus = 'cancelled';
+        }
+
         $order = Order::updateOrCreate(
             [
                 'shop_id' => $shop->id,
@@ -727,7 +735,7 @@ class ShopifyWebhookController extends Controller {
                 'shipping_total' => $shippingTotal,
                 'tax_total' => $taxTotal,
                 'total_price' => $totalPrice,
-                'financial_status' => $payload['financial_status'] ?? null,
+                'financial_status' => $financialStatus,
                 'fulfillment_status' => $payload['fulfillment_status'] ?? null,
                 'line_items' => $lineItems,
                 'notes' => $payload['note'] ?? null,
@@ -1039,6 +1047,254 @@ class ShopifyWebhookController extends Controller {
             'zoho_synced' => $synced,
             'error' => $syncError,
         ], 200);
+    }
+
+    /**
+     * Webhook Endpoint: refunds/create
+     */
+    public function refundsCreate(Request $request): JsonResponse
+    {
+        $hmacHeader = $request->header('X-Shopify-Hmac-Sha256') ?? $request->header('X-Shopify-Hmac-SHA256');
+
+        if (!empty($hmacHeader)) {
+            $secret = config('services.shopify.api_secret') ?? env('SHOPIFY_API_SECRET') ?? config('shopify-app.api_secret');
+            if ($secret) {
+                $calculatedHmac = base64_encode(hash_hmac('sha256', $request->getContent(), $secret, true));
+                if (!hash_equals($calculatedHmac, $hmacHeader)) {
+                    Log::warning('refundsCreate: Invalid HMAC signature.');
+                    return response()->json(['error' => 'Invalid HMAC signature'], 401);
+                }
+            }
+        }
+
+        $shopDomain = $request->header('X-Shopify-Shop-Domain');
+        $shop = Shop::where('shop_domain', $shopDomain)->first();
+
+        if (!$shop) {
+            Log::warning("refundsCreate: Shop not found for domain '{$shopDomain}'.");
+            return response()->json(['error' => 'Shop not found'], 404);
+        }
+
+        $webhookId = $request->header('X-Shopify-Webhook-Id');
+        if ($webhookId) {
+            $alreadyProcessed = ShopifyProcessedWebhook::where('webhook_id', $webhookId)->exists();
+            if ($alreadyProcessed) {
+                Log::info("refundsCreate: Duplicate webhook received ({$webhookId}), skipping.");
+                return response()->json(['message' => 'Webhook already processed'], 200);
+            }
+        }
+
+        $data = $request->getContent();
+        $payload = json_decode($data, true);
+        if (!$payload || empty($payload['id']) || empty($payload['order_id'])) {
+            Log::warning('refundsCreate: Missing required refund payload data.');
+            return response()->json(['error' => 'Invalid payload'], 400);
+        }
+
+        if ($webhookId) {
+            ShopifyProcessedWebhook::create([
+                'webhook_id' => $webhookId,
+                'topic' => 'refunds/create',
+            ]);
+        }
+
+        $shopifyRefundId = (string) $payload['id'];
+        $rawOrderId = (string) $payload['order_id'];
+        $numericOrderId = preg_replace('/^gid:\/\/shopify\/Order\//', '', $rawOrderId);
+        $shopifyOrderId = $numericOrderId;
+        $gidOrderId = str_starts_with($rawOrderId, 'gid://') ? $rawOrderId : "gid://shopify/Order/{$rawOrderId}";
+
+        $order = Order::where('shop_id', $shop->id)
+            ->where(function ($q) use ($numericOrderId, $gidOrderId, $rawOrderId) {
+                $q->where('shopify_order_id', $numericOrderId)
+                    ->orWhere('shopify_order_id', $gidOrderId)
+                    ->orWhere('shopify_order_id', $rawOrderId);
+            })
+            ->first();
+
+        if (!$order) {
+            Log::info("refundsCreate: Local Order not found for shopify_order_id {$rawOrderId}. Attempting fallback order resolution.");
+
+            $orderData = null;
+            try {
+                $shopifyService = app(\App\Services\ShopifyService::class);
+                $orderData = $shopifyService->fetchOrderById($shop, $numericOrderId);
+            } catch (\Throwable $e) {
+                Log::warning("refundsCreate: Unable to fetch order {$numericOrderId} from Shopify API: " . $e->getMessage());
+            }
+
+            if ($orderData) {
+                $order = $this->createLocalOrderFromShopifyData($shop, $orderData);
+            } elseif (!empty($payload['order']) && is_array($payload['order'])) {
+                $order = $this->createLocalOrderFromShopifyData($shop, $payload['order']);
+            } else {
+                $order = Order::create([
+                    'shop_id' => $shop->id,
+                    'shopify_order_id' => $numericOrderId,
+                    'order_number' => "#ORD-{$numericOrderId}",
+                    'financial_status' => 'partially_refunded',
+                    'fulfillment_status' => 'unfulfilled',
+                    'order_date' => now(),
+                    'currency' => $payload['currency'] ?? 'USD',
+                    'subtotal' => 0.00,
+                    'total_price' => 0.00,
+                    'line_items' => [],
+                ]);
+            }
+        }
+
+        $totalAmount = 0.0;
+        if (!empty($payload['total_refunded'])) {
+            $totalAmount = (float) $payload['total_refunded'];
+        } elseif (!empty($payload['total_refunded_set']['shop_money']['amount'])) {
+            $totalAmount = (float) $payload['total_refunded_set']['shop_money']['amount'];
+        }
+
+        if ($totalAmount <= 0 && !empty($payload['transactions']) && is_array($payload['transactions'])) {
+            foreach ($payload['transactions'] as $tx) {
+                if (($tx['status'] ?? '') === 'success' && in_array(strtolower((string) ($tx['kind'] ?? '')), ['refund', 'change'], true)) {
+                    $totalAmount += (float) ($tx['amount'] ?? 0.0);
+                }
+            }
+        }
+
+        $refundLineItems = [];
+        $restock = false;
+        if (!empty($payload['refund_line_items']) && is_array($payload['refund_line_items'])) {
+            foreach ($payload['refund_line_items'] as $item) {
+                $restockType = strtolower((string) ($item['restock_type'] ?? ''));
+                if (in_array($restockType, ['cancel', 'return'], true)) {
+                    $restock = true;
+                }
+
+                $lineItem = $item['line_item'] ?? [];
+                $refundLineItems[] = [
+                    'line_item_id' => $item['line_item_id'] ?? null,
+                    'variant_id' => $lineItem['variant_id'] ?? null,
+                    'title' => $lineItem['title'] ?? 'Refunded Item',
+                    'quantity' => (int) ($item['quantity'] ?? 1),
+                    'price' => (float) ($lineItem['price'] ?? 0.0),
+                    'restock_type' => $item['restock_type'] ?? null,
+                ];
+
+                if ($totalAmount <= 0) {
+                    $totalAmount += (float) ($item['subtotal'] ?? 0.0);
+                }
+            }
+        }
+
+        $currency = $payload['currency'] ?? $order->currency ?? 'USD';
+
+        $refund = \App\Models\Refund::updateOrCreate(
+            [
+                'shop_id' => $shop->id,
+                'shopify_refund_id' => $shopifyRefundId,
+            ],
+            [
+                'order_id' => $order->id,
+                'shopify_order_id' => $shopifyOrderId,
+                'amount' => $totalAmount,
+                'currency' => $currency,
+                'note' => $payload['note'] ?? null,
+                'restock' => $restock,
+                'refund_line_items' => $refundLineItems,
+                'status' => \App\Models\Refund::STATUS_COMPLETED,
+                'sync_status' => \App\Models\Refund::SYNC_STATUS_PENDING,
+            ]
+        );
+
+        $order->financial_status = ($totalAmount >= (float) $order->total_price && (float) $order->total_price > 0)
+            ? 'refunded'
+            : 'partially_refunded';
+        $order->save();
+
+        $synced = false;
+        $syncError = null;
+
+        if ($shop->zohoConnection) {
+            try {
+                $zohoService = new ZohoService($shop);
+                $result = $zohoService->syncRefund($refund);
+                $synced = true;
+            } catch (\Throwable $e) {
+                Log::error("refundsCreate: Zoho refund sync failed for refund ID {$refund->id}: " . $e->getMessage());
+                $syncError = $e->getMessage();
+            }
+        }
+
+        return response()->json([
+            'message' => 'Refund webhook processed successfully.',
+            'refund_id' => $refund->id,
+            'shopify_refund_id' => $refund->shopify_refund_id,
+            'zoho_creditnote_id' => $refund->zoho_creditnote_id,
+            'zoho_synced' => $synced,
+            'error' => $syncError,
+        ], 200);
+    }
+
+    private function createLocalOrderFromShopifyData(Shop $shop, array $orderData): Order
+    {
+        $rawOrderId = (string) ($orderData['id'] ?? '');
+        $numericOrderId = preg_replace('/^gid:\/\/shopify\/Order\//', '', $rawOrderId);
+
+        $orderNumber = $orderData['name'] ?? (!empty($orderData['order_number']) ? "#{$orderData['order_number']}" : "#{$numericOrderId}");
+
+        $customerId = null;
+        if (!empty($orderData['customer']) && is_array($orderData['customer']) && !empty($orderData['customer']['id'])) {
+            $custData = $orderData['customer'];
+            $rawCustId = (string) $custData['id'];
+            $shopifyCustId = str_starts_with($rawCustId, 'gid://') ? $rawCustId : "gid://shopify/Customer/{$rawCustId}";
+
+            $defaultAddr = $custData['default_address'] ?? ($custData['addresses'][0] ?? null);
+            $customer = Customer::updateOrCreate(
+                [
+                    'shop_id' => $shop->id,
+                    'shopify_customer_id' => $shopifyCustId,
+                ],
+                [
+                    'first_name' => $custData['first_name'] ?? null,
+                    'last_name' => $custData['last_name'] ?? null,
+                    'email' => $custData['email'] ?? ($orderData['email'] ?? null),
+                    'phone' => $custData['phone'] ?? ($orderData['phone'] ?? ($defaultAddr['phone'] ?? null)),
+                    'billing_address' => $orderData['billing_address'] ?? $defaultAddr,
+                    'shipping_address' => $orderData['shipping_address'] ?? $defaultAddr,
+                ]
+            );
+            $customerId = $customer->id;
+        }
+
+        $lineItems = [];
+        if (!empty($orderData['line_items']) && is_array($orderData['line_items'])) {
+            foreach ($orderData['line_items'] as $item) {
+                $lineItems[] = [
+                    'line_item_id' => $item['id'] ?? null,
+                    'product_id' => $item['product_id'] ?? null,
+                    'variant_id' => $item['variant_id'] ?? null,
+                    'sku' => $item['sku'] ?? null,
+                    'title' => $item['title'] ?? ($item['name'] ?? null),
+                    'quantity' => (int) ($item['quantity'] ?? 1),
+                    'price' => (float) ($item['price'] ?? 0.00),
+                ];
+            }
+        }
+
+        return Order::updateOrCreate(
+            [
+                'shop_id' => $shop->id,
+                'shopify_order_id' => $numericOrderId,
+            ],
+            [
+                'customer_id' => $customerId,
+                'order_number' => $orderNumber,
+                'financial_status' => $orderData['financial_status'] ?? 'partially_refunded',
+                'fulfillment_status' => $orderData['fulfillment_status'] ?? 'unfulfilled',
+                'order_date' => !empty($orderData['created_at']) ? new \DateTime($orderData['created_at']) : now(),
+                'currency' => $orderData['currency'] ?? 'USD',
+                'subtotal' => (float) ($orderData['subtotal_price'] ?? 0.00),
+                'total_price' => (float) ($orderData['total_price'] ?? 0.00),
+                'line_items' => $lineItems,
+            ]
+        );
     }
 }
 
