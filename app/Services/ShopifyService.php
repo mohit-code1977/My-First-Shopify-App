@@ -674,6 +674,8 @@ query fetchOrders($first: Int!) {
             name
             createdAt
             currencyCode
+            taxesIncluded
+            taxLines { title rate priceSet { shopMoney { amount } } }
             subtotalPriceSet { shopMoney { amount } }
             totalDiscountsSet { shopMoney { amount } }
             totalTaxSet { shopMoney { amount } }
@@ -700,6 +702,7 @@ query fetchOrders($first: Int!) {
                     title
                     quantity
                     originalUnitPriceSet { shopMoney { amount } }
+                    taxLines { title rate priceSet { shopMoney { amount } } }
                     variant {
                         id
                         sku
@@ -760,6 +763,15 @@ GRAPHQL;
 
             $lineItems = [];
             foreach ($node['lineItems']['nodes'] ?? [] as $li) {
+                $liTaxLines = [];
+                foreach ($li['taxLines'] ?? [] as $tl) {
+                    $liTaxLines[] = [
+                        'title' => $tl['title'] ?? '',
+                        'price' => (float) ($tl['priceSet']['shopMoney']['amount'] ?? 0.00),
+                        'rate' => (float) ($tl['rate'] ?? 0.0),
+                    ];
+                }
+
                 $lineItems[] = [
                     'id' => preg_replace('/[^0-9]/', '', $li['id'] ?? ''),
                     'title' => $li['title'] ?? '',
@@ -767,6 +779,16 @@ GRAPHQL;
                     'price' => $li['originalUnitPriceSet']['shopMoney']['amount'] ?? '0.00',
                     'sku' => $li['variant']['sku'] ?? '',
                     'variant_id' => !empty($li['variant']['id']) ? preg_replace('/[^0-9]/', '', $li['variant']['id']) : null,
+                    'tax_lines' => $liTaxLines,
+                ];
+            }
+
+            $orderTaxLines = [];
+            foreach ($node['taxLines'] ?? [] as $tl) {
+                $orderTaxLines[] = [
+                    'title' => $tl['title'] ?? '',
+                    'price' => (float) ($tl['priceSet']['shopMoney']['amount'] ?? 0.00),
+                    'rate' => (float) ($tl['rate'] ?? 0.0),
                 ];
             }
 
@@ -780,6 +802,8 @@ GRAPHQL;
                 'total_discounts' => $node['totalDiscountsSet']['shopMoney']['amount'] ?? '0.00',
                 'total_tax' => $node['totalTaxSet']['shopMoney']['amount'] ?? '0.00',
                 'total_price' => $node['totalPriceSet']['shopMoney']['amount'] ?? '0.00',
+                'taxes_included' => (bool) ($node['taxesIncluded'] ?? false),
+                'tax_lines' => $orderTaxLines,
                 'financial_status' => strtolower($node['displayFinancialStatus'] ?? 'pending'),
                 'fulfillment_status' => strtolower($node['displayFulfillmentStatus'] ?? 'unfulfilled'),
                 'note' => $node['note'] ?? null,
@@ -838,6 +862,8 @@ query fetchSingleOrder($id: ID!) {
         name
         createdAt
         currencyCode
+        taxesIncluded
+        taxLines { title rate priceSet { shopMoney { amount } } }
         subtotalPriceSet { shopMoney { amount } }
         totalDiscountsSet { shopMoney { amount } }
         totalTaxSet { shopMoney { amount } }
@@ -865,6 +891,7 @@ query fetchSingleOrder($id: ID!) {
                 title
                 quantity
                 originalUnitPriceSet { shopMoney { amount } }
+                taxLines { title rate priceSet { shopMoney { amount } } }
                 variant {
                     id
                     sku
@@ -938,6 +965,15 @@ GRAPHQL;
 
         $lineItems = [];
         foreach ($node['lineItems']['nodes'] ?? [] as $li) {
+            $liTaxLines = [];
+            foreach ($li['taxLines'] ?? [] as $tl) {
+                $liTaxLines[] = [
+                    'title' => $tl['title'] ?? '',
+                    'price' => (float) ($tl['priceSet']['shopMoney']['amount'] ?? 0.00),
+                    'rate' => (float) ($tl['rate'] ?? 0.0),
+                ];
+            }
+
             $lineItems[] = [
                 'line_item_id' => preg_replace('/[^0-9]/', '', $li['id'] ?? ''),
                 'title' => $li['title'] ?? '',
@@ -945,6 +981,16 @@ GRAPHQL;
                 'price' => (float) ($li['originalUnitPriceSet']['shopMoney']['amount'] ?? 0.00),
                 'sku' => $li['variant']['sku'] ?? '',
                 'variant_id' => !empty($li['variant']['id']) ? preg_replace('/[^0-9]/', '', $li['variant']['id']) : null,
+                'tax_lines' => $liTaxLines,
+            ];
+        }
+
+        $orderTaxLines = [];
+        foreach ($node['taxLines'] ?? [] as $tl) {
+            $orderTaxLines[] = [
+                'title' => $tl['title'] ?? '',
+                'price' => (float) ($tl['priceSet']['shopMoney']['amount'] ?? 0.00),
+                'rate' => (float) ($tl['rate'] ?? 0.0),
             ];
         }
 
@@ -952,6 +998,7 @@ GRAPHQL;
         $discountTotal = (float) ($node['totalDiscountsSet']['shopMoney']['amount'] ?? 0.00);
         $taxTotal = (float) ($node['totalTaxSet']['shopMoney']['amount'] ?? 0.00);
         $totalPrice = (float) ($node['totalPriceSet']['shopMoney']['amount'] ?? 0.00);
+        $taxesIncluded = (bool) ($node['taxesIncluded'] ?? false);
 
         $order = Order::updateOrCreate(
             [
@@ -970,6 +1017,8 @@ GRAPHQL;
                 'financial_status' => strtolower($node['displayFinancialStatus'] ?? 'pending'),
                 'fulfillment_status' => strtolower($node['displayFulfillmentStatus'] ?? 'unfulfilled'),
                 'line_items' => $lineItems,
+                'tax_lines' => $orderTaxLines,
+                'taxes_included' => $taxesIncluded,
                 'notes' => $node['note'] ?? null,
             ]
         );

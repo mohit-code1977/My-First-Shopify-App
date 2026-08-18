@@ -26,6 +26,8 @@ class Order extends Model
         'financial_status',
         'fulfillment_status',
         'line_items',
+        'tax_lines',
+        'taxes_included',
         'notes',
         'coupon_code',
         'zoho_sync_hash',
@@ -34,6 +36,8 @@ class Order extends Model
 
     protected $casts = [
         'line_items' => 'array',
+        'tax_lines' => 'array',
+        'taxes_included' => 'boolean',
         'order_date' => 'datetime',
         'zoho_synced_at' => 'datetime',
         'subtotal' => 'decimal:2',

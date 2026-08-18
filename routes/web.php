@@ -102,6 +102,9 @@ Route::middleware(['shopify.auth'])->group(function () {
     Route::post('/zoho/settings/payment-gateways', [ZohoSyncController::class, 'savePaymentSettings'])
         ->name('zoho.settings.payment-gateways');
 
+    Route::post('/zoho/settings/tax', [ZohoSyncController::class, 'saveTaxSettings'])
+        ->name('zoho.settings.tax');
+
     Route::post('/zoho/settings/disconnect', [ZohoSyncController::class, 'disconnect'])
         ->name('zoho.settings.disconnect');
 });

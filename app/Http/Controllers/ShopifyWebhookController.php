@@ -693,6 +693,17 @@ class ShopifyWebhookController extends Controller
         $lineItems = [];
         if (!empty($payload['line_items']) && is_array($payload['line_items'])) {
             foreach ($payload['line_items'] as $item) {
+                $liTaxLines = [];
+                if (!empty($item['tax_lines']) && is_array($item['tax_lines'])) {
+                    foreach ($item['tax_lines'] as $tl) {
+                        $liTaxLines[] = [
+                            'title' => $tl['title'] ?? '',
+                            'price' => (float) ($tl['price'] ?? 0.00),
+                            'rate' => (float) ($tl['rate'] ?? 0.0),
+                        ];
+                    }
+                }
+
                 $lineItems[] = [
                     'line_item_id' => $item['id'] ?? null,
                     'product_id' => $item['product_id'] ?? null,
@@ -703,10 +714,23 @@ class ShopifyWebhookController extends Controller
                     'quantity' => (int) ($item['quantity'] ?? 1),
                     'price' => (float) ($item['price'] ?? 0.00),
                     'total_discount' => (float) ($item['total_discount'] ?? 0.00),
+                    'tax_lines' => $liTaxLines,
                 ];
             }
         }
 
+        $orderTaxLines = [];
+        if (!empty($payload['tax_lines']) && is_array($payload['tax_lines'])) {
+            foreach ($payload['tax_lines'] as $tl) {
+                $orderTaxLines[] = [
+                    'title' => $tl['title'] ?? '',
+                    'price' => (float) ($tl['price'] ?? 0.00),
+                    'rate' => (float) ($tl['rate'] ?? 0.0),
+                ];
+            }
+        }
+
+        $taxesIncluded = (bool) ($payload['taxes_included'] ?? false);
         $discountTotal = (float) ($payload['total_discounts'] ?? 0.00);
         $shippingTotal = (float) ($payload['total_shipping_price_set']['shop_money']['amount'] ?? ($payload['total_shipping_price'] ?? 0.00));
         $taxTotal = (float) ($payload['total_tax'] ?? 0.00);
@@ -735,6 +759,8 @@ class ShopifyWebhookController extends Controller
                 'shipping_total' => $shippingTotal,
                 'tax_total' => $taxTotal,
                 'total_price' => $totalPrice,
+                'taxes_included' => $taxesIncluded,
+                'tax_lines' => $orderTaxLines,
                 'financial_status' => $financialStatus,
                 'fulfillment_status' => $payload['fulfillment_status'] ?? null,
                 'line_items' => $lineItems,

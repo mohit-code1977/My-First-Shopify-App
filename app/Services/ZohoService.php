@@ -425,6 +425,71 @@ class ZohoService
     }
 
 
+    /**
+     * Fetch taxes configured in Zoho Books.
+     */
+    public function getTaxes(): array
+    {
+        try {
+            $response = $this->makeRequest('GET', '/books/v3/settings/taxes');
+            return $response['taxes'] ?? [];
+        } catch (\Throwable $e) {
+            Log::warning("getTaxes: Failed to fetch taxes from Zoho: " . $e->getMessage());
+            return [];
+        }
+    }
+
+    /**
+     * Resolve Zoho Tax ID for a line item or order based on shop tax_settings and tax lines.
+     */
+    private function resolveZohoTaxId(array $taxLines = [], ?Order $order = null): ?string
+    {
+        $taxSettings = $this->shop->tax_settings ?? [];
+        $mappings = $taxSettings['tax_mappings'] ?? [];
+        $defaultTaxId = $taxSettings['default_tax_id'] ?? null;
+
+        // 1. Try matching item-level tax lines against tax_mappings
+        if (!empty($taxLines)) {
+            foreach ($taxLines as $tl) {
+                $title = strtolower(trim($tl['title'] ?? ''));
+                $ratePct = round(((float) ($tl['rate'] ?? 0.0)) * 100, 2);
+
+                foreach ($mappings as $map) {
+                    $mappedName = strtolower(trim($map['shopify_tax_name'] ?? ''));
+                    $mappedRate = round((float) ($map['shopify_rate'] ?? 0.0), 2);
+
+                    if (!empty($map['zoho_tax_id'])) {
+                        if (($mappedName !== '' && str_contains($title, $mappedName)) || ($mappedRate > 0 && abs($ratePct - $mappedRate) < 0.01)) {
+                            return (string) $map['zoho_tax_id'];
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Try matching order-level tax lines against tax_mappings
+        if ($order && !empty($order->tax_lines) && is_array($order->tax_lines)) {
+            foreach ($order->tax_lines as $tl) {
+                $title = strtolower(trim($tl['title'] ?? ''));
+                $ratePct = round(((float) ($tl['rate'] ?? 0.0)) * 100, 2);
+
+                foreach ($mappings as $map) {
+                    $mappedName = strtolower(trim($map['shopify_tax_name'] ?? ''));
+                    $mappedRate = round((float) ($map['shopify_rate'] ?? 0.0), 2);
+
+                    if (!empty($map['zoho_tax_id'])) {
+                        if (($mappedName !== '' && str_contains($title, $mappedName)) || ($mappedRate > 0 && abs($ratePct - $mappedRate) < 0.01)) {
+                            return (string) $map['zoho_tax_id'];
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Fallback to default_tax_id if specified
+        return !empty($defaultTaxId) ? (string) $defaultTaxId : null;
+    }
+
     private function getShopifyVariantFieldId(): string
     {
         $response = $this->makeRequest(
@@ -1979,6 +2044,8 @@ class ZohoService
                 throw new \Exception("Cannot sync order ID {$order->id}: Unmapped Shopify product variant/SKU '{$sku}' for item '{$name}'.");
             }
 
+            $taxId = $this->resolveZohoTaxId($item['tax_lines'] ?? [], $order);
+
             $lineItemPayload = [
                 'item_id' => $zohoItemId,
                 'name' => $name,
@@ -1986,6 +2053,10 @@ class ZohoService
                 'rate' => $price,
                 'quantity' => $qty,
             ];
+
+            if ($taxId) {
+                $lineItemPayload['tax_id'] = $taxId;
+            }
 
             if (!empty($item['total_discount']) && (float) $item['total_discount'] > 0) {
                 $lineItemPayload['discount'] = (float) $item['total_discount'];
@@ -1997,12 +2068,17 @@ class ZohoService
         // 3. Build Sales Order Payload
         $refNumber = $order->order_number ?? (string) $order->shopify_order_id;
         $orderDateStr = $order->order_date ? $order->order_date->format('Y-m-d') : date('Y-m-d');
+        $taxSettings = $this->shop->tax_settings ?? [];
+        $isInclusive = $order->taxes_included || (($taxSettings['tax_mode'] ?? '') === 'inclusive');
+        $isDiscountBeforeTax = (($taxSettings['discount_tax_mode'] ?? 'before_tax') !== 'after_tax');
 
         $payload = [
             'customer_id' => $zohoContactId,
             'reference_number' => $refNumber,
             'date' => $orderDateStr,
             'line_items' => $zohoLineItems,
+            'is_inclusive_tax' => $isInclusive,
+            'is_discount_before_tax' => $isDiscountBeforeTax,
         ];
 
         if (!empty($order->currency)) {
@@ -2011,7 +2087,6 @@ class ZohoService
 
         if ((float) $order->discount_total > 0) {
             $payload['discount'] = (float) $order->discount_total;
-            $payload['is_discount_before_tax'] = true;
         }
 
         if ((float) $order->shipping_total > 0) {
@@ -2356,16 +2431,28 @@ class ZohoService
                 throw new \Exception($errMsg);
             }
 
-            $mappedLineItems[] = [
+            $taxId = $this->resolveZohoTaxId($item['tax_lines'] ?? [], $order);
+
+            $mappedItem = [
                 'item_id' => $zohoItemId,
                 'name' => $item['name'] ?? $item['title'] ?? 'Item',
                 'quantity' => (int) ($item['quantity'] ?? 1),
                 'rate' => (float) ($item['price'] ?? 0.00),
                 'discount' => (float) ($item['total_discount'] ?? 0.00),
             ];
+
+            if ($taxId) {
+                $mappedItem['tax_id'] = $taxId;
+            }
+
+            $mappedLineItems[] = $mappedItem;
         }
 
         // 3. Construct Invoice Payload
+        $taxSettings = $this->shop->tax_settings ?? [];
+        $isInclusive = $order->taxes_included || (($taxSettings['tax_mode'] ?? '') === 'inclusive');
+        $isDiscountBeforeTax = (($taxSettings['discount_tax_mode'] ?? 'before_tax') !== 'after_tax');
+
         $invoicePayload = [
             'customer_id' => $customer->zoho_contact_id,
             'reference_number' => $order->order_number,
@@ -2374,9 +2461,14 @@ class ZohoService
             'line_items' => $mappedLineItems,
             'shipping_charge' => (float) ($order->shipping_total ?? 0.00),
             'discount' => (float) ($order->discount_total ?? 0.00),
-            'is_discount_before_tax' => true,
+            'is_inclusive_tax' => $isInclusive,
+            'is_discount_before_tax' => $isDiscountBeforeTax,
             'notes' => trim(($order->notes ?? '') . ($order->coupon_code ? " (Coupon: {$order->coupon_code})" : '')),
         ];
+
+        if ((float) $order->tax_total > 0) {
+            $invoicePayload['tax_total'] = (float) $order->tax_total;
+        }
 
         if (!empty($order->zoho_sales_order_id)) {
             $invoicePayload['salesorder_id'] = $order->zoho_sales_order_id;

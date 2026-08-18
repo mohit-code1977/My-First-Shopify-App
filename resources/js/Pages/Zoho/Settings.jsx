@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { Banner, Badge, Button, InlineStack, Text } from "@shopify/polaris";
 import ZohoLayout from "@/Layouts/ZohoLayout";
 
 const ZOHO_PAYMENT_MODES = [
@@ -25,6 +26,17 @@ export default function Settings({ shop, zohoConnection, host }) {
     const [savingSettings, setSavingSettings] = useState(false);
     const [notification, setNotification] = useState(null);
 
+    // Tax settings state
+    const [taxSettings, setTaxSettings] = useState({
+        tax_mode: "exclusive",
+        default_tax_id: "",
+        shipping_tax_mode: "use_order_tax",
+        discount_tax_mode: "before_tax",
+        tax_mappings: [],
+    });
+    const [zohoTaxes, setZohoTaxes] = useState([]);
+    const [savingTaxSettings, setSavingTaxSettings] = useState(false);
+
     const connected = Boolean(zohoConn);
 
     const loadData = async () => {
@@ -46,6 +58,12 @@ export default function Settings({ shop, zohoConnection, host }) {
                 if (data.zohoAccounts) {
                     setZohoAccounts(data.zohoAccounts);
                 }
+                if (data.taxSettings) {
+                    setTaxSettings(data.taxSettings);
+                }
+                if (data.zohoTaxes) {
+                    setZohoTaxes(data.zohoTaxes);
+                }
             }
         } catch (error) {
             console.error("Failed to load settings data:", error);
@@ -62,6 +80,35 @@ export default function Settings({ shop, zohoConnection, host }) {
         const updated = [...gatewaySettings];
         updated[index] = { ...updated[index], [field]: value };
         setGatewaySettings(updated);
+    };
+
+    const handleTaxSettingChange = (field, value) => {
+        setTaxSettings((prev) => ({ ...prev, [field]: value }));
+    };
+
+    const handleMappingChange = (index, field, value) => {
+        const updated = [...(taxSettings.tax_mappings || [])];
+        updated[index] = { ...updated[index], [field]: value };
+        setTaxSettings((prev) => ({ ...prev, tax_mappings: updated }));
+    };
+
+    const addTaxMappingRow = () => {
+        const current = taxSettings.tax_mappings || [];
+        if (current.length >= 50) {
+            setNotification({
+                type: "error",
+                message: "Maximum limit of 50 tax mappings reached per shop.",
+            });
+            return;
+        }
+        const updated = [...current];
+        updated.push({ shopify_tax_name: "GST", shopify_rate: 5, zoho_tax_id: "" });
+        setTaxSettings((prev) => ({ ...prev, tax_mappings: updated }));
+    };
+
+    const removeTaxMappingRow = (index) => {
+        const updated = (taxSettings.tax_mappings || []).filter((_, i) => i !== index);
+        setTaxSettings((prev) => ({ ...prev, tax_mappings: updated }));
     };
 
     const savePaymentSettings = async () => {
@@ -107,6 +154,92 @@ export default function Settings({ shop, zohoConnection, host }) {
             });
         } finally {
             setSavingSettings(false);
+        }
+    };
+
+    const saveTaxSettingsApi = async () => {
+        const mappings = taxSettings.tax_mappings || [];
+
+        if (mappings.length > 50) {
+            setNotification({
+                type: "error",
+                message: "Maximum limit of 50 tax mappings allowed per shop.",
+            });
+            return;
+        }
+
+        const seen = new Set();
+        for (let i = 0; i < mappings.length; i++) {
+            const map = mappings[i];
+            const name = (map.shopify_tax_name || "").trim().toLowerCase();
+            const rateStr = map.shopify_rate;
+
+            if (rateStr !== "" && rateStr !== null && rateStr !== undefined) {
+                const rateNum = parseFloat(rateStr);
+                if (isNaN(rateNum) || rateNum < 0 || rateNum > 100) {
+                    setNotification({
+                        type: "error",
+                        message: `Tax rate for "${map.shopify_tax_name || "Row " + (i + 1)}" must be a number between 0% and 100%.`,
+                    });
+                    return;
+                }
+            }
+
+            if (name !== "" && rateStr !== "" && rateStr !== null && rateStr !== undefined) {
+                const rateNum = Math.round(parseFloat(rateStr) * 100) / 100;
+                const key = `${name}:${rateNum}`;
+                if (seen.has(key)) {
+                    const displayName = map.shopify_tax_name || "Tax";
+                    setNotification({
+                        type: "error",
+                        message: `Duplicate tax mapping detected for "${displayName}" at rate ${rateNum}%. Each Shopify tax name and rate combination must be unique.`,
+                    });
+                    return;
+                }
+                seen.add(key);
+            }
+        }
+
+        setSavingTaxSettings(true);
+        setNotification(null);
+        try {
+            const token = await window.shopify?.idToken();
+            const csrfToken =
+                document
+                    .querySelector('meta[name="csrf-token"]')
+                    ?.getAttribute("content") || "";
+
+            const response = await fetch("/zoho/settings/tax", {
+                method: "POST",
+                headers: {
+                    Authorization: token ? `Bearer ${token}` : "",
+                    "X-CSRF-TOKEN": csrfToken,
+                    Accept: "application/json",
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify(taxSettings),
+            });
+
+            const data = await response.json();
+
+            if (response.ok && data.success) {
+                setNotification({
+                    type: "success",
+                    message: data.message || "Tax configuration saved successfully.",
+                });
+            } else {
+                setNotification({
+                    type: "error",
+                    message: data.message || "Failed to save tax configuration.",
+                });
+            }
+        } catch (error) {
+            setNotification({
+                type: "error",
+                message: "Network error saving tax settings.",
+            });
+        } finally {
+            setSavingTaxSettings(false);
         }
     };
 
@@ -417,6 +550,275 @@ export default function Settings({ shop, zohoConnection, host }) {
                                     </div>
                                 </div>
                             )}
+                        </div>
+                    </section>
+
+                    {/* TAX CONFIGURATION CARD */}
+
+                    <section className="settings-card">
+                        <div className="settings-card-header">
+                            <div>
+                                <h2>Tax Configuration</h2>
+
+                                <p>
+                                    Configure tax modes, default Zoho tax rules, shipping & discount tax handling, and Shopify-to-Zoho tax mappings.
+                                </p>
+                            </div>
+
+                            <div className="settings-card-icon">🏷️</div>
+                        </div>
+
+                        <div className="settings-body">
+                            <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+                                {/* Tax Mode & Default Tax */}
+                                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
+                                    <div>
+                                        <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "#1a1d20", marginBottom: "6px" }}>
+                                            Tax Mode (Pricing Type)
+                                        </label>
+                                        <select
+                                            value={taxSettings.tax_mode || "exclusive"}
+                                            onChange={(e) => handleTaxSettingChange("tax_mode", e.target.value)}
+                                            style={{
+                                                width: "100%",
+                                                padding: "8px 12px",
+                                                borderRadius: "6px",
+                                                border: "1px solid #c9cccf",
+                                                fontSize: "13px",
+                                                backgroundColor: "#ffffff",
+                                            }}
+                                        >
+                                            <option value="exclusive">Tax Exclusive (Tax added at checkout)</option>
+                                            <option value="inclusive">Tax Inclusive (Prices include tax)</option>
+                                        </select>
+                                        <span style={{ fontSize: "11px", color: "#616a75", marginTop: "4px", display: "block" }}>
+                                            Applies default tax handling if Shopify order tax flags are missing.
+                                        </span>
+                                    </div>
+
+                                    <div>
+                                        <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "#1a1d20", marginBottom: "6px" }}>
+                                            Default Zoho Tax Rate
+                                        </label>
+                                        <select
+                                            value={taxSettings.default_tax_id || ""}
+                                            onChange={(e) => handleTaxSettingChange("default_tax_id", e.target.value)}
+                                            style={{
+                                                width: "100%",
+                                                padding: "8px 12px",
+                                                borderRadius: "6px",
+                                                border: "1px solid #c9cccf",
+                                                fontSize: "13px",
+                                                backgroundColor: "#ffffff",
+                                            }}
+                                        >
+                                            <option value="">No Default Tax (0% / Exempt)</option>
+                                            {zohoTaxes.map((tax) => (
+                                                <option key={tax.tax_id} value={tax.tax_id}>
+                                                    {tax.tax_name} ({tax.tax_percentage}%)
+                                                </option>
+                                            ))}
+                                        </select>
+                                        <span style={{ fontSize: "11px", color: "#616a75", marginTop: "4px", display: "block" }}>
+                                            Fallback tax rate used when no specific mapping matches.
+                                        </span>
+                                    </div>
+                                </div>
+
+                                {/* Shipping Tax Mode & Discount Tax Mode */}
+                                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
+                                    <div>
+                                        <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "#1a1d20", marginBottom: "6px" }}>
+                                            Shipping Tax Handling
+                                        </label>
+                                        <select
+                                            value={taxSettings.shipping_tax_mode || "use_order_tax"}
+                                            onChange={(e) => handleTaxSettingChange("shipping_tax_mode", e.target.value)}
+                                            style={{
+                                                width: "100%",
+                                                padding: "8px 12px",
+                                                borderRadius: "6px",
+                                                border: "1px solid #c9cccf",
+                                                fontSize: "13px",
+                                                backgroundColor: "#ffffff",
+                                            }}
+                                        >
+                                            <option value="use_order_tax">Inherit / Preserved from Order Tax</option>
+                                            <option value="separate_shipping_tax">Separate Shipping Tax</option>
+                                            <option value="no_tax">Exempt Shipping from Tax</option>
+                                        </select>
+                                    </div>
+
+                                    <div>
+                                        <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "#1a1d20", marginBottom: "6px" }}>
+                                            Discount Tax Handling
+                                        </label>
+                                        <select
+                                            value={taxSettings.discount_tax_mode || "before_tax"}
+                                            onChange={(e) => handleTaxSettingChange("discount_tax_mode", e.target.value)}
+                                            style={{
+                                                width: "100%",
+                                                padding: "8px 12px",
+                                                borderRadius: "6px",
+                                                border: "1px solid #c9cccf",
+                                                fontSize: "13px",
+                                                backgroundColor: "#ffffff",
+                                            }}
+                                        >
+                                            <option value="before_tax">Apply Tax Before Discount (Pre-Tax Discount)</option>
+                                            <option value="after_tax">Apply Tax After Discount (Post-Tax Discount)</option>
+                                        </select>
+                                    </div>
+                                </div>
+
+                                {/* Limit Warning Banner */}
+                                {(taxSettings.tax_mappings || []).length >= 50 && (
+                                    <div style={{ marginBottom: "12px" }}>
+                                        <Banner tone="warning" title="Tax Mapping Limit Reached">
+                                            <p>
+                                                You have reached the maximum limit of 50 tax mappings. Please delete an existing tax mapping before adding a new one.
+                                            </p>
+                                        </Banner>
+                                    </div>
+                                )}
+
+                                {/* Tax Mapping Table */}
+                                <div style={{ marginTop: "10px" }}>
+                                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+                                        <InlineStack gap="200" align="center">
+                                            <div style={{ fontWeight: 600, fontSize: "13px", color: "#1a1d20" }}>
+                                                Shopify to Zoho Tax Mappings
+                                            </div>
+                                            <Badge tone={(taxSettings.tax_mappings || []).length >= 50 ? "warning" : "info"}>
+                                                {`Tax mappings: ${(taxSettings.tax_mappings || []).length} / 50`}
+                                            </Badge>
+                                        </InlineStack>
+
+                                        <Button
+                                            onClick={addTaxMappingRow}
+                                            disabled={(taxSettings.tax_mappings || []).length >= 50}
+                                            size="micro"
+                                        >
+                                            + Add Tax Mapping
+                                        </Button>
+                                    </div>
+
+                                    {(taxSettings.tax_mappings || []).length === 0 ? (
+                                        <div style={{ padding: "12px", backgroundColor: "#f8f9fa", borderRadius: "6px", fontSize: "12px", color: "#616a75" }}>
+                                            No tax mappings configured. Add a mapping to match Shopify tax rates (e.g. GST 5%) with your Zoho Tax rates.
+                                        </div>
+                                    ) : (
+                                        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                                            {(taxSettings.tax_mappings || []).map((map, idx) => (
+                                                <div
+                                                    key={idx}
+                                                    style={{
+                                                        display: "grid",
+                                                        gridTemplateColumns: "1.5fr 1fr 2fr 40px",
+                                                        gap: "10px",
+                                                        alignItems: "center",
+                                                        padding: "10px",
+                                                        backgroundColor: "#f8f9fa",
+                                                        borderRadius: "6px",
+                                                        border: "1px solid #e1e3e5",
+                                                    }}
+                                                >
+                                                    <div>
+                                                        <input
+                                                            type="text"
+                                                            placeholder="Shopify Tax Name (e.g. GST)"
+                                                            value={map.shopify_tax_name || ""}
+                                                            onChange={(e) => handleMappingChange(idx, "shopify_tax_name", e.target.value)}
+                                                            style={{
+                                                                width: "100%",
+                                                                padding: "6px 10px",
+                                                                borderRadius: "4px",
+                                                                border: "1px solid #c9cccf",
+                                                                fontSize: "12px",
+                                                            }}
+                                                        />
+                                                    </div>
+
+                                                    <div>
+                                                        <input
+                                                            type="number"
+                                                            step="0.01"
+                                                            placeholder="Rate % (e.g. 5)"
+                                                            value={map.shopify_rate ?? ""}
+                                                            onChange={(e) => handleMappingChange(idx, "shopify_rate", e.target.value)}
+                                                            style={{
+                                                                width: "100%",
+                                                                padding: "6px 10px",
+                                                                borderRadius: "4px",
+                                                                border: "1px solid #c9cccf",
+                                                                fontSize: "12px",
+                                                            }}
+                                                        />
+                                                    </div>
+
+                                                    <div>
+                                                        <select
+                                                            value={map.zoho_tax_id || ""}
+                                                            onChange={(e) => handleMappingChange(idx, "zoho_tax_id", e.target.value)}
+                                                            style={{
+                                                                width: "100%",
+                                                                padding: "6px 10px",
+                                                                borderRadius: "4px",
+                                                                border: "1px solid #c9cccf",
+                                                                fontSize: "12px",
+                                                                backgroundColor: "#ffffff",
+                                                            }}
+                                                        >
+                                                            <option value="">Select Zoho Tax Rate...</option>
+                                                            {zohoTaxes.map((tax) => (
+                                                                <option key={tax.tax_id} value={tax.tax_id}>
+                                                                    {tax.tax_name} ({tax.tax_percentage}%)
+                                                                </option>
+                                                            ))}
+                                                        </select>
+                                                    </div>
+
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => removeTaxMappingRow(idx)}
+                                                        style={{
+                                                            background: "none",
+                                                            border: "none",
+                                                            color: "#d72c0d",
+                                                            fontSize: "16px",
+                                                            fontWeight: "bold",
+                                                            cursor: "pointer",
+                                                        }}
+                                                    >
+                                                        ×
+                                                    </button>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "8px" }}>
+                                    <button
+                                        type="button"
+                                        className="primary-btn"
+                                        onClick={saveTaxSettingsApi}
+                                        disabled={savingTaxSettings}
+                                        style={{
+                                            padding: "8px 16px",
+                                            borderRadius: "6px",
+                                            border: "1px solid #005bd3",
+                                            backgroundColor: "#005bd3",
+                                            color: "#ffffff",
+                                            fontSize: "13px",
+                                            fontWeight: 600,
+                                            cursor: savingTaxSettings ? "wait" : "pointer",
+                                        }}
+                                    >
+                                        {savingTaxSettings ? "Saving Tax Settings..." : "Save Tax Configuration"}
+                                    </button>
+                                </div>
+                            </div>
                         </div>
                     </section>
 

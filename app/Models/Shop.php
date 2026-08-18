@@ -12,6 +12,7 @@ class Shop extends Model
         'refresh_token',
         'scope',
         'payment_gateway_settings',
+        'tax_settings',
         'access_token_expires_at',
     ];
 
@@ -19,6 +20,7 @@ class Shop extends Model
         'access_token' => 'encrypted',
         'refresh_token' => 'encrypted',
         'payment_gateway_settings' => 'array',
+        'tax_settings' => 'array',
         'access_token_expires_at' => 'datetime',
     ];
 

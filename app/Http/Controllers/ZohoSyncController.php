@@ -1607,12 +1607,14 @@ GRAPHQL;
 
         $zohoConnection = $shop->zohoConnection;
         $zohoAccounts = [];
+        $zohoTaxes = [];
         if ($zohoConnection) {
             try {
                 $zohoService = new ZohoService($shop);
                 $zohoAccounts = $zohoService->fetchAccounts();
+                $zohoTaxes = $zohoService->getTaxes();
             } catch (\Throwable $e) {
-                Log::warning('Could not fetch Zoho accounts: ' . $e->getMessage());
+                Log::warning('Could not fetch Zoho metadata: ' . $e->getMessage());
             }
         }
 
@@ -1637,6 +1639,20 @@ GRAPHQL;
             ];
         }
 
+        $defaultTaxSettings = [
+            'tax_mode' => 'exclusive',
+            'default_tax_id' => '',
+            'shipping_tax_mode' => 'use_order_tax',
+            'discount_tax_mode' => 'before_tax',
+            'tax_mappings' => [
+                ['shopify_tax_name' => 'GST', 'shopify_rate' => 5, 'zoho_tax_id' => ''],
+                ['shopify_tax_name' => 'GST', 'shopify_rate' => 18, 'zoho_tax_id' => ''],
+                ['shopify_tax_name' => 'VAT', 'shopify_rate' => 20, 'zoho_tax_id' => ''],
+            ],
+        ];
+
+        $taxSettings = array_merge($defaultTaxSettings, $shop->tax_settings ?? []);
+
         return response()->json([
             'success' => true,
             'shop' => [
@@ -1646,6 +1662,8 @@ GRAPHQL;
             'zohoConnection' => $zohoConnection,
             'paymentGatewaySettings' => $paymentGatewaySettings,
             'zohoAccounts' => $zohoAccounts,
+            'taxSettings' => $taxSettings,
+            'zohoTaxes' => $zohoTaxes,
             'host' => $request->query('host'),
         ]);
     }
@@ -1684,6 +1702,65 @@ GRAPHQL;
             'success' => true,
             'message' => 'Payment gateway settings saved successfully.',
             'payment_gateway_settings' => $settingsMap,
+        ]);
+    }
+
+    public function saveTaxSettings(Request $request): JsonResponse
+    {
+        $shop = $request->attributes->get('shop') ?? $this->resolveShopModel($request);
+
+        if (!$shop) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No Shopify shop installed.',
+            ], 404);
+        }
+
+        $validated = $request->validate([
+            'tax_mode' => ['required', 'string', 'in:inclusive,exclusive'],
+            'default_tax_id' => ['nullable', 'string'],
+            'shipping_tax_mode' => ['required', 'string', 'in:use_order_tax,separate_shipping_tax,no_tax'],
+            'discount_tax_mode' => ['required', 'string', 'in:before_tax,after_tax'],
+            'tax_mappings' => ['nullable', 'array', 'max:50'],
+            'tax_mappings.*.shopify_tax_name' => ['nullable', 'string', 'max:100'],
+            'tax_mappings.*.shopify_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
+            'tax_mappings.*.zoho_tax_id' => ['nullable', 'string'],
+        ]);
+
+        if (!empty($validated['tax_mappings'])) {
+            if (count($validated['tax_mappings']) > 50) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Maximum limit of 50 tax mappings allowed per shop.',
+                ], 422);
+            }
+
+            $seen = [];
+            foreach ($validated['tax_mappings'] as $mapping) {
+                $name = strtolower(trim($mapping['shopify_tax_name'] ?? ''));
+                $rate = isset($mapping['shopify_rate']) && $mapping['shopify_rate'] !== '' ? round((float) $mapping['shopify_rate'], 2) : null;
+
+                if ($name !== '' && $rate !== null) {
+                    $key = "{$name}:{$rate}";
+                    if (isset($seen[$key])) {
+                        $displayName = $mapping['shopify_tax_name'] ?? 'Tax';
+                        return response()->json([
+                            'success' => false,
+                            'message' => "Duplicate tax mapping detected for '{$displayName}' at rate {$rate}%.",
+                        ], 422);
+                    }
+                    $seen[$key] = true;
+                }
+            }
+        }
+
+        $shop->tax_settings = $validated;
+        $shop->save();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Tax configuration saved successfully.',
+            'tax_settings' => $shop->tax_settings,
         ]);
     }
 
