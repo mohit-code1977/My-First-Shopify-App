@@ -1,5 +1,8 @@
 import React, { useState } from "react";
 import { Head } from "@inertiajs/react";
+import { AppProvider } from "@shopify/polaris";
+import enTranslations from "@shopify/polaris/locales/en.json";
+import "@shopify/polaris/build/esm/styles.css";
 
 export default function ZohoLayout({
     title = "Zoho Books Integration",
@@ -91,7 +94,7 @@ export default function ZohoLayout({
     };
 
     return (
-        <>
+        <AppProvider i18n={enTranslations}>
             <Head title={title} />
 
             {/* App Bridge Left Navigation Registration */}
@@ -217,10 +220,10 @@ export default function ZohoLayout({
                 )}
 
                 {/* MAIN CONTENT AREA */}
-                <main style={{ flex: 1, padding: "24px 32px", boxSizing: "border-box", minWidth: 0, maxWidth: "1400px", width: "100%", margin: "0 auto" }}>
+                <main style={{ flex: 1, padding: "20px 24px", boxSizing: "border-box", minWidth: 0, width: "100%", margin: "0 auto" }}>
                     {children}
                 </main>
             </div>
-        </>
+        </AppProvider>
     );
 }
