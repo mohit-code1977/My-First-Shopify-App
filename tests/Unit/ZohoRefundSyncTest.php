@@ -445,4 +445,148 @@ class ZohoRefundSyncTest extends TestCase {
         $this->assertNull($refund->fresh()->zoho_creditnote_id);
         $this->assertEquals('pending', $refund->fresh()->sync_status);
     }
+
+    public function test_refund_sync_reproduces_order_1027_amount_reconciliation_inr()
+    {
+        $lastPayload = null;
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/creditnotes*' => function (\Illuminate\Http\Client\Request $request) use (&$lastPayload) {
+                if ($request->method() === 'POST') {
+                    $lastPayload = $request->data();
+                    return Http::response([
+                        'code' => 0,
+                        'creditnote' => [
+                            'creditnote_id' => 'cn_1027',
+                            'creditnote_number' => 'CN-1027',
+                        ],
+                    ], 200);
+                }
+                return Http::response(['creditnotes' => []], 200);
+            },
+        ]);
+
+        $order1027 = Order::create([
+            'shop_id' => $this->shop->id,
+            'customer_id' => $this->customer->id,
+            'shopify_order_id' => '7482130202792',
+            'order_number' => '1027',
+            'currency' => 'INR',
+            'total_price' => 1098.25,
+        ]);
+
+        $refund = Refund::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $order1027->id,
+            'shopify_refund_id' => '998258704552',
+            'shopify_order_id' => '7482130202792',
+            'amount' => 1098.25,
+            'currency' => 'INR',
+            'note' => 'Order canceled',
+            'restock' => true,
+            'refund_line_items' => [
+                [
+                    'line_item_id' => 16375282335912,
+                    'variant_id' => 55882947330216,
+                    'title' => 'Dekorly Artificial Potted Plants',
+                    'quantity' => 1,
+                    'price' => 11.18,
+                    'restock_type' => 'cancel',
+                ],
+            ],
+            'status' => 'completed',
+            'sync_status' => 'pending',
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncRefund($refund);
+
+        $this->assertTrue($result['success']);
+        $this->assertNotNull($lastPayload);
+        $this->assertEquals('INR', $lastPayload['currency_code']);
+
+        $lineSum = array_reduce($lastPayload['line_items'], function ($sum, $item) {
+            return $sum + ($item['rate'] * $item['quantity']);
+        }, 0.0);
+
+        $this->assertEquals(1098.25, $lineSum);
+    }
+
+    public function test_refund_sync_handles_shipping_only_refund()
+    {
+        $lastPayload = null;
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/creditnotes*' => function (\Illuminate\Http\Client\Request $request) use (&$lastPayload) {
+                if ($request->method() === 'POST') {
+                    $lastPayload = $request->data();
+                    return Http::response([
+                        'code' => 0,
+                        'creditnote' => ['creditnote_id' => 'cn_ship', 'creditnote_number' => 'CN-SHIP'],
+                    ], 200);
+                }
+                return Http::response(['creditnotes' => []], 200);
+            },
+        ]);
+
+        $refund = Refund::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $this->order->id,
+            'shopify_refund_id' => 'ref_ship_only',
+            'shopify_order_id' => $this->order->shopify_order_id,
+            'amount' => 30.00,
+            'currency' => 'USD',
+            'refund_line_items' => [],
+            'status' => 'completed',
+            'sync_status' => 'pending',
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncRefund($refund);
+
+        $this->assertTrue($result['success']);
+        $this->assertCount(1, $lastPayload['line_items']);
+        $this->assertEquals(30.00, $lastPayload['line_items'][0]['rate']);
+    }
+
+    public function test_refund_sync_handles_discounted_order_scaling()
+    {
+        $lastPayload = null;
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/creditnotes*' => function (\Illuminate\Http\Client\Request $request) use (&$lastPayload) {
+                if ($request->method() === 'POST') {
+                    $lastPayload = $request->data();
+                    return Http::response([
+                        'code' => 0,
+                        'creditnote' => ['creditnote_id' => 'cn_disc', 'creditnote_number' => 'CN-DISC'],
+                    ], 200);
+                }
+                return Http::response(['creditnotes' => []], 200);
+            },
+        ]);
+
+        $refund = Refund::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $this->order->id,
+            'shopify_refund_id' => 'ref_disc',
+            'shopify_order_id' => $this->order->shopify_order_id,
+            'amount' => 70.00,
+            'currency' => 'EUR',
+            'refund_line_items' => [
+                ['title' => 'Jacket', 'quantity' => 1, 'price' => 100.00],
+            ],
+            'status' => 'completed',
+            'sync_status' => 'pending',
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncRefund($refund);
+
+        $this->assertTrue($result['success']);
+        $this->assertEquals('EUR', $lastPayload['currency_code']);
+
+        $lineSum = array_reduce($lastPayload['line_items'], function ($sum, $item) {
+            return $sum + ($item['rate'] * $item['quantity']);
+        }, 0.0);
+
+        $this->assertEquals(70.00, $lineSum);
+    }
 }

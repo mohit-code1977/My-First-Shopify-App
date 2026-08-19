@@ -81,6 +81,9 @@ Route::middleware(['shopify.auth'])->group(function () {
     Route::post('/zoho/sync-order', [ZohoSyncController::class, 'syncOrder'])
         ->name('zoho.sync.order');
 
+    Route::post('/zoho/cancel-order', [ZohoSyncController::class, 'cancelOrder'])
+        ->name('zoho.cancel.order');
+
     Route::post('/zoho/sync-invoice', [ZohoSyncController::class, 'syncInvoice'])
         ->name('zoho.sync.invoice');
 
@@ -122,6 +125,9 @@ Route::post('/webhooks/customers', [ShopifyWebhookController::class, 'customersU
 
 Route::post('/webhooks/orders', [ShopifyWebhookController::class, 'ordersUpdate'])
     ->name('shopify.webhooks.orders');
+
+Route::post('/webhooks/orders/cancelled', [ShopifyWebhookController::class, 'ordersCancelled'])
+    ->name('shopify.webhooks.orders_cancelled');
 
 Route::post('/webhooks/order-transactions', [ShopifyWebhookController::class, 'orderTransactionsCreate'])
     ->name('shopify.webhooks.order_transactions');

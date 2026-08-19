@@ -917,6 +917,8 @@ query fetchSingleOrder($id: ID!) {
         totalPriceSet { presentmentMoney { amount currencyCode } shopMoney { amount currencyCode } }
         displayFinancialStatus
         displayFulfillmentStatus
+        cancelledAt
+        cancelReason
         note
         shippingAddress {
             firstName
@@ -1153,35 +1155,49 @@ GRAPHQL;
 
         $taxesIncluded = (bool) ($node['taxesIncluded'] ?? false);
 
+        $existingOrder = Order::where('shop_id', $shop->id)
+            ->where('shopify_order_id', $gid)
+            ->first();
+
+        $updateData = [
+            'customer_id' => $customerId,
+            'order_number' => $node['name'] ?? "#{$numericId}",
+            'order_date' => !empty($node['createdAt']) ? date('Y-m-d H:i:s', strtotime($node['createdAt'])) : now(),
+            'currency' => $orderCurrency,
+            'subtotal' => $subtotal,
+            'discount_total' => $discountTotal,
+            'shipping_total' => $shippingTotal,
+            'shipping_method' => $shippingMethod,
+            'shipping_address' => $shippingAddress,
+            'shipping_lines' => $shippingLines,
+            'tracking_number' => $trackingNumber,
+            'tracking_company' => $trackingCompany,
+            'tracking_url' => $trackingUrl,
+            'fulfillments' => $fulfillments,
+            'tax_total' => $taxTotal,
+            'total_price' => $totalPrice,
+            'financial_status' => strtolower($node['displayFinancialStatus'] ?? 'pending'),
+            'fulfillment_status' => strtolower($node['displayFulfillmentStatus'] ?? 'unfulfilled'),
+            'line_items' => $lineItems,
+            'tax_lines' => $orderTaxLines,
+            'taxes_included' => $taxesIncluded,
+            'notes' => $node['note'] ?? null,
+        ];
+
+        if (!empty($node['cancelledAt'])) {
+            $updateData['cancelled_at'] = date('Y-m-d H:i:s', strtotime($node['cancelledAt']));
+            $updateData['cancel_reason'] = !empty($node['cancelReason']) ? strtolower($node['cancelReason']) : null;
+        } elseif ($existingOrder && $existingOrder->cancelled_at) {
+            $updateData['cancelled_at'] = $existingOrder->cancelled_at;
+            $updateData['cancel_reason'] = $existingOrder->cancel_reason;
+        }
+
         $order = Order::updateOrCreate(
             [
                 'shop_id' => $shop->id,
                 'shopify_order_id' => $gid,
             ],
-            [
-                'customer_id' => $customerId,
-                'order_number' => $node['name'] ?? "#{$numericId}",
-                'order_date' => !empty($node['createdAt']) ? date('Y-m-d H:i:s', strtotime($node['createdAt'])) : now(),
-                'currency' => $orderCurrency,
-                'subtotal' => $subtotal,
-                'discount_total' => $discountTotal,
-                'shipping_total' => $shippingTotal,
-                'shipping_method' => $shippingMethod,
-                'shipping_address' => $shippingAddress,
-                'shipping_lines' => $shippingLines,
-                'tracking_number' => $trackingNumber,
-                'tracking_company' => $trackingCompany,
-                'tracking_url' => $trackingUrl,
-                'fulfillments' => $fulfillments,
-                'tax_total' => $taxTotal,
-                'total_price' => $totalPrice,
-                'financial_status' => strtolower($node['displayFinancialStatus'] ?? 'pending'),
-                'fulfillment_status' => strtolower($node['displayFulfillmentStatus'] ?? 'unfulfilled'),
-                'line_items' => $lineItems,
-                'tax_lines' => $orderTaxLines,
-                'taxes_included' => $taxesIncluded,
-                'notes' => $node['note'] ?? null,
-            ]
+            $updateData
         );
 
         if ($shop->zohoConnection) {

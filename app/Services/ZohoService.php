@@ -2498,9 +2498,14 @@ class ZohoService {
             $response = $this->makeRequest('POST', "/books/v3/invoices/{$zohoInvoiceId}/status/void");
             return $response['invoice'] ?? $response;
         } catch (\Throwable $e) {
-            if (str_contains(strtolower($e->getMessage()), 'already void')) {
+            $msg = strtolower($e->getMessage());
+            if (str_contains($msg, 'already void')) {
                 Log::info("voidInvoice: Invoice {$zohoInvoiceId} is already void in Zoho Books.");
                 return ['invoice_id' => $zohoInvoiceId, 'status' => 'void'];
+            }
+            if (str_contains($msg, 'payment') || str_contains($msg, 'cannot be voided') || str_contains($msg, 'associated with it')) {
+                Log::info("voidInvoice: Invoice {$zohoInvoiceId} cannot be voided because customer payments are associated with it.");
+                return ['invoice_id' => $zohoInvoiceId, 'status' => 'paid_cannot_void', 'message' => 'Invoice has associated customer payments and requires Credit Note / Refund reconciliation rather than voiding.'];
             }
             throw $e;
         }
@@ -2533,11 +2538,12 @@ class ZohoService {
             }
 
             if ($zohoInvoiceId) {
-                $this->voidInvoice($zohoInvoiceId);
+                $voidRes = $this->voidInvoice($zohoInvoiceId);
+                $status = ($voidRes['status'] ?? '') === 'paid_cannot_void' ? ($localInvoice->status ?? 'sent') : 'void';
 
                 if ($localInvoice) {
                     $localInvoice->update([
-                        'status' => 'void',
+                        'status' => $status,
                         'sync_status' => 'synced',
                         'synced_at' => now(),
                     ]);
@@ -2550,7 +2556,7 @@ class ZohoService {
                     'action' => 'void',
                     'status' => 'success',
                     'zoho_invoice_id' => $zohoInvoiceId,
-                    'message' => 'Invoice voided in Zoho Books.',
+                    'message' => $voidRes['message'] ?? 'Invoice voided in Zoho Books.',
                     'synced_at' => now(),
                 ]);
 
@@ -2558,10 +2564,10 @@ class ZohoService {
                     'success' => true,
                     'created' => false,
                     'updated' => true,
-                    'voided' => true,
+                    'voided' => $status === 'void',
                     'zoho_invoice_id' => $zohoInvoiceId,
                     'order_id' => $order->id,
-                    'message' => 'Invoice voided successfully.',
+                    'message' => $voidRes['message'] ?? 'Invoice voided successfully.',
                 ];
             }
 
@@ -3036,8 +3042,8 @@ class ZohoService {
             $order->unsetRelations();
             $order->refresh();
 
-            if (in_array(strtolower((string) $order->financial_status), ['refunded', 'voided'])) {
-                throw new \Exception("Cannot sync payment #{$payment->id} for order #{$order->order_number}: Order financial status is '{$order->financial_status}'. Payments cannot be recorded or synchronized for refunded or voided orders.");
+            if (in_array(strtolower((string) $order->financial_status), ['refunded', 'voided', 'cancelled'])) {
+                throw new \Exception("Cannot sync payment #{$payment->id} for order #{$order->order_number}: Order financial status is '{$order->financial_status}'. Payments cannot be recorded or synchronized for cancelled, refunded, or voided orders.");
             }
 
             // 2. Resolve & Validate Invoice
@@ -3344,23 +3350,58 @@ class ZohoService {
         // 3. Create Credit Note in Zoho if not existing
         if (empty($zohoCreditNoteId)) {
             try {
+                $targetAmount = (float) $refund->amount;
                 $lineItems = [];
                 if (!empty($refund->refund_line_items) && is_array($refund->refund_line_items)) {
                     foreach ($refund->refund_line_items as $item) {
-                        $lineItems[] = [
-                            'name' => $item['title'] ?? $item['name'] ?? 'Refunded Item',
-                            'rate' => (float) ($item['price'] ?? $item['rate'] ?? $refund->amount),
-                            'quantity' => (int) ($item['quantity'] ?? 1),
-                        ];
+                        $qty = (int) ($item['quantity'] ?? 1);
+                        $rate = (float) ($item['price'] ?? $item['rate'] ?? 0.0);
+                        if ($rate > 0 || $qty > 0) {
+                            $lineItems[] = [
+                                'name' => $item['title'] ?? $item['name'] ?? 'Refunded Item',
+                                'rate' => $rate,
+                                'quantity' => $qty > 0 ? $qty : 1,
+                            ];
+                        }
                     }
                 }
 
-                if (empty($lineItems)) {
-                    $lineItems[] = [
-                        'name' => "Shopify Refund #{$refund->shopify_refund_id} (Order #{$order->order_number})",
-                        'rate' => (float) $refund->amount,
-                        'quantity' => 1,
+                $sum = array_reduce($lineItems, function ($acc, $i) {
+                    return $acc + ($i['rate'] * $i['quantity']);
+                }, 0.0);
+
+                if (empty($lineItems) || $sum <= 0) {
+                    $lineItems = [
+                        [
+                            'name' => "Shopify Refund #{$refund->shopify_refund_id} (Order #{$order->order_number})",
+                            'rate' => $targetAmount,
+                            'quantity' => 1,
+                        ]
                     ];
+                } else if ($targetAmount > 0 && abs($targetAmount - $sum) > 0.001) {
+                    $diff = round($targetAmount - $sum, 2);
+                    if ($diff > 0) {
+                        $lineItems[] = [
+                            'name' => "Refund Adjustments / Shipping / Taxes",
+                            'rate' => $diff,
+                            'quantity' => 1,
+                        ];
+                    } else {
+                        $ratio = $targetAmount / $sum;
+                        $scaledSum = 0.0;
+                        $count = count($lineItems);
+                        foreach ($lineItems as $idx => &$li) {
+                            $li['rate'] = round($li['rate'] * $ratio, 2);
+                            $scaledSum += $li['rate'] * $li['quantity'];
+                        }
+                        unset($li);
+
+                        $rem = round($targetAmount - $scaledSum, 2);
+                        if (abs($rem) > 0.001 && $count > 0) {
+                            $lastQty = $lineItems[$count - 1]['quantity'];
+                            $lineItems[$count - 1]['rate'] = round($lineItems[$count - 1]['rate'] + ($rem / $lastQty), 2);
+                        }
+                    }
                 }
 
                 $payload = [
@@ -3461,6 +3502,67 @@ class ZohoService {
             'order_id' => $order->id,
             'message' => $refundMsg,
         ];
+    }
+
+    /**
+     * Complete Order Cancellation Synchronization flow across Zoho Sales Order and Zoho Invoice.
+     */
+    public function cancelOrder(Order $order): array
+    {
+        if ($order->shop_id !== $this->shop->id) {
+            throw new \Exception("Order #{$order->id} does not belong to shop {$this->shop->shop_domain}");
+        }
+
+        $order->financial_status = 'cancelled';
+        if (empty($order->cancelled_at)) {
+            $order->cancelled_at = now();
+        }
+        $order->save();
+
+        try {
+            $soResult = $this->syncOrder($order);
+            $invResult = $this->syncInvoice($order);
+
+            $order->cancel_sync_status = 'synced';
+            $order->save();
+
+            SyncHistory::create([
+                'shop_id' => $this->shop->id,
+                'order_id' => $order->id,
+                'invoice_id' => $order->invoice->id ?? null,
+                'action' => 'order_cancelled',
+                'status' => 'success',
+                'zoho_sales_order_id' => $order->zoho_sales_order_id,
+                'zoho_invoice_id' => $order->invoice->zoho_invoice_id ?? null,
+                'message' => "Order #{$order->order_number} cancellation synchronized to Zoho Books.",
+                'synced_at' => now(),
+            ]);
+
+            return [
+                'success' => true,
+                'order_id' => $order->id,
+                'sales_order_result' => $soResult,
+                'invoice_result' => $invResult,
+                'message' => "Order #{$order->order_number} cancellation synchronized successfully.",
+            ];
+        } catch (\Throwable $e) {
+            $order->cancel_sync_status = 'failed';
+            $order->save();
+
+            SyncHistory::create([
+                'shop_id' => $this->shop->id,
+                'order_id' => $order->id,
+                'invoice_id' => $order->invoice->id ?? null,
+                'action' => 'order_cancelled',
+                'status' => 'failed',
+                'zoho_sales_order_id' => $order->zoho_sales_order_id,
+                'zoho_invoice_id' => $order->invoice->zoho_invoice_id ?? null,
+                'message' => "Order #{$order->order_number} cancellation sync failed: " . $e->getMessage(),
+                'synced_at' => now(),
+            ]);
+
+            throw $e;
+        }
     }
 }
 

@@ -834,36 +834,56 @@ class ShopifyWebhookController extends Controller
             $financialStatus = 'cancelled';
         }
 
+        $existingOrder = Order::where('shop_id', $shop->id)
+            ->where(function ($q) use ($shopifyOrderId) {
+                $numericId = preg_replace('/[^0-9]/', '', (string) $shopifyOrderId);
+                $gid = str_starts_with((string) $shopifyOrderId, 'gid://')
+                    ? (string) $shopifyOrderId
+                    : "gid://shopify/Order/{$shopifyOrderId}";
+                $q->where('shopify_order_id', $numericId)
+                    ->orWhere('shopify_order_id', $gid);
+            })->first();
+
+        $updateData = [
+            'customer_id' => $customerId,
+            'order_number' => $orderNumber,
+            'order_date' => !empty($payload['created_at']) ? date('Y-m-d H:i:s', strtotime($payload['created_at'])) : now(),
+            'currency' => $orderCurrency,
+            'subtotal' => $subtotal,
+            'discount_total' => $discountTotal,
+            'shipping_total' => $shippingTotal,
+            'shipping_method' => $shippingMethod,
+            'shipping_address' => $shippingAddr,
+            'shipping_lines' => $shippingLines,
+            'tracking_number' => $trackingNumber,
+            'tracking_company' => $trackingCompany,
+            'tracking_url' => $trackingUrl,
+            'fulfillments' => $fulfillments,
+            'tax_total' => $taxTotal,
+            'total_price' => $totalPrice,
+            'taxes_included' => $taxesIncluded,
+            'tax_lines' => $orderTaxLines,
+            'financial_status' => $financialStatus,
+            'fulfillment_status' => $payload['fulfillment_status'] ?? null,
+            'line_items' => $lineItems,
+            'notes' => $payload['note'] ?? null,
+            'coupon_code' => $couponCode,
+        ];
+
+        if (!empty($payload['cancelled_at'])) {
+            $updateData['cancelled_at'] = date('Y-m-d H:i:s', strtotime($payload['cancelled_at']));
+            $updateData['cancel_reason'] = $payload['cancel_reason'] ?? null;
+        } elseif ($existingOrder && $existingOrder->cancelled_at) {
+            $updateData['cancelled_at'] = $existingOrder->cancelled_at;
+            $updateData['cancel_reason'] = $existingOrder->cancel_reason;
+        }
+
         $order = Order::updateOrCreate(
             [
                 'shop_id' => $shop->id,
-                'shopify_order_id' => $shopifyOrderId,
+                'shopify_order_id' => $existingOrder ? $existingOrder->shopify_order_id : $shopifyOrderId,
             ],
-            [
-                'customer_id' => $customerId,
-                'order_number' => $orderNumber,
-                'order_date' => !empty($payload['created_at']) ? date('Y-m-d H:i:s', strtotime($payload['created_at'])) : now(),
-                'currency' => $orderCurrency,
-                'subtotal' => $subtotal,
-                'discount_total' => $discountTotal,
-                'shipping_total' => $shippingTotal,
-                'shipping_method' => $shippingMethod,
-                'shipping_address' => $shippingAddr,
-                'shipping_lines' => $shippingLines,
-                'tracking_number' => $trackingNumber,
-                'tracking_company' => $trackingCompany,
-                'tracking_url' => $trackingUrl,
-                'fulfillments' => $fulfillments,
-                'tax_total' => $taxTotal,
-                'total_price' => $totalPrice,
-                'taxes_included' => $taxesIncluded,
-                'tax_lines' => $orderTaxLines,
-                'financial_status' => $financialStatus,
-                'fulfillment_status' => $payload['fulfillment_status'] ?? null,
-                'line_items' => $lineItems,
-                'notes' => $payload['note'] ?? null,
-                'coupon_code' => $couponCode,
-            ]
+            $updateData
         );
 
         $synced = false;
@@ -906,6 +926,112 @@ class ShopifyWebhookController extends Controller
     public function ordersCreate(Request $request)
     {
         return $this->ordersUpdate($request);
+    }
+
+    /**
+     * Handle Shopify orders/cancelled webhook.
+     */
+    public function ordersCancelled(Request $request): JsonResponse
+    {
+        Log::info('Shopify orders/cancelled webhook received', [
+            'shop' => $request->header('X-Shopify-Shop-Domain'),
+            'webhook_id' => $request->header('X-Shopify-Webhook-Id'),
+            'topic' => $request->header('X-Shopify-Topic'),
+        ]);
+
+        // 1. Verify HMAC Signature
+        $hmacHeader = $request->header('X-Shopify-Hmac-Sha256') ?? $request->header('X-Shopify-Hmac-SHA256');
+        if (!empty($hmacHeader)) {
+            $secret = config('services.shopify.api_secret') ?? env('SHOPIFY_API_SECRET') ?? config('shopify-app.api_secret');
+            if ($secret) {
+                $calculatedHmac = base64_encode(hash_hmac('sha256', $request->getContent(), $secret, true));
+                if (!hash_equals($calculatedHmac, $hmacHeader)) {
+                    Log::warning('ordersCancelled: Invalid HMAC signature.');
+                    return response()->json(['error' => 'Invalid HMAC signature'], 401);
+                }
+            }
+        }
+
+        // 2. Identify Shop
+        $shopDomain = $request->header('X-Shopify-Shop-Domain');
+        $shop = Shop::where('shop_domain', $shopDomain)->first();
+        if (!$shop) {
+            Log::warning("ordersCancelled: Shop not found for domain '{$shopDomain}'.");
+            return response()->json(['error' => 'Shop not found'], 404);
+        }
+
+        // 3. Idempotency Check
+        $webhookId = $request->header('X-Shopify-Webhook-Id');
+        if (!empty($webhookId)) {
+            $alreadyProcessed = ShopifyProcessedWebhook::where('webhook_id', $webhookId)
+                ->where('shop_domain', $shopDomain)
+                ->exists();
+
+            if ($alreadyProcessed) {
+                Log::info("ordersCancelled: Webhook ID {$webhookId} has already been processed. Skipping.");
+                return response()->json([
+                    'message' => 'Webhook already processed',
+                    'webhook_id' => $webhookId,
+                ], 200);
+            }
+
+            ShopifyProcessedWebhook::create([
+                'webhook_id' => $webhookId,
+                'shop_domain' => $shopDomain,
+                'topic' => $request->header('X-Shopify-Topic') ?? 'orders/cancelled',
+            ]);
+        }
+
+        $payload = json_decode($request->getContent(), true);
+        if (!$payload || empty($payload['id'])) {
+            Log::warning('ordersCancelled: Invalid or missing order payload.');
+            return response()->json(['error' => 'Invalid payload'], 400);
+        }
+
+        $rawOrderId = (string) $payload['id'];
+        $numericOrderId = preg_replace('/^gid:\/\/shopify\/Order\//', '', $rawOrderId);
+        $gidOrderId = str_starts_with($rawOrderId, 'gid://') ? $rawOrderId : "gid://shopify/Order/{$rawOrderId}";
+
+        $order = Order::where('shop_id', $shop->id)
+            ->where(function ($q) use ($numericOrderId, $gidOrderId, $rawOrderId) {
+                $q->where('shopify_order_id', $numericOrderId)
+                    ->orWhere('shopify_order_id', $gidOrderId)
+                    ->orWhere('shopify_order_id', $rawOrderId);
+            })
+            ->first();
+
+        if (!$order) {
+            Log::info("ordersCancelled: Order {$numericOrderId} not found locally. Creating order before cancellation.");
+            $order = $this->createLocalOrderFromShopifyData($shop, $payload);
+        }
+
+        $order->financial_status = 'cancelled';
+        $order->cancelled_at = !empty($payload['cancelled_at']) ? date('Y-m-d H:i:s', strtotime($payload['cancelled_at'])) : now();
+        $order->cancel_reason = $payload['cancel_reason'] ?? null;
+        $order->save();
+
+        $synced = false;
+        $syncError = null;
+
+        if ($shop->zohoConnection) {
+            try {
+                $zohoService = new ZohoService($shop);
+                $result = $zohoService->cancelOrder($order);
+                $synced = true;
+            } catch (\Throwable $e) {
+                Log::error("ordersCancelled: Zoho cancellation sync failed for order ID {$order->id}: " . $e->getMessage());
+                $syncError = $e->getMessage();
+            }
+        }
+
+        return response()->json([
+            'message' => 'Order cancellation webhook processed successfully.',
+            'order_id' => $order->id,
+            'shopify_order_id' => $order->shopify_order_id,
+            'financial_status' => $order->financial_status,
+            'zoho_synced' => $synced,
+            'error' => $syncError,
+        ], 200);
     }
 
     /**
@@ -1379,6 +1505,10 @@ class ShopifyWebhookController extends Controller
         $order->financial_status = ($totalAmount >= (float) $order->total_price && (float) $order->total_price > 0)
             ? 'refunded'
             : 'partially_refunded';
+        if (!empty($payload['cancelled_at']) && empty($order->cancelled_at)) {
+            $order->cancelled_at = date('Y-m-d H:i:s', strtotime($payload['cancelled_at']));
+            $order->cancel_reason = $payload['cancel_reason'] ?? null;
+        }
         $order->save();
 
         $synced = false;

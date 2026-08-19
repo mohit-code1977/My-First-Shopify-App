@@ -546,6 +546,14 @@ class ZohoSyncController extends Controller {
                 'order_date' => !empty($raw['created_at']) ? \Carbon\Carbon::parse($raw['created_at']) : now(),
             ];
 
+            if (!empty($raw['cancelled_at'])) {
+                $orderData['cancelled_at'] = \Carbon\Carbon::parse($raw['cancelled_at']);
+                $orderData['cancel_reason'] = $raw['cancel_reason'] ?? null;
+            } elseif ($existingOrder && $existingOrder->cancelled_at) {
+                $orderData['cancelled_at'] = $existingOrder->cancelled_at;
+                $orderData['cancel_reason'] = $existingOrder->cancel_reason;
+            }
+
             if (!$existingOrder || empty($existingOrder->order_number) || !str_starts_with($existingOrder->order_number, '#')) {
                 $rawNumber = (string) ($raw['order_number'] ?? $raw['name'] ?? $raw['id']);
                 if (!str_starts_with($rawNumber, '#') && !empty($raw['name']) && str_starts_with($raw['name'], '#')) {
@@ -1119,6 +1127,56 @@ GRAPHQL;
             return response()->json([
                 'success' => true,
                 'message' => $result['message'] ?? 'Sales Order synchronized to Zoho successfully.',
+                'data' => $result,
+            ]);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    public function cancelOrder(Request $request): JsonResponse
+    {
+        $shop = $request->attributes->get('shop');
+
+        if (!$shop) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No Shopify shop installed.',
+            ], 404);
+        }
+
+        if (!$shop->zohoConnection) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Zoho is not connected.',
+            ], 409);
+        }
+
+        $validated = $request->validate([
+            'order_id' => ['required', 'integer'],
+        ]);
+
+        $order = Order::where('id', $validated['order_id'])
+            ->where('shop_id', $shop->id)
+            ->first();
+
+        if (!$order) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Order not found.',
+            ], 404);
+        }
+
+        try {
+            $zohoService = new ZohoService($shop);
+            $result = $zohoService->cancelOrder($order);
+
+            return response()->json([
+                'success' => true,
+                'message' => $result['message'] ?? 'Order cancellation synchronized to Zoho successfully.',
                 'data' => $result,
             ]);
         } catch (\Throwable $e) {

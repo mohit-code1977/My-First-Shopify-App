@@ -24,6 +24,7 @@ const ORDERS_DATA_URL = "/api/zoho/orders";
 const SYNC_ORDER_URL = "/zoho/sync-order";
 const SYNC_INVOICE_URL = "/zoho/sync-invoice";
 const SYNC_PAYMENT_URL = "/zoho/sync-payment";
+const CANCEL_ORDER_URL = "/zoho/cancel-order";
 const BULK_SYNC_ORDERS_URL = "/zoho/bulk-sync-orders";
 
 export default function Orders({
@@ -202,6 +203,56 @@ export default function Orders({
         }
     };
 
+    const handleCancelOrder = async (orderId) => {
+        if (!connectedState) {
+            setNotification({
+                type: "error",
+                message: "Zoho is not connected. Please connect in Settings first.",
+            });
+            return;
+        }
+
+        setSyncingOrderId(orderId);
+        setSyncType("cancel");
+        setNotification(null);
+
+        try {
+            const token = await window.shopify?.idToken();
+            const response = await fetch(CANCEL_ORDER_URL, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Accept: "application/json",
+                    Authorization: token ? `Bearer ${token}` : "",
+                },
+                body: JSON.stringify({ order_id: orderId }),
+            });
+
+            const data = await response.json();
+
+            if (response.ok && data.success) {
+                setNotification({
+                    type: "success",
+                    message: data.message || "Order cancellation synchronized successfully.",
+                });
+                await loadData(true);
+            } else {
+                setNotification({
+                    type: "error",
+                    message: data.message || "Order cancellation sync failed.",
+                });
+            }
+        } catch (error) {
+            setNotification({
+                type: "error",
+                message: "Network error during cancellation sync.",
+            });
+        } finally {
+            setSyncingOrderId(null);
+            setSyncType(null);
+        }
+    };
+
     const handleSyncPayment = async (paymentId, orderId) => {
         if (!connectedState) {
             setNotification({
@@ -277,6 +328,43 @@ export default function Orders({
         const payments = order.payments || [];
         const total = parseFloat(order.total_price || 0);
         const invoice = order.invoice;
+        const isCancelled = order.financial_status === "cancelled" || order.financial_status === "voided" || !!order.cancelled_at;
+        const isRefunded =
+            order.financial_status === "refunded" ||
+            (order.refunds && order.refunds.length > 0) ||
+            payments.some((p) => p.status === "refunded");
+
+        if (isCancelled && order.cancel_sync_status === "failed") {
+            return {
+                status: "cancel_failed",
+                label: "Cancel Sync Failed",
+                tone: "critical",
+            };
+        }
+
+        if (isCancelled && isRefunded) {
+            return {
+                status: "cancelled_refunded",
+                label: "Cancelled / Refunded",
+                tone: "subdued",
+            };
+        }
+
+        if (isCancelled) {
+            return {
+                status: "cancelled",
+                label: "Cancelled",
+                tone: "subdued",
+            };
+        }
+
+        if (isRefunded) {
+            return {
+                status: "refunded",
+                label: "Refunded",
+                tone: "subdued",
+            };
+        }
 
         const hasFailed = payments.some((p) => p.sync_status === "failed");
         const hasPending = payments.some((p) => p.sync_status === "pending" || p.sync_status === "processing");
@@ -312,17 +400,6 @@ export default function Orders({
                 status: "partial",
                 label: `${formatCurrency(displaySum, order.currency)} / ${formatCurrency(total, order.currency)} Synced`,
                 tone: "warning",
-            };
-        }
-
-        if (
-            order.financial_status === "refunded" ||
-            payments.some((p) => p.status === "refunded")
-        ) {
-            return {
-                status: "refunded",
-                label: "Refunded",
-                tone: "subdued",
             };
         }
 
@@ -585,9 +662,15 @@ export default function Orders({
                     )}
                 </IndexTable.Cell>
                 <IndexTable.Cell>
-                    <Badge tone={hasInvoice ? "success" : "warning"}>
-                        {hasInvoice ? "Invoiced" : "Pending Invoice"}
-                    </Badge>
+                    {o.financial_status === "cancelled" || o.financial_status === "voided" || !!o.cancelled_at || o.financial_status === "refunded" || (o.refunds && o.refunds.length > 0) ? (
+                        <Badge tone={o.cancel_sync_status === "failed" ? "critical" : (o.invoice?.status === "void" ? "subdued" : (hasInvoice ? "subdued" : "warning"))}>
+                            {o.cancel_sync_status === "failed" ? "Cancel Sync Failed" : (o.invoice?.status === "void" ? "Voided" : (o.refunds && o.refunds.some(r => !!r.zoho_creditnote_id || r.sync_status === "synced") ? "Invoiced (Credit Note)" : (o.financial_status === "refunded" ? "Invoiced (Refunded)" : (hasInvoice ? "Invoiced (Cancelled)" : "Pending Invoice"))))}
+                        </Badge>
+                    ) : (
+                        <Badge tone={hasInvoice ? "success" : "warning"}>
+                            {hasInvoice ? "Invoiced" : "Pending Invoice"}
+                        </Badge>
+                    )}
                 </IndexTable.Cell>
                 <IndexTable.Cell>
                     <div onClick={(e) => e.stopPropagation()}>
@@ -624,20 +707,32 @@ export default function Orders({
                             <ActionList
                                 actionRole="menuitem"
                                 items={[
-                                    {
-                                        content: "Sync Sales Order",
-                                        onAction: () => {
-                                            setOpenActionMenuId(null);
-                                            handleSyncOrder(o.id);
-                                        },
-                                    },
-                                    {
-                                        content: "Sync Invoice",
-                                        onAction: () => {
-                                            setOpenActionMenuId(null);
-                                            handleSyncInvoice(o.id);
-                                        },
-                                    },
+                                    ...(o.financial_status === "cancelled" || o.financial_status === "voided"
+                                        ? [
+                                              {
+                                                  content: o.cancel_sync_status === "failed" ? "Retry Cancellation Sync" : "Sync Order Cancellation",
+                                                  onAction: () => {
+                                                      setOpenActionMenuId(null);
+                                                      handleCancelOrder(o.id);
+                                                  },
+                                              },
+                                          ]
+                                        : [
+                                              {
+                                                  content: "Sync Sales Order",
+                                                  onAction: () => {
+                                                      setOpenActionMenuId(null);
+                                                      handleSyncOrder(o.id);
+                                                  },
+                                              },
+                                              {
+                                                  content: "Sync Invoice",
+                                                  onAction: () => {
+                                                      setOpenActionMenuId(null);
+                                                      handleSyncInvoice(o.id);
+                                                  },
+                                              },
+                                          ]),
                                     {
                                         content: "View Payment",
                                         onAction: () => {
@@ -1216,17 +1311,19 @@ export default function Orders({
                                                     }
                                                     disabled={
                                                         selectedOrderForPayment.financial_status === "refunded" ||
-                                                        selectedOrderForPayment.financial_status === "voided"
+                                                        selectedOrderForPayment.financial_status === "voided" ||
+                                                        selectedOrderForPayment.financial_status === "cancelled"
                                                     }
                                                 >
                                                     Record &amp; Sync Payment to
                                                     Zoho
                                                 </Button>
                                                 {(selectedOrderForPayment.financial_status === "refunded" ||
-                                                    selectedOrderForPayment.financial_status === "voided") && (
+                                                    selectedOrderForPayment.financial_status === "voided" ||
+                                                    selectedOrderForPayment.financial_status === "cancelled") && (
                                                     <Box paddingTop="100">
                                                         <Text tone="subdued" variant="bodySm" as="p">
-                                                            Payment recording is disabled for refunded or voided orders.
+                                                            Payment recording is disabled for cancelled, refunded, or voided orders.
                                                         </Text>
                                                     </Box>
                                                 )}
@@ -1333,6 +1430,11 @@ export default function Orders({
                                                                         }
                                                                         loading={
                                                                             isPaymentSyncing
+                                                                        }
+                                                                        disabled={
+                                                                            selectedOrderForPayment.financial_status === "refunded" ||
+                                                                            selectedOrderForPayment.financial_status === "voided" ||
+                                                                            selectedOrderForPayment.financial_status === "cancelled"
                                                                         }
                                                                     >
                                                                         Retry
