@@ -3259,11 +3259,29 @@ class ZohoService {
     }
 
     /**
+     * Get a Credit Note by ID from Zoho Books.
+     */
+    public function getCreditNote(string $creditNoteId): ?array
+    {
+        $response = $this->makeRequest('GET', "/books/v3/creditnotes/{$creditNoteId}");
+        return $response['creditnote'] ?? null;
+    }
+
+    /**
      * Create a Credit Note in Zoho Books.
      */
     public function createCreditNote(array $payload): array
     {
         $response = $this->makeRequest('POST', '/books/v3/creditnotes', $payload);
+        return $response['creditnote'] ?? [];
+    }
+
+    /**
+     * Update an existing Credit Note in Zoho Books.
+     */
+    public function updateCreditNote(string $creditNoteId, array $payload): array
+    {
+        $response = $this->makeRequest('PUT', "/books/v3/creditnotes/{$creditNoteId}", $payload);
         return $response['creditnote'] ?? [];
     }
 
@@ -3331,7 +3349,71 @@ class ZohoService {
         $refNumber = "RF-{$refund->shopify_refund_id}";
         $zohoCreditNoteId = $refund->zoho_creditnote_id;
         $created = false;
+        $reconciled = false;
         $updated = false;
+
+        $targetAmount = (float) $refund->amount;
+        $lineItems = [];
+        if (!empty($refund->refund_line_items) && is_array($refund->refund_line_items)) {
+            foreach ($refund->refund_line_items as $item) {
+                $qty = (int) ($item['quantity'] ?? 1);
+                $rate = (float) ($item['price'] ?? $item['rate'] ?? 0.0);
+                if ($rate > 0 || $qty > 0) {
+                    $lineItems[] = [
+                        'name' => $item['title'] ?? $item['name'] ?? 'Refunded Item',
+                        'rate' => $rate,
+                        'quantity' => $qty > 0 ? $qty : 1,
+                    ];
+                }
+            }
+        }
+
+        $sum = array_reduce($lineItems, function ($acc, $i) {
+            return $acc + ($i['rate'] * $i['quantity']);
+        }, 0.0);
+
+        if (empty($lineItems) || $sum <= 0) {
+            $lineItems = [
+                [
+                    'name' => "Shopify Refund #{$refund->shopify_refund_id} (Order #{$order->order_number})",
+                    'rate' => $targetAmount,
+                    'quantity' => 1,
+                ]
+            ];
+        } else if ($targetAmount > 0 && abs($targetAmount - $sum) > 0.001) {
+            $diff = round($targetAmount - $sum, 2);
+            if ($diff > 0) {
+                $lineItems[] = [
+                    'name' => "Refund Adjustments / Shipping / Taxes",
+                    'rate' => $diff,
+                    'quantity' => 1,
+                ];
+            } else {
+                $ratio = $targetAmount / $sum;
+                $scaledSum = 0.0;
+                $count = count($lineItems);
+                foreach ($lineItems as $idx => &$li) {
+                    $li['rate'] = round($li['rate'] * $ratio, 2);
+                    $scaledSum += $li['rate'] * $li['quantity'];
+                }
+                unset($li);
+
+                $rem = round($targetAmount - $scaledSum, 2);
+                if (abs($rem) > 0.001 && $count > 0) {
+                    $lastQty = $lineItems[$count - 1]['quantity'];
+                    $lineItems[$count - 1]['rate'] = round($lineItems[$count - 1]['rate'] + ($rem / $lastQty), 2);
+                }
+            }
+        }
+
+        $payload = [
+            'customer_id' => $zohoContactId,
+            'reference_number' => $refNumber,
+            'date' => $refund->created_at ? $refund->created_at->format('Y-m-d') : date('Y-m-d'),
+            'currency_code' => strtoupper($refund->currency ?? $order->currency ?? 'USD'),
+            'line_items' => $lineItems,
+            'notes' => $refund->note ?? "Refund for Shopify Order #{$order->order_number}",
+        ];
 
         // 2. Check idempotency / existing credit note
         if (empty($zohoCreditNoteId)) {
@@ -3340,79 +3422,12 @@ class ZohoService {
                 $zohoCreditNoteId = (string) $existing['creditnote_id'];
                 $refund->zoho_creditnote_id = $zohoCreditNoteId;
                 $refund->creditnote_number = $existing['creditnote_number'] ?? null;
-                $refund->sync_status = \App\Models\Refund::SYNC_STATUS_SYNCED;
-                $refund->synced_at = now();
-                $refund->save();
-                $updated = true;
             }
         }
 
-        // 3. Create Credit Note in Zoho if not existing
+        // 3. Create or Reconcile Credit Note in Zoho
         if (empty($zohoCreditNoteId)) {
             try {
-                $targetAmount = (float) $refund->amount;
-                $lineItems = [];
-                if (!empty($refund->refund_line_items) && is_array($refund->refund_line_items)) {
-                    foreach ($refund->refund_line_items as $item) {
-                        $qty = (int) ($item['quantity'] ?? 1);
-                        $rate = (float) ($item['price'] ?? $item['rate'] ?? 0.0);
-                        if ($rate > 0 || $qty > 0) {
-                            $lineItems[] = [
-                                'name' => $item['title'] ?? $item['name'] ?? 'Refunded Item',
-                                'rate' => $rate,
-                                'quantity' => $qty > 0 ? $qty : 1,
-                            ];
-                        }
-                    }
-                }
-
-                $sum = array_reduce($lineItems, function ($acc, $i) {
-                    return $acc + ($i['rate'] * $i['quantity']);
-                }, 0.0);
-
-                if (empty($lineItems) || $sum <= 0) {
-                    $lineItems = [
-                        [
-                            'name' => "Shopify Refund #{$refund->shopify_refund_id} (Order #{$order->order_number})",
-                            'rate' => $targetAmount,
-                            'quantity' => 1,
-                        ]
-                    ];
-                } else if ($targetAmount > 0 && abs($targetAmount - $sum) > 0.001) {
-                    $diff = round($targetAmount - $sum, 2);
-                    if ($diff > 0) {
-                        $lineItems[] = [
-                            'name' => "Refund Adjustments / Shipping / Taxes",
-                            'rate' => $diff,
-                            'quantity' => 1,
-                        ];
-                    } else {
-                        $ratio = $targetAmount / $sum;
-                        $scaledSum = 0.0;
-                        $count = count($lineItems);
-                        foreach ($lineItems as $idx => &$li) {
-                            $li['rate'] = round($li['rate'] * $ratio, 2);
-                            $scaledSum += $li['rate'] * $li['quantity'];
-                        }
-                        unset($li);
-
-                        $rem = round($targetAmount - $scaledSum, 2);
-                        if (abs($rem) > 0.001 && $count > 0) {
-                            $lastQty = $lineItems[$count - 1]['quantity'];
-                            $lineItems[$count - 1]['rate'] = round($lineItems[$count - 1]['rate'] + ($rem / $lastQty), 2);
-                        }
-                    }
-                }
-
-                $payload = [
-                    'customer_id' => $zohoContactId,
-                    'reference_number' => $refNumber,
-                    'date' => $refund->created_at ? $refund->created_at->format('Y-m-d') : date('Y-m-d'),
-                    'currency_code' => strtoupper($refund->currency ?? $order->currency ?? 'USD'),
-                    'line_items' => $lineItems,
-                    'notes' => $refund->note ?? "Refund for Shopify Order #{$order->order_number}",
-                ];
-
                 $cnResponse = $this->createCreditNote($payload);
                 $zohoCreditNoteId = (string) ($cnResponse['creditnote_id'] ?? null);
 
@@ -3441,6 +3456,74 @@ class ZohoService {
                     'synced_at' => now(),
                 ]);
 
+                throw $e;
+            }
+        } else {
+            try {
+                $existingCn = $this->getCreditNote($zohoCreditNoteId);
+                $zohoTotal = (float) ($existingCn['total'] ?? 0.0);
+                $zohoStatus = strtolower((string) ($existingCn['status'] ?? 'open'));
+
+                if (abs($zohoTotal - $targetAmount) < 0.01) {
+                    // Amounts match - no-op
+                    $refund->sync_status = \App\Models\Refund::SYNC_STATUS_SYNCED;
+                    $refund->synced_at = now();
+                    $refund->error_message = null;
+                    $refund->save();
+                } else {
+                    // Amount mismatch
+                    if ($zohoStatus !== 'open') {
+                        $errMsg = "Cannot update Credit Note {$refund->creditnote_number} in Zoho: status is '{$zohoStatus}' (expected 'open'). Manual accounting intervention required.";
+                        $refund->update([
+                            'sync_status' => \App\Models\Refund::SYNC_STATUS_FAILED,
+                            'error_message' => $errMsg,
+                        ]);
+
+                        SyncHistory::create([
+                            'shop_id' => $this->shop->id,
+                            'order_id' => $order->id,
+                            'refund_id' => $refund->id,
+                            'zoho_creditnote_id' => $zohoCreditNoteId,
+                            'action' => 'update',
+                            'status' => 'failed',
+                            'message' => $errMsg,
+                            'synced_at' => now(),
+                        ]);
+
+                        throw new \Exception($errMsg);
+                    }
+
+                    // Status is open - update Credit Note
+                    $cnResponse = $this->updateCreditNote($zohoCreditNoteId, $payload);
+                    $refund->zoho_creditnote_id = (string) ($cnResponse['creditnote_id'] ?? $zohoCreditNoteId);
+                    if (!empty($cnResponse['creditnote_number'])) {
+                        $refund->creditnote_number = $cnResponse['creditnote_number'];
+                    }
+                    $refund->sync_status = \App\Models\Refund::SYNC_STATUS_SYNCED;
+                    $refund->synced_at = now();
+                    $refund->error_message = null;
+                    $refund->save();
+                    $reconciled = true;
+                    $updated = true;
+
+                    SyncHistory::create([
+                        'shop_id' => $this->shop->id,
+                        'order_id' => $order->id,
+                        'refund_id' => $refund->id,
+                        'zoho_creditnote_id' => $zohoCreditNoteId,
+                        'action' => 'update',
+                        'status' => 'success',
+                        'message' => 'Credit Note reconciled/updated in Zoho Books.',
+                        'synced_at' => now(),
+                    ]);
+                }
+            } catch (\Throwable $e) {
+                if ($refund->sync_status !== \App\Models\Refund::SYNC_STATUS_FAILED) {
+                    $refund->update([
+                        'sync_status' => \App\Models\Refund::SYNC_STATUS_FAILED,
+                        'error_message' => $e->getMessage(),
+                    ]);
+                }
                 throw $e;
             }
         }

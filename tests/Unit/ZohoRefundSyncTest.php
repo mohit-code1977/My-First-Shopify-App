@@ -589,4 +589,309 @@ class ZohoRefundSyncTest extends TestCase {
 
         $this->assertEquals(70.00, $lineSum);
     }
+
+    public function test_refund_sync_reconciles_order_1028_inr_amount()
+    {
+        $lastPayload = null;
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/creditnotes*' => function (\Illuminate\Http\Client\Request $request) use (&$lastPayload) {
+                if ($request->method() === 'POST' || $request->method() === 'PUT') {
+                    $lastPayload = $request->data();
+                    return Http::response([
+                        'code' => 0,
+                        'creditnote' => [
+                            'creditnote_id' => '4081216000000255073',
+                            'creditnote_number' => 'CN-00012',
+                        ],
+                    ], 200);
+                }
+                return Http::response(['creditnotes' => []], 200);
+            },
+        ]);
+
+        $order1028 = Order::create([
+            'shop_id' => $this->shop->id,
+            'customer_id' => $this->customer->id,
+            'shopify_order_id' => '7482158874792',
+            'order_number' => '1028',
+            'currency' => 'INR',
+            'total_price' => 1749.42,
+        ]);
+
+        $refund = Refund::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $order1028->id,
+            'shopify_refund_id' => '998260506792',
+            'shopify_order_id' => '7482158874792',
+            'amount' => 1749.42,
+            'currency' => 'INR',
+            'refund_line_items' => [
+                ['title' => 'SAUDEEP INDIA Artificial Green Leaf Money Plant Garland', 'quantity' => 1, 'price' => 10.16],
+            ],
+            'status' => 'completed',
+            'sync_status' => 'pending',
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncRefund($refund);
+
+        $this->assertTrue($result['success']);
+        $this->assertNotNull($lastPayload);
+        $this->assertEquals('INR', $lastPayload['currency_code']);
+
+        $lineSum = array_reduce($lastPayload['line_items'], function ($sum, $item) {
+            return $sum + ($item['rate'] * $item['quantity']);
+        }, 0.0);
+
+        $this->assertEquals(1749.42, round($lineSum, 2));
+    }
+
+    public function test_existing_open_cn_with_wrong_amount_updated()
+    {
+        $putCalled = false;
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/creditnotes/cn_wrong*' => function (\Illuminate\Http\Client\Request $request) use (&$putCalled) {
+                if ($request->method() === 'GET') {
+                    return Http::response([
+                        'code' => 0,
+                        'creditnote' => [
+                            'creditnote_id' => 'cn_wrong',
+                            'creditnote_number' => 'CN-WRONG',
+                            'total' => 10.16,
+                            'status' => 'open',
+                        ],
+                    ], 200);
+                }
+                if ($request->method() === 'PUT') {
+                    $putCalled = true;
+                    return Http::response([
+                        'code' => 0,
+                        'creditnote' => [
+                            'creditnote_id' => 'cn_wrong',
+                            'creditnote_number' => 'CN-WRONG',
+                            'total' => 100.00,
+                            'status' => 'open',
+                        ],
+                    ], 200);
+                }
+                return Http::response([], 400);
+            },
+        ]);
+
+        $refund = Refund::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $this->order->id,
+            'shopify_refund_id' => 'ref_open_wrong',
+            'shopify_order_id' => $this->order->shopify_order_id,
+            'zoho_creditnote_id' => 'cn_wrong',
+            'creditnote_number' => 'CN-WRONG',
+            'amount' => 100.00,
+            'currency' => 'USD',
+            'status' => 'completed',
+            'sync_status' => 'synced',
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncRefund($refund);
+
+        $this->assertTrue($result['success']);
+        $this->assertTrue($putCalled);
+        $this->assertDatabaseHas('sync_histories', [
+            'refund_id' => $refund->id,
+            'action' => 'update',
+            'status' => 'success',
+            'message' => 'Credit Note reconciled/updated in Zoho Books.',
+        ]);
+    }
+
+    public function test_existing_open_cn_with_correct_amount_no_op()
+    {
+        $putCalled = false;
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/creditnotes/cn_correct*' => function (\Illuminate\Http\Client\Request $request) use (&$putCalled) {
+                if ($request->method() === 'GET') {
+                    return Http::response([
+                        'code' => 0,
+                        'creditnote' => [
+                            'creditnote_id' => 'cn_correct',
+                            'creditnote_number' => 'CN-CORRECT',
+                            'total' => 100.00,
+                            'status' => 'open',
+                        ],
+                    ], 200);
+                }
+                if ($request->method() === 'PUT') {
+                    $putCalled = true;
+                    return Http::response([], 200);
+                }
+                return Http::response([], 400);
+            },
+        ]);
+
+        $refund = Refund::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $this->order->id,
+            'shopify_refund_id' => 'ref_open_correct',
+            'shopify_order_id' => $this->order->shopify_order_id,
+            'zoho_creditnote_id' => 'cn_correct',
+            'creditnote_number' => 'CN-CORRECT',
+            'amount' => 100.00,
+            'currency' => 'USD',
+            'status' => 'completed',
+            'sync_status' => 'synced',
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncRefund($refund);
+
+        $this->assertTrue($result['success']);
+        $this->assertFalse($putCalled);
+    }
+
+    public function test_existing_credited_cn_must_not_update()
+    {
+        $putCalled = false;
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/creditnotes/cn_credited*' => function (\Illuminate\Http\Client\Request $request) use (&$putCalled) {
+                if ($request->method() === 'GET') {
+                    return Http::response([
+                        'code' => 0,
+                        'creditnote' => [
+                            'creditnote_id' => 'cn_credited',
+                            'creditnote_number' => 'CN-CREDITED',
+                            'total' => 10.16,
+                            'status' => 'credited',
+                        ],
+                    ], 200);
+                }
+                if ($request->method() === 'PUT') {
+                    $putCalled = true;
+                    return Http::response([], 200);
+                }
+                return Http::response([], 400);
+            },
+        ]);
+
+        $refund = Refund::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $this->order->id,
+            'shopify_refund_id' => 'ref_credited',
+            'shopify_order_id' => $this->order->shopify_order_id,
+            'zoho_creditnote_id' => 'cn_credited',
+            'creditnote_number' => 'CN-CREDITED',
+            'amount' => 100.00,
+            'currency' => 'USD',
+            'status' => 'completed',
+            'sync_status' => 'synced',
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+
+        try {
+            $zohoService->syncRefund($refund);
+            $this->fail("Expected exception was not thrown on non-open credit note.");
+        } catch (\Throwable $e) {
+            $this->assertStringContainsString("Cannot update Credit Note CN-CREDITED in Zoho: status is 'credited'", $e->getMessage());
+        }
+
+        $this->assertFalse($putCalled);
+        $this->assertEquals('failed', $refund->fresh()->sync_status);
+    }
+
+    public function test_existing_refunded_cn_must_not_update()
+    {
+        $putCalled = false;
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/creditnotes/cn_refunded*' => function (\Illuminate\Http\Client\Request $request) use (&$putCalled) {
+                if ($request->method() === 'GET') {
+                    return Http::response([
+                        'code' => 0,
+                        'creditnote' => [
+                            'creditnote_id' => 'cn_refunded',
+                            'creditnote_number' => 'CN-REFUNDED',
+                            'total' => 10.16,
+                            'status' => 'refunded',
+                        ],
+                    ], 200);
+                }
+                if ($request->method() === 'PUT') {
+                    $putCalled = true;
+                    return Http::response([], 200);
+                }
+                return Http::response([], 400);
+            },
+        ]);
+
+        $refund = Refund::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $this->order->id,
+            'shopify_refund_id' => 'ref_refunded',
+            'shopify_order_id' => $this->order->shopify_order_id,
+            'zoho_creditnote_id' => 'cn_refunded',
+            'creditnote_number' => 'CN-REFUNDED',
+            'amount' => 100.00,
+            'currency' => 'USD',
+            'status' => 'completed',
+            'sync_status' => 'synced',
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+
+        try {
+            $zohoService->syncRefund($refund);
+            $this->fail("Expected exception was not thrown on refunded credit note.");
+        } catch (\Throwable $e) {
+            $this->assertStringContainsString("Cannot update Credit Note CN-REFUNDED in Zoho: status is 'refunded'", $e->getMessage());
+        }
+
+        $this->assertFalse($putCalled);
+        $this->assertEquals('failed', $refund->fresh()->sync_status);
+    }
+
+    public function test_new_refund_creates_correct_amount()
+    {
+        $createdPayload = null;
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/creditnotes*' => function (\Illuminate\Http\Client\Request $request) use (&$createdPayload) {
+                if ($request->method() === 'POST') {
+                    $createdPayload = $request->data();
+                    return Http::response([
+                        'code' => 0,
+                        'creditnote' => [
+                            'creditnote_id' => 'cn_new_123',
+                            'creditnote_number' => 'CN-NEW-123',
+                        ],
+                    ], 200);
+                }
+                return Http::response(['creditnotes' => []], 200);
+            },
+        ]);
+
+        $refund = Refund::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $this->order->id,
+            'shopify_refund_id' => 'ref_new_123',
+            'shopify_order_id' => $this->order->shopify_order_id,
+            'amount' => 150.00,
+            'currency' => 'USD',
+            'refund_line_items' => [
+                ['title' => 'Shirt', 'quantity' => 1, 'price' => 50.00],
+            ],
+            'status' => 'completed',
+            'sync_status' => 'pending',
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncRefund($refund);
+
+        $this->assertTrue($result['success']);
+        $this->assertNotNull($createdPayload);
+
+        $lineSum = array_reduce($createdPayload['line_items'], function ($sum, $item) {
+            return $sum + ($item['rate'] * $item['quantity']);
+        }, 0.0);
+
+        $this->assertEquals(150.00, round($lineSum, 2));
+        $this->assertEquals('cn_new_123', $refund->fresh()->zoho_creditnote_id);
+    }
 }
