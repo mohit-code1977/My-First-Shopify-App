@@ -1025,4 +1025,199 @@ class ShopifyOrderTransactionWebhookTest extends TestCase
         $this->assertEquals('USD', $payment->currency);
         $this->assertEquals(Payment::SYNC_STATUS_SYNCED, $payment->sync_status);
     }
+
+    // 29. Order #1017 regression: USD order with USD transaction creates USD payment even if shop_money is INR
+    public function test_29_usd_order_and_usd_presentment_transaction_creates_usd_payment_even_if_shop_money_currency_is_inr()
+    {
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/customerpayments*' => function (HttpClientRequest $request) {
+                if ($request->method() === 'GET') return Http::response(['code' => 0, 'customerpayments' => []], 200);
+                return Http::response(['code' => 0, 'payment' => ['payment_id' => 'zoho_p_1017_usd']], 201);
+            },
+        ]);
+
+        $usdOrder = Order::create([
+            'shop_id' => $this->shop->id,
+            'customer_id' => $this->customer->id,
+            'shopify_order_id' => 'gid://shopify/Order/1017',
+            'order_number' => '#1017',
+            'zoho_sales_order_id' => 'zoho_so_1017',
+            'order_date' => now(),
+            'currency' => 'USD',
+            'subtotal' => '19.29',
+            'total_price' => '19.29',
+        ]);
+
+        $usdInvoice = Invoice::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $usdOrder->id,
+            'shopify_order_id' => $usdOrder->shopify_order_id,
+            'zoho_invoice_id' => '4081216000000205025',
+            'invoice_number' => 'INV-4081216000000205025',
+            'status' => 'sent',
+            'amount' => '19.29',
+            'currency' => 'USD',
+            'sync_status' => 'synced',
+        ]);
+
+        $payload = [
+            'id' => 991017,
+            'admin_graphql_api_id' => 'gid://shopify/OrderTransaction/991017',
+            'order_id' => 1017,
+            'kind' => 'sale',
+            'status' => 'success',
+            'amount' => '19.29',
+            'currency' => 'USD',
+            'shop_money' => [
+                'amount' => '19.29',
+                'currency_code' => 'INR', // Differing shop currency
+            ],
+            'presentment_money' => [
+                'amount' => '19.29',
+                'currency_code' => 'USD',
+            ],
+            'gateway' => 'shopify_payments',
+        ];
+
+        $response = $this->sendWebhook($payload, ['HTTP_X_SHOPIFY_WEBHOOK_ID' => 'wh_1017_usd']);
+        $response->assertStatus(200);
+
+        $payment = Payment::where('shopify_transaction_id', 'gid://shopify/OrderTransaction/991017')->first();
+        $this->assertNotNull($payment);
+        $this->assertEquals('USD', $payment->currency);
+        $this->assertEquals(19.29, (float) $payment->amount);
+        $this->assertEquals(Payment::SYNC_STATUS_SYNCED, $payment->sync_status);
+        $this->assertEquals($usdInvoice->id, $payment->invoice_id);
+    }
+
+    // 30. INR order with INR transaction creates INR payment & syncs cleanly
+    public function test_30_inr_order_and_inr_transaction_creates_inr_payment_and_inr_invoice()
+    {
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/customerpayments*' => function (HttpClientRequest $request) {
+                if ($request->method() === 'GET') return Http::response(['code' => 0, 'customerpayments' => []], 200);
+                return Http::response(['code' => 0, 'payment' => ['payment_id' => 'zoho_p_1014_inr']], 201);
+            },
+        ]);
+
+        $inrOrder = Order::create([
+            'shop_id' => $this->shop->id,
+            'customer_id' => $this->customer->id,
+            'shopify_order_id' => 'gid://shopify/Order/1014',
+            'order_number' => '#1014',
+            'zoho_sales_order_id' => 'zoho_so_1014',
+            'order_date' => now(),
+            'currency' => 'INR',
+            'subtotal' => '1381.92',
+            'total_price' => '1381.92',
+        ]);
+
+        $inrInvoice = Invoice::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $inrOrder->id,
+            'shopify_order_id' => $inrOrder->shopify_order_id,
+            'zoho_invoice_id' => '4081216000000205099',
+            'invoice_number' => 'INV-4081216000000205099',
+            'status' => 'sent',
+            'amount' => '1381.92',
+            'currency' => 'INR',
+            'sync_status' => 'synced',
+        ]);
+
+        $payload = [
+            'id' => 991014,
+            'admin_graphql_api_id' => 'gid://shopify/OrderTransaction/991014',
+            'order_id' => 1014,
+            'kind' => 'sale',
+            'status' => 'success',
+            'amount' => '1381.92',
+            'currency' => 'INR',
+            'shop_money' => [
+                'amount' => '1381.92',
+                'currency_code' => 'INR',
+            ],
+            'gateway' => 'shopify_payments',
+        ];
+
+        $response = $this->sendWebhook($payload, ['HTTP_X_SHOPIFY_WEBHOOK_ID' => 'wh_1014_inr']);
+        $response->assertStatus(200);
+
+        $payment = Payment::where('shopify_transaction_id', 'gid://shopify/OrderTransaction/991014')->first();
+        $this->assertNotNull($payment);
+        $this->assertEquals('INR', $payment->currency);
+        $this->assertEquals(1381.92, (float) $payment->amount);
+        $this->assertEquals(Payment::SYNC_STATUS_SYNCED, $payment->sync_status);
+        $this->assertEquals($inrInvoice->id, $payment->invoice_id);
+    }
+
+    // 31. USD order with INR presentment & USD shop_money ($19.30) settles USD invoice ($19.29)
+    public function test_31_usd_order_and_inr_presentment_transaction_uses_usd_shop_money_and_settles_usd_invoice()
+    {
+        $postedPayload = null;
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/customerpayments*' => function (HttpClientRequest $request) use (&$postedPayload) {
+                if ($request->method() === 'GET') return Http::response(['code' => 0, 'customerpayments' => []], 200);
+                $postedPayload = $request->data();
+                return Http::response(['code' => 0, 'payment' => ['payment_id' => 'zoho_p_1017_shop_money']], 201);
+            },
+        ]);
+
+        $usdOrder = Order::create([
+            'shop_id' => $this->shop->id,
+            'customer_id' => $this->customer->id,
+            'shopify_order_id' => 'gid://shopify/Order/1017_sm',
+            'order_number' => '#1017_sm',
+            'zoho_sales_order_id' => 'zoho_so_1017_sm',
+            'order_date' => now(),
+            'currency' => 'USD',
+            'subtotal' => '11.17',
+            'shipping_total' => '8.12',
+            'total_price' => '19.29',
+        ]);
+
+        $usdInvoice = Invoice::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $usdOrder->id,
+            'shopify_order_id' => $usdOrder->shopify_order_id,
+            'zoho_invoice_id' => '4081216000000205025_sm',
+            'invoice_number' => 'INV-4081216000000205025_SM',
+            'status' => 'sent',
+            'amount' => '19.29',
+            'currency' => 'USD',
+            'sync_status' => 'synced',
+        ]);
+
+        $payload = [
+            'id' => 9446242812072,
+            'admin_graphql_api_id' => 'gid://shopify/OrderTransaction/9446242812072',
+            'order_id' => '1017_sm',
+            'kind' => 'sale',
+            'status' => 'success',
+            'amount' => '1846.02',
+            'currency' => 'INR',
+            'shop_money' => [
+                'amount' => '19.30',
+                'currency_code' => 'USD',
+            ],
+            'presentment_money' => [
+                'amount' => '1846.02',
+                'currency_code' => 'INR',
+            ],
+            'gateway' => 'bogus',
+        ];
+
+        $response = $this->sendWebhook($payload, ['HTTP_X_SHOPIFY_WEBHOOK_ID' => 'wh_1017_sm']);
+        $response->assertStatus(200);
+
+        $payment = Payment::where('shopify_transaction_id', 'gid://shopify/OrderTransaction/9446242812072')->first();
+        $this->assertNotNull($payment);
+        $this->assertEquals('USD', $payment->currency);
+        $this->assertEquals(19.30, (float) $payment->amount);
+        $this->assertEquals(Payment::SYNC_STATUS_SYNCED, $payment->sync_status);
+        $this->assertEquals($usdInvoice->id, $payment->invoice_id);
+
+        $this->assertNotNull($postedPayload);
+        $this->assertEquals(19.30, (float) $postedPayload['amount']);
+        $this->assertEquals(19.29, (float) $postedPayload['invoices'][0]['amount_applied']);
+    }
 }

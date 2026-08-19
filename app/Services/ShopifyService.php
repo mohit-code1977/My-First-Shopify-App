@@ -28,6 +28,56 @@ class ShopifyService
     }
 
     /**
+     * Helper method to extract money values prioritizing presentmentMoney over shopMoney.
+     */
+    public static function extractMoney(?array $priceSet, string $defaultCurrency = 'USD'): array
+    {
+        if (empty($priceSet)) {
+            return ['currency' => strtoupper(trim($defaultCurrency)), 'amount' => 0.00];
+        }
+
+        $presentment = $priceSet['presentmentMoney'] ?? $priceSet['presentment_money'] ?? null;
+        $shop = $priceSet['shopMoney'] ?? $priceSet['shop_money'] ?? null;
+
+        if (!empty($presentment) && is_array($presentment) && isset($presentment['amount'])) {
+            $currency = !empty($presentment['currencyCode'])
+                ? $presentment['currencyCode']
+                : (!empty($presentment['currency_code']) ? $presentment['currency_code'] : $defaultCurrency);
+            $amount = (float) ($presentment['amount'] ?? 0.00);
+            return ['currency' => strtoupper(trim((string) $currency)), 'amount' => $amount];
+        }
+
+        if (!empty($shop) && is_array($shop) && isset($shop['amount'])) {
+            $currency = !empty($shop['currencyCode'])
+                ? $shop['currencyCode']
+                : (!empty($shop['currency_code']) ? $shop['currency_code'] : $defaultCurrency);
+            $amount = (float) ($shop['amount'] ?? 0.00);
+            return ['currency' => strtoupper(trim((string) $currency)), 'amount' => $amount];
+        }
+
+        return ['currency' => strtoupper(trim($defaultCurrency)), 'amount' => 0.00];
+    }
+
+    /**
+     * Canonical money resolver for REST & GraphQL payloads.
+     * Preferred order: presentment_money / presentmentMoney -> shop_money / shopMoney -> raw scalar fallback.
+     */
+    public static function extractRestMoney(?array $priceSet, string $fallbackCurrency = 'USD', float|string $rawAmount = 0.00): array
+    {
+        if (!empty($priceSet) && is_array($priceSet)) {
+            $extracted = self::extractMoney($priceSet, $fallbackCurrency);
+            if (!empty($extracted['currency']) && ($extracted['amount'] > 0 || isset($priceSet['presentment_money']) || isset($priceSet['presentmentMoney']))) {
+                return $extracted;
+            }
+        }
+
+        return [
+            'currency' => strtoupper(trim((string) $fallbackCurrency)),
+            'amount' => (float) $rawAmount,
+        ];
+    }
+
+    /**
      * Exchange Shopify App Bridge ID token for
      * an offline Admin API access token.
      */
@@ -844,17 +894,12 @@ GRAPHQL;
     /**
      * Fetch a single order by ID from Shopify Admin GraphQL API and sync it locally & to Zoho.
      */
-    public function fetchAndSyncOrder(Shop $shop, string $orderId): ?Order
+    public function fetchAndSyncOrder(Shop $shop, string $shopifyOrderId): ?Order
     {
-        $token = $this->getValidAccessToken($shop);
-        $numericId = preg_replace('/[^0-9]/', '', $orderId);
-        $gid = str_starts_with($orderId, 'gid://')
-            ? $orderId
-            : "gid://shopify/Order/{$numericId}";
+        $numericId = preg_replace('/[^0-9]/', '', $shopifyOrderId);
+        $gid = "gid://shopify/Order/{$numericId}";
 
-        if (empty($numericId)) {
-            return null;
-        }
+        $token = $this->getValidAccessToken($shop);
 
         $query = <<<'GRAPHQL'
 query fetchSingleOrder($id: ID!) {
@@ -864,12 +909,12 @@ query fetchSingleOrder($id: ID!) {
         createdAt
         currencyCode
         taxesIncluded
-        taxLines { title rate priceSet { shopMoney { amount } } }
-        subtotalPriceSet { shopMoney { amount } }
-        totalDiscountsSet { shopMoney { amount } }
-        totalShippingPriceSet { shopMoney { amount } }
-        totalTaxSet { shopMoney { amount } }
-        totalPriceSet { shopMoney { amount } }
+        taxLines { title rate priceSet { presentmentMoney { amount currencyCode } shopMoney { amount currencyCode } } }
+        subtotalPriceSet { presentmentMoney { amount currencyCode } shopMoney { amount currencyCode } }
+        totalDiscountsSet { presentmentMoney { amount currencyCode } shopMoney { amount currencyCode } }
+        totalShippingPriceSet { presentmentMoney { amount currencyCode } shopMoney { amount currencyCode } }
+        totalTaxSet { presentmentMoney { amount currencyCode } shopMoney { amount currencyCode } }
+        totalPriceSet { presentmentMoney { amount currencyCode } shopMoney { amount currencyCode } }
         displayFinancialStatus
         displayFulfillmentStatus
         note
@@ -890,7 +935,7 @@ query fetchSingleOrder($id: ID!) {
         shippingLines(first: 10) {
             nodes {
                 title
-                originalPriceSet { shopMoney { amount } }
+                originalPriceSet { presentmentMoney { amount currencyCode } shopMoney { amount currencyCode } }
                 code
             }
         }
@@ -921,8 +966,8 @@ query fetchSingleOrder($id: ID!) {
                 id
                 title
                 quantity
-                originalUnitPriceSet { shopMoney { amount } }
-                taxLines { title rate priceSet { shopMoney { amount } } }
+                originalUnitPriceSet { presentmentMoney { amount currencyCode } shopMoney { amount currencyCode } }
+                taxLines { title rate priceSet { presentmentMoney { amount currencyCode } shopMoney { amount currencyCode } } }
                 variant {
                     id
                     sku
@@ -1000,23 +1045,42 @@ GRAPHQL;
             }
         }
 
+        // Single Source of Truth Currency Resolution
+        $resolvedTotal = self::extractMoney($node['totalPriceSet'] ?? [], $node['currencyCode'] ?? 'USD');
+        $orderCurrency = $resolvedTotal['currency'];
+        $totalPrice = $resolvedTotal['amount'];
+
+        $subtotalData = self::extractMoney($node['subtotalPriceSet'] ?? [], $orderCurrency);
+        $subtotal = $subtotalData['amount'];
+
+        $discountData = self::extractMoney($node['totalDiscountsSet'] ?? [], $orderCurrency);
+        $discountTotal = $discountData['amount'];
+
+        $shippingData = self::extractMoney($node['totalShippingPriceSet'] ?? [], $orderCurrency);
+        $shippingTotal = $shippingData['amount'];
+
+        $taxData = self::extractMoney($node['totalTaxSet'] ?? [], $orderCurrency);
+        $taxTotal = $taxData['amount'];
+
         $lineItems = [];
         foreach ($node['lineItems']['nodes'] ?? [] as $li) {
             $liTaxLines = [];
             foreach ($li['taxLines'] ?? [] as $tl) {
+                $tlMoney = self::extractMoney($tl['priceSet'] ?? [], $orderCurrency);
                 $liTaxLines[] = [
                     'title' => $tl['title'] ?? '',
-                    'price' => (float) ($tl['priceSet']['shopMoney']['amount'] ?? 0.00),
+                    'price' => $tlMoney['amount'],
                     'rate' => (float) ($tl['rate'] ?? 0.0),
                 ];
             }
 
+            $liUnitPrice = self::extractMoney($li['originalUnitPriceSet'] ?? [], $orderCurrency);
             $lineItems[] = [
                 'line_item_id' => preg_replace('/[^0-9]/', '', $li['id'] ?? ''),
                 'title' => $li['title'] ?? '',
                 'quantity' => (int) ($li['quantity'] ?? 1),
-                'price' => (float) ($li['originalUnitPriceSet']['shopMoney']['amount'] ?? 0.00),
-                'sku' => $li['variant']['sku'] ?? '',
+                'price' => $liUnitPrice['amount'],
+                'sku' => $li['sku'] ?? ($li['variant']['sku'] ?? ''),
                 'variant_id' => !empty($li['variant']['id']) ? preg_replace('/[^0-9]/', '', $li['variant']['id']) : null,
                 'tax_lines' => $liTaxLines,
             ];
@@ -1024,9 +1088,10 @@ GRAPHQL;
 
         $orderTaxLines = [];
         foreach ($node['taxLines'] ?? [] as $tl) {
+            $tlMoney = self::extractMoney($tl['priceSet'] ?? [], $orderCurrency);
             $orderTaxLines[] = [
                 'title' => $tl['title'] ?? '',
-                'price' => (float) ($tl['priceSet']['shopMoney']['amount'] ?? 0.00),
+                'price' => $tlMoney['amount'],
                 'rate' => (float) ($tl['rate'] ?? 0.0),
             ];
         }
@@ -1049,11 +1114,11 @@ GRAPHQL;
         $shippingLines = [];
         $shippingMethod = null;
         foreach ($node['shippingLines']['nodes'] ?? [] as $sl) {
-            $slPrice = (float) ($sl['originalPriceSet']['shopMoney']['amount'] ?? 0.00);
+            $slMoney = self::extractMoney($sl['originalPriceSet'] ?? [], $orderCurrency);
             $slTitle = $sl['title'] ?? '';
             $shippingLines[] = [
                 'title' => $slTitle,
-                'price' => $slPrice,
+                'price' => $slMoney['amount'],
                 'code' => $sl['code'] ?? null,
             ];
             if (empty($shippingMethod) && !empty($slTitle)) {
@@ -1086,11 +1151,6 @@ GRAPHQL;
             ];
         }
 
-        $subtotal = (float) ($node['subtotalPriceSet']['shopMoney']['amount'] ?? 0.00);
-        $discountTotal = (float) ($node['totalDiscountsSet']['shopMoney']['amount'] ?? 0.00);
-        $shippingTotal = (float) ($node['totalShippingPriceSet']['shopMoney']['amount'] ?? 0.00);
-        $taxTotal = (float) ($node['totalTaxSet']['shopMoney']['amount'] ?? 0.00);
-        $totalPrice = (float) ($node['totalPriceSet']['shopMoney']['amount'] ?? 0.00);
         $taxesIncluded = (bool) ($node['taxesIncluded'] ?? false);
 
         $order = Order::updateOrCreate(
@@ -1102,7 +1162,7 @@ GRAPHQL;
                 'customer_id' => $customerId,
                 'order_number' => $node['name'] ?? "#{$numericId}",
                 'order_date' => !empty($node['createdAt']) ? date('Y-m-d H:i:s', strtotime($node['createdAt'])) : now(),
-                'currency' => $node['currencyCode'] ?? 'USD',
+                'currency' => $orderCurrency,
                 'subtotal' => $subtotal,
                 'discount_total' => $discountTotal,
                 'shipping_total' => $shippingTotal,

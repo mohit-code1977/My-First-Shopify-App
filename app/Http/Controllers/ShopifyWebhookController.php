@@ -702,20 +702,52 @@ class ShopifyWebhookController extends Controller
             }
         }
 
-        // Parse line items
+        // Resolve single source of truth order currency (presentment/market currency preferred)
+        $defaultCurrency = !empty($payload['presentment_currency'])
+            ? strtoupper(trim((string) $payload['presentment_currency']))
+            : (!empty($payload['total_price_set']['presentment_money']['currency_code'])
+                ? strtoupper(trim((string) $payload['total_price_set']['presentment_money']['currency_code']))
+                : (!empty($payload['currency']) ? strtoupper(trim((string) $payload['currency'])) : 'USD'));
+
+        $resolvedTotal = \App\Services\ShopifyService::extractRestMoney($payload['total_price_set'] ?? null, $defaultCurrency, $payload['total_price'] ?? 0.00);
+        $orderCurrency = $resolvedTotal['currency'];
+        $totalPrice = $resolvedTotal['amount'];
+
+        $subtotalData = \App\Services\ShopifyService::extractRestMoney($payload['subtotal_price_set'] ?? null, $orderCurrency, $payload['subtotal_price'] ?? 0.00);
+        $subtotal = $subtotalData['amount'];
+
+        $discountData = \App\Services\ShopifyService::extractRestMoney($payload['total_discounts_set'] ?? null, $orderCurrency, $payload['total_discounts'] ?? 0.00);
+        $discountTotal = $discountData['amount'];
+
+        $shippingData = \App\Services\ShopifyService::extractRestMoney($payload['total_shipping_price_set'] ?? null, $orderCurrency, $payload['total_shipping_price'] ?? 0.00);
+        $shippingTotal = $shippingData['amount'];
+
+        $taxData = \App\Services\ShopifyService::extractRestMoney($payload['total_tax_set'] ?? null, $orderCurrency, $payload['total_tax'] ?? 0.00);
+        $taxTotal = $taxData['amount'];
+
+        // If subtotal is still 0 while total price > 0, fallback calculate subtotal
+        if ($subtotal <= 0 && $totalPrice > 0) {
+            $subtotal = max(0.00, $totalPrice - $taxTotal - $shippingTotal + $discountTotal);
+        }
+
+        // Parse line items using order currency representation
         $lineItems = [];
         if (!empty($payload['line_items']) && is_array($payload['line_items'])) {
             foreach ($payload['line_items'] as $item) {
                 $liTaxLines = [];
                 if (!empty($item['tax_lines']) && is_array($item['tax_lines'])) {
                     foreach ($item['tax_lines'] as $tl) {
+                        $tlMoney = \App\Services\ShopifyService::extractRestMoney($tl['price_set'] ?? null, $orderCurrency, $tl['price'] ?? 0.00);
                         $liTaxLines[] = [
                             'title' => $tl['title'] ?? '',
-                            'price' => (float) ($tl['price'] ?? 0.00),
+                            'price' => $tlMoney['amount'],
                             'rate' => (float) ($tl['rate'] ?? 0.0),
                         ];
                     }
                 }
+
+                $liPriceData = \App\Services\ShopifyService::extractRestMoney($item['price_set'] ?? null, $orderCurrency, $item['price'] ?? 0.00);
+                $liDiscountData = \App\Services\ShopifyService::extractRestMoney($item['total_discount_set'] ?? null, $orderCurrency, $item['total_discount'] ?? 0.00);
 
                 $lineItems[] = [
                     'line_item_id' => $item['id'] ?? null,
@@ -725,8 +757,8 @@ class ShopifyWebhookController extends Controller
                     'title' => $item['title'] ?? ($item['name'] ?? null),
                     'name' => $item['name'] ?? ($item['title'] ?? null),
                     'quantity' => (int) ($item['quantity'] ?? 1),
-                    'price' => (float) ($item['price'] ?? 0.00),
-                    'total_discount' => (float) ($item['total_discount'] ?? 0.00),
+                    'price' => $liPriceData['amount'],
+                    'total_discount' => $liDiscountData['amount'],
                     'tax_lines' => $liTaxLines,
                 ];
             }
@@ -735,21 +767,16 @@ class ShopifyWebhookController extends Controller
         $orderTaxLines = [];
         if (!empty($payload['tax_lines']) && is_array($payload['tax_lines'])) {
             foreach ($payload['tax_lines'] as $tl) {
+                $tlMoney = \App\Services\ShopifyService::extractRestMoney($tl['price_set'] ?? null, $orderCurrency, $tl['price'] ?? 0.00);
                 $orderTaxLines[] = [
                     'title' => $tl['title'] ?? '',
-                    'price' => (float) ($tl['price'] ?? 0.00),
+                    'price' => $tlMoney['amount'],
                     'rate' => (float) ($tl['rate'] ?? 0.0),
                 ];
             }
         }
 
         $taxesIncluded = (bool) ($payload['taxes_included'] ?? false);
-        $discountTotal = (float) ($payload['total_discounts'] ?? 0.00);
-        $shippingTotal = (float) ($payload['total_shipping_price_set']['shop_money']['amount'] ?? ($payload['total_shipping_price'] ?? 0.00));
-        $taxTotal = (float) ($payload['total_tax'] ?? 0.00);
-        $totalPrice = (float) ($payload['total_price'] ?? 0.00);
-        $subtotal = (float) ($payload['subtotal_price'] ?? ($totalPrice - $taxTotal - $shippingTotal + $discountTotal));
-
         $couponCode = !empty($payload['discount_codes'][0]['code']) ? $payload['discount_codes'][0]['code'] : null;
 
         $shippingLines = [];
@@ -757,10 +784,10 @@ class ShopifyWebhookController extends Controller
         if (!empty($payload['shipping_lines']) && is_array($payload['shipping_lines'])) {
             foreach ($payload['shipping_lines'] as $sl) {
                 $slTitle = $sl['title'] ?? '';
-                $slPrice = (float) ($sl['price'] ?? ($sl['price_set']['shop_money']['amount'] ?? 0.00));
+                $slPriceData = \App\Services\ShopifyService::extractRestMoney($sl['price_set'] ?? null, $orderCurrency, $sl['price'] ?? 0.00);
                 $shippingLines[] = [
                     'title' => $slTitle,
-                    'price' => $slPrice,
+                    'price' => $slPriceData['amount'],
                     'code' => $sl['code'] ?? null,
                 ];
                 if (empty($shippingMethod) && !empty($slTitle)) {
@@ -816,7 +843,7 @@ class ShopifyWebhookController extends Controller
                 'customer_id' => $customerId,
                 'order_number' => $orderNumber,
                 'order_date' => !empty($payload['created_at']) ? date('Y-m-d H:i:s', strtotime($payload['created_at'])) : now(),
-                'currency' => $payload['currency'] ?? 'USD',
+                'currency' => $orderCurrency,
                 'subtotal' => $subtotal,
                 'discount_total' => $discountTotal,
                 'shipping_total' => $shippingTotal,
@@ -995,15 +1022,26 @@ class ShopifyWebhookController extends Controller
         $kind = strtolower(trim((string) ($payload['kind'] ?? '')));
         $status = strtolower(trim((string) ($payload['status'] ?? '')));
         $rawAmount = (float) ($payload['amount'] ?? 0.00);
-        $rawCurrency = strtoupper(trim((string) ($payload['currency'] ?? 'USD')));
 
-        if (!empty($payload['shop_money']['amount']) && !empty($payload['shop_money']['currency_code'])) {
-            $amount = (float) $payload['shop_money']['amount'];
-            $currency = strtoupper(trim((string) $payload['shop_money']['currency_code']));
-        } else {
-            $amount = $rawAmount;
-            $currency = $rawCurrency;
-        }
+        $presCurrency = !empty($payload['presentment_money']['currency_code'])
+            ? strtoupper(trim((string) $payload['presentment_money']['currency_code']))
+            : null;
+        $presAmount = isset($payload['presentment_money']['amount'])
+            ? (float) $payload['presentment_money']['amount']
+            : null;
+
+        $shopCurrency = !empty($payload['shop_money']['currency_code'])
+            ? strtoupper(trim((string) $payload['shop_money']['currency_code']))
+            : null;
+        $shopAmount = isset($payload['shop_money']['amount'])
+            ? (float) $payload['shop_money']['amount']
+            : null;
+
+        $topCurrency = !empty($payload['currency'])
+            ? strtoupper(trim((string) $payload['currency']))
+            : null;
+        $rawAmount = (float) ($payload['amount'] ?? 0.00);
+
         $gateway = $payload['gateway'] ?? 'shopify_payments';
         $processedAtStr = $payload['processed_at'] ?? ($payload['created_at'] ?? null);
         $paymentDate = !empty($processedAtStr) ? date('Y-m-d H:i:s', strtotime($processedAtStr)) : now();
@@ -1097,10 +1135,31 @@ class ShopifyWebhookController extends Controller
         */
         $numericTxnId = preg_replace('/^gid:\/\/shopify\/OrderTransaction\//', '', $shopifyTxnId);
         $paymentReference = "TXN-{$numericTxnId}";
-        if (empty($payload['shop_money']) && $order && !empty($order->currency)) {
-            if (strcasecmp($currency, $order->currency) !== 0 && (float) $amount === (float) $order->total_price) {
-                $currency = strtoupper(trim($order->currency));
+
+        $orderCurrency = $order ? strtoupper(trim((string) $order->currency)) : null;
+
+        if ($orderCurrency) {
+            $currency = $orderCurrency;
+            if ($presCurrency && strcasecmp($presCurrency, $orderCurrency) === 0 && $presAmount !== null) {
+                $amount = $presAmount;
+            } elseif ($shopCurrency && strcasecmp($shopCurrency, $orderCurrency) === 0 && $shopAmount !== null) {
+                $amount = $shopAmount;
+            } elseif ($presAmount !== null) {
+                $amount = $presAmount;
+            } elseif ($shopAmount !== null) {
+                $amount = $shopAmount;
+            } else {
+                $amount = $rawAmount;
             }
+        } elseif ($presCurrency) {
+            $currency = $presCurrency;
+            $amount = $presAmount ?? $rawAmount;
+        } elseif ($shopCurrency) {
+            $currency = $shopCurrency;
+            $amount = $shopAmount ?? $rawAmount;
+        } else {
+            $currency = $topCurrency ?? 'USD';
+            $amount = $rawAmount;
         }
 
         $payment = Payment::updateOrCreate(
@@ -1253,7 +1312,9 @@ class ShopifyWebhookController extends Controller
         }
 
         $totalAmount = 0.0;
-        if (!empty($payload['total_refunded'])) {
+        if (!empty($payload['total_refunded_set']['presentment_money']['amount'])) {
+            $totalAmount = (float) $payload['total_refunded_set']['presentment_money']['amount'];
+        } elseif (!empty($payload['total_refunded'])) {
             $totalAmount = (float) $payload['total_refunded'];
         } elseif (!empty($payload['total_refunded_set']['shop_money']['amount'])) {
             $totalAmount = (float) $payload['total_refunded_set']['shop_money']['amount'];
@@ -1262,7 +1323,10 @@ class ShopifyWebhookController extends Controller
         if ($totalAmount <= 0 && !empty($payload['transactions']) && is_array($payload['transactions'])) {
             foreach ($payload['transactions'] as $tx) {
                 if (($tx['status'] ?? '') === 'success' && in_array(strtolower((string) ($tx['kind'] ?? '')), ['refund', 'change'], true)) {
-                    $totalAmount += (float) ($tx['amount'] ?? 0.0);
+                    $txAmount = !empty($tx['amount_set']['presentment_money']['amount'])
+                        ? (float) $tx['amount_set']['presentment_money']['amount']
+                        : (float) ($tx['amount'] ?? 0.0);
+                    $totalAmount += $txAmount;
                 }
             }
         }
@@ -1292,7 +1356,7 @@ class ShopifyWebhookController extends Controller
             }
         }
 
-        $currency = $payload['currency'] ?? $order->currency ?? 'USD';
+        $currency = $order ? $order->currency : ($payload['currency'] ?? 'USD');
 
         $refund = \App\Models\Refund::updateOrCreate(
             [

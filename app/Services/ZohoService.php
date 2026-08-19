@@ -438,14 +438,56 @@ class ZohoService {
     }
 
     /**
-     * Format shipping address payload for Zoho API to respect 100-character constraints,
-     * deduplicate fields, and preserve critical address components.
-     *
-     * @param array $shipAddress Raw Shopify shipping address array
-     * @param Customer|null $contact Customer model associated with order
-     * @return array Formatted Zoho shipping address array
+     * Format an address array into a single text string <= 100 characters for Zoho Sales Orders and Invoices.
      */
-    public function formatZohoShippingAddress(array $shipAddress, ?Customer $contact = null): array
+    public function formatZohoAddressString(array $rawAddress, ?Customer $contact = null): string
+    {
+        $address1 = trim($rawAddress['address1'] ?? $rawAddress['address'] ?? '');
+        $address2 = trim($rawAddress['address2'] ?? $rawAddress['street2'] ?? '');
+        $city = trim($rawAddress['city'] ?? '');
+        $provinceCode = trim($rawAddress['province_code'] ?? '');
+        $province = trim($rawAddress['province'] ?? $rawAddress['state'] ?? '');
+        $zip = trim($rawAddress['zip'] ?? $rawAddress['postal_code'] ?? '');
+        $countryCode = trim($rawAddress['country_code'] ?? '');
+        $country = trim($rawAddress['country'] ?? '');
+
+        $state = !empty($provinceCode) ? $provinceCode : $province;
+        $countryName = !empty($countryCode) ? $countryCode : $country;
+
+        $street = trim($address1 . ' ' . $address2);
+
+        // Attempt 1: Full formatted string with street, city, state, zip, country
+        $parts = array_filter([$street, $city, $state, $zip, $countryName]);
+        $formatted = implode(', ', $parts);
+
+        if (mb_strlen($formatted) <= 100) {
+            return $formatted;
+        }
+
+        // Attempt 2: Use address1 only (drop address2)
+        $parts = array_filter([$address1, $city, $state, $zip, $countryName]);
+        $formatted = implode(', ', $parts);
+
+        if (mb_strlen($formatted) <= 100) {
+            return $formatted;
+        }
+
+        // Attempt 3: Drop countryName if state and zip present
+        $parts = array_filter([$address1, $city, $state, $zip]);
+        $formatted = implode(', ', $parts);
+
+        if (mb_strlen($formatted) <= 100) {
+            return $formatted;
+        }
+
+        // Final Fallback: Hard clamp to 100 characters safely
+        return mb_substr($formatted, 0, 100);
+    }
+
+    /**
+     * Format shipping/billing address object payload for Zoho API to respect character constraints.
+     */
+    public function formatZohoAddressObject(array $shipAddress, ?Customer $contact = null): array
     {
         $firstName = trim($shipAddress['first_name'] ?? '');
         $lastName = trim($shipAddress['last_name'] ?? '');
@@ -457,7 +499,6 @@ class ZohoService {
             $attention = $name ?: $company;
         }
 
-        // Deduplicate: If attention matches contact's name, email, or billing name, drop attention
         if ($contact) {
             $contactFirst = trim($contact->first_name ?? '');
             $contactLast = trim($contact->last_name ?? '');
@@ -486,27 +527,22 @@ class ZohoService {
         $state = $province ?: $provinceCode;
         $countryName = $country ?: $countryCode;
 
-        // Calculate total concatenated string length that Zoho internally constructs
         $calcLen = function ($att, $a1, $a2, $c, $st, $z, $co) {
             return strlen(implode(' ', array_filter([$att, $a1, $a2, $c, $st, $z, $co])));
         };
 
-        // Step 1: If length > 75 and state is long, switch to province_code if available
         if ($calcLen($attention, $address1, $address2, $city, $state, $zip, $countryName) > 75 && !empty($provinceCode)) {
             $state = $provinceCode;
         }
 
-        // Step 2: If length > 75 and country is long, switch to country_code if available
         if ($calcLen($attention, $address1, $address2, $city, $state, $zip, $countryName) > 75 && !empty($countryCode)) {
             $countryName = $countryCode;
         }
 
-        // Step 3: If length > 75, drop attention if still present
         if ($calcLen($attention, $address1, $address2, $city, $state, $zip, $countryName) > 75) {
             $attention = '';
         }
 
-        // Step 4: If length > 75, compress address2 into address1 or shorten address2
         if ($calcLen($attention, $address1, $address2, $city, $state, $zip, $countryName) > 75 && !empty($address2)) {
             $maxAddr2 = max(0, 75 - $calcLen($attention, $address1, '', $city, $state, $zip, $countryName));
             if ($maxAddr2 < 5) {
@@ -516,7 +552,6 @@ class ZohoService {
             }
         }
 
-        // Step 5: If length > 75, shorten address1 safely preserving front part
         if ($calcLen($attention, $address1, $address2, $city, $state, $zip, $countryName) > 75) {
             $maxAddr1 = max(10, 75 - $calcLen($attention, '', $address2, $city, $state, $zip, $countryName));
             $address1 = mb_substr($address1, 0, $maxAddr1);
@@ -524,31 +559,39 @@ class ZohoService {
 
         $res = [];
         if (!empty($attention)) {
-            $res['attention'] = $attention;
+            $res['attention'] = mb_substr($attention, 0, 100);
         }
         if (!empty($address1)) {
-            $res['address'] = $address1;
+            $res['address'] = mb_substr($address1, 0, 100);
         }
         if (!empty($address2)) {
-            $res['street2'] = $address2;
+            $res['street2'] = mb_substr($address2, 0, 100);
         }
         if (!empty($city)) {
-            $res['city'] = $city;
+            $res['city'] = mb_substr($city, 0, 100);
         }
         if (!empty($state)) {
-            $res['state'] = $state;
+            $res['state'] = mb_substr($state, 0, 100);
         }
         if (!empty($zip)) {
-            $res['zip'] = $zip;
+            $res['zip'] = mb_substr($zip, 0, 100);
         }
         if (!empty($countryName)) {
-            $res['country'] = $countryName;
+            $res['country'] = mb_substr($countryName, 0, 100);
         }
         if (!empty($phone)) {
-            $res['phone'] = $phone;
+            $res['phone'] = mb_substr($phone, 0, 50);
         }
 
         return $res;
+    }
+
+    /**
+     * Format shipping address payload for Zoho API to respect 100-character constraints.
+     */
+    public function formatZohoShippingAddress(array $shipAddress, ?Customer $contact = null): array
+    {
+        return $this->formatZohoAddressObject($shipAddress, $contact);
     }
 
     /**
@@ -1858,33 +1901,17 @@ class ZohoService {
 
         $billing = $customer->billing_address;
         if (!empty($billing) && is_array($billing)) {
-            $payload['billing_address'] = [
-                'address' => $billing['address1'] ?? '',
-                'street2' => $billing['address2'] ?? '',
-                'city' => $billing['city'] ?? '',
-                'state' => $billing['province'] ?? $billing['province_code'] ?? '',
-                'zip' => $billing['zip'] ?? '',
-                'country' => $billing['country'] ?? '',
-                'phone' => $billing['phone'] ?? $customer->phone ?? '',
-            ];
+            $payload['billing_address'] = $this->formatZohoAddressObject($billing, $customer);
             if (!empty($billing['company'])) {
-                $payload['company_name'] = $billing['company'];
+                $payload['company_name'] = mb_substr($billing['company'], 0, 100);
             }
         }
 
         $shipping = $customer->shipping_address;
         if (!empty($shipping) && is_array($shipping)) {
-            $payload['shipping_address'] = [
-                'address' => $shipping['address1'] ?? '',
-                'street2' => $shipping['address2'] ?? '',
-                'city' => $shipping['city'] ?? '',
-                'state' => $shipping['province'] ?? $shipping['province_code'] ?? '',
-                'zip' => $shipping['zip'] ?? '',
-                'country' => $shipping['country'] ?? '',
-                'phone' => $shipping['phone'] ?? $customer->phone ?? '',
-            ];
+            $payload['shipping_address'] = $this->formatZohoAddressObject($shipping, $customer);
             if (empty($payload['company_name']) && !empty($shipping['company'])) {
-                $payload['company_name'] = $shipping['company'];
+                $payload['company_name'] = mb_substr($shipping['company'], 0, 100);
             }
         }
 
@@ -2273,7 +2300,7 @@ class ZohoService {
 
         $shipAddress = $order->shipping_address ?? ($customer->shipping_address ?? null);
         if (!empty($shipAddress) && is_array($shipAddress)) {
-            $payload['shipping_address'] = $this->formatZohoShippingAddress($shipAddress, $customer);
+            $payload['shipping_address'] = $this->formatZohoAddressString($shipAddress, $customer);
         }
 
         if (!empty($order->currency)) {
@@ -2282,6 +2309,7 @@ class ZohoService {
 
         if ((float) $order->discount_total > 0) {
             $payload['discount'] = (float) $order->discount_total;
+            $payload['discount_type'] = 'entity_level';
         }
 
         if ((float) $order->tax_total > 0) {
@@ -2679,6 +2707,7 @@ class ZohoService {
             'line_items' => $mappedLineItems,
             'shipping_charge' => (float) ($order->shipping_total ?? 0.00),
             'discount' => (float) ($order->discount_total ?? 0.00),
+            'discount_type' => ((float) ($order->discount_total ?? 0.00) > 0) ? 'entity_level' : 'item_level',
             'is_inclusive_tax' => $isInclusive,
             'is_discount_before_tax' => $isDiscountBeforeTax,
         ];
@@ -2693,7 +2722,7 @@ class ZohoService {
 
         $shipAddress = $order->shipping_address ?? ($customer->shipping_address ?? null);
         if (!empty($shipAddress) && is_array($shipAddress)) {
-            $invoicePayload['shipping_address'] = $this->formatZohoShippingAddress($shipAddress, $customer);
+            $invoicePayload['shipping_address'] = $this->formatZohoAddressObject($shipAddress, $customer);
         }
 
         if ((float) $order->tax_total > 0) {
@@ -3065,7 +3094,7 @@ class ZohoService {
                 }
             }
 
-            // 5. Over-Allocation & Remaining Balance Validation
+            // 5. Over-Allocation & Currency Conversion Rounding Tolerance
             $alreadyAppliedAmount = (float) Payment::where('invoice_id', $invoice->id)
                 ->where('sync_status', Payment::SYNC_STATUS_SYNCED)
                 ->where('id', '!=', $payment->id)
@@ -3073,8 +3102,18 @@ class ZohoService {
             $invoiceTotal = (float) $invoice->amount;
             $remainingBalance = max(0.00, $invoiceTotal - $alreadyAppliedAmount);
 
-            if ($amount > $remainingBalance + 0.001) {
-                throw new \Exception("Cannot sync payment #{$payment->id}: Payment amount ({$amount}) exceeds remaining invoice balance ({$remainingBalance}). Over-allocation is not supported.");
+            $amountApplied = $amount;
+            $overAmount = round($amount - $remainingBalance, 4);
+
+            if ($overAmount > 0.00) {
+                // Currency-aware rounding precision limit: up to 0.02 units (e.g. $0.01 / $0.02 gateway exchange rate rounding)
+                if ($overAmount <= 0.02) {
+                    $currencyCode = strtoupper(trim((string) ($invoice->currency ?: 'USD')));
+                    Log::info("syncPayment: Payment #{$payment->id} amount ({$amount}) exceeds remaining invoice balance ({$remainingBalance}) by {$overAmount} {$currencyCode} due to gateway currency conversion rounding. Clamping amount_applied to {$remainingBalance}.");
+                    $amountApplied = $remainingBalance;
+                } else {
+                    throw new \Exception("Cannot sync payment #{$payment->id}: Payment amount ({$amount}) exceeds remaining invoice balance ({$remainingBalance}). Over-allocation is not supported.");
+                }
             }
 
             // 6. Resolve Payment Gateway Mapping & Account
@@ -3122,7 +3161,7 @@ class ZohoService {
                     'invoices' => [
                         [
                             'invoice_id' => $invoice->zoho_invoice_id,
-                            'amount_applied' => $amount,
+                            'amount_applied' => $amountApplied,
                         ],
                     ],
                 ];
@@ -3321,6 +3360,7 @@ class ZohoService {
                     'customer_id' => $zohoContactId,
                     'reference_number' => $refNumber,
                     'date' => $refund->created_at ? $refund->created_at->format('Y-m-d') : date('Y-m-d'),
+                    'currency_code' => strtoupper($refund->currency ?? $order->currency ?? 'USD'),
                     'line_items' => $lineItems,
                     'notes' => $refund->note ?? "Refund for Shopify Order #{$order->order_number}",
                 ];

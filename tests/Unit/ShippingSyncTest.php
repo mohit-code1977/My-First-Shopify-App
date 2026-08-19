@@ -208,12 +208,12 @@ class ShippingSyncTest extends TestCase
                 return false;
             }
             $body = json_decode($request->body(), true) ?? [];
-            $addr = $body['shipping_address'] ?? [];
+            $addr = $body['shipping_address'] ?? '';
             return (float) ($body['shipping_charge'] ?? 0) === 15.50
                 && ($body['delivery_method'] ?? null) === 'FedEx Express'
-                && ($addr['address'] ?? null) === '500 Express Way'
-                && ($addr['city'] ?? null) === 'Chicago'
-                && ($addr['state'] ?? null) === 'IL';
+                && is_string($addr)
+                && str_contains($addr, '500 Express Way')
+                && str_contains($addr, 'Chicago');
         });
     }
 
@@ -396,27 +396,27 @@ class ShippingSyncTest extends TestCase
             'price' => '40.00',
             'zoho_item_id' => 'zoho_item_long5',
         ]);
-
         $longShippingAddress = [
-            'first_name' => 'Shipping',
-            'last_name' => 'Tester',
-            'company' => 'Acme Global Enterprises & Technology Solutions Corporation Limited',
-            'address1' => 'Flat 402, Building A, Sunrise Apartments, Opp. Commerce College Road, Near SV Patel Stadium',
-            'address2' => 'Navrangpura Extension Commercial Hub Block B',
+            'first_name' => 'Alexander',
+            'last_name' => 'Montgomery-Wellington the Third',
+            'company' => 'International Consolidated Megacorp Enterprises Holdings & Logistics Division',
+            'address1' => '99999 Extremely Long Boulevard Suite 4500 Building B North Wing Corporate Tower',
+            'address2' => 'Care Of Global Supply Chain Receiving Floor 4 Room 402',
             'city' => 'Ahmedabad',
-            'province' => 'Gujarat',
+            'province' => 'Gujarat State Western Region',
             'province_code' => 'GJ',
-            'zip' => '380009',
-            'country' => 'India',
+            'zip' => '380015',
+            'country' => 'Republic of India',
             'country_code' => 'IN',
-            'phone' => '+91 9876543210',
+            'phone' => '+91 98765 43210',
         ];
 
         $order = Order::create([
             'shop_id' => $this->shop->id,
             'customer_id' => $this->customer->id,
-            'shopify_order_id' => 'gid://shopify/Order/8105',
-            'order_number' => '#8105',
+            'shopify_order_id' => 'gid://shopify/Order/999104',
+            'order_number' => '#104',
+            'order_date' => now(),
             'currency' => 'INR',
             'subtotal' => 40.00,
             'discount_total' => 0.00,
@@ -439,10 +439,10 @@ class ShippingSyncTest extends TestCase
         // Verify local DB record retains full original address unchanged
         $this->assertEquals($longShippingAddress, $order->fresh()->shipping_address);
 
-        // Verify formatZohoShippingAddress produces structured address under limit
-        $formatted = $service->formatZohoShippingAddress($longShippingAddress, $this->customer);
-        $totalJoined = implode(' ', array_values($formatted));
-        $this->assertLessThanOrEqual(100, strlen($totalJoined));
+        // Verify formatZohoAddressString produces single text string strictly <= 100 characters
+        $formattedStr = $service->formatZohoAddressString($longShippingAddress, $this->customer);
+        $this->assertLessThanOrEqual(100, strlen($formattedStr));
+        $this->assertStringContainsString('Ahmedabad', $formattedStr);
 
         $result = $service->syncOrder($order);
         $this->assertTrue($result['success']);
@@ -452,9 +452,8 @@ class ShippingSyncTest extends TestCase
                 return false;
             }
             $body = json_decode($request->body(), true) ?? [];
-            $addr = $body['shipping_address'] ?? [];
-            $totalLen = strlen(implode(' ', array_values($addr)));
-            return $totalLen <= 100 && isset($addr['city']) && $addr['city'] === 'Ahmedabad';
+            $addr = $body['shipping_address'] ?? '';
+            return is_string($addr) && strlen($addr) <= 100 && str_contains($addr, 'Ahmedabad');
         });
     }
 
@@ -471,8 +470,108 @@ class ShippingSyncTest extends TestCase
 
         $this->assertEquals('123 Main St', $formatted['address']);
         $this->assertEquals('Austin', $formatted['city']);
-        $this->assertEquals('United States', $formatted['country']);
-        $this->assertArrayNotHasKey('street2', $formatted);
         $this->assertArrayNotHasKey('attention', $formatted);
+    }
+
+    public function test_payment_sync_with_long_shipping_address_succeeds_and_omits_unnecessary_address_fields(): void
+    {
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/salesorders*' => Http::response([
+                'code' => 0,
+                'salesorders' => [],
+                'salesorder' => ['salesorder_id' => 'zoho_so_pay_addr_105', 'salesorder_number' => 'SO-105'],
+            ], 201),
+            'https://www.zohoapis.com/books/v3/invoices*' => Http::response([
+                'code' => 0,
+                'invoices' => [],
+                'invoice' => ['invoice_id' => 'zoho_inv_pay_addr_105', 'invoice_number' => 'INV-105', 'status' => 'unpaid', 'balance' => 41.00],
+            ], 201),
+            'https://www.zohoapis.com/books/v3/customerpayments*' => Http::response([
+                'code' => 0,
+                'payment' => ['payment_id' => 'zoho_pay_addr_105', 'payment_number' => 'PAY-105'],
+            ], 201),
+        ]);
+
+        $longAddress = [
+            'first_name' => 'Jonathan',
+            'last_name' => 'Alexander-Smith',
+            'address1' => '1600 Amphitheatre Parkway Building 43 Second Floor Suite 200 Corporate Headquarters North Wing',
+            'city' => 'Mountain View',
+            'province' => 'California',
+            'province_code' => 'CA',
+            'zip' => '94043',
+            'country' => 'United States',
+            'country_code' => 'US',
+        ];
+
+        $product = \App\Models\Product::create([
+            'shop_id' => $this->shop->id,
+            'shopify_product_id' => 'gid://shopify/Product/999105',
+            'title' => 'Dekorly Potted Plant',
+        ]);
+
+        \App\Models\ProductVariant::create([
+            'product_id' => $product->id,
+            'shopify_variant_id' => 'gid://shopify/ProductVariant/9991051',
+            'sku' => 'PAYMENT-ADDR-ITEM',
+            'title' => 'Dekorly Potted Plant',
+            'price' => '11.00',
+            'zoho_item_id' => 'zoho_item_pay_addr_105',
+        ]);
+
+        $order = Order::create([
+            'shop_id' => $this->shop->id,
+            'customer_id' => $this->customer->id,
+            'shopify_order_id' => 'gid://shopify/Order/999105',
+            'order_number' => '#105',
+            'order_date' => now(),
+            'currency' => 'USD',
+            'subtotal' => 11.00,
+            'discount_total' => 0.00,
+            'shipping_total' => 30.00,
+            'shipping_address' => $longAddress,
+            'tax_total' => 0.00,
+            'total_price' => 41.00,
+            'line_items' => [
+                [
+                    'sku' => 'PAYMENT-ADDR-ITEM',
+                    'title' => 'Dekorly Potted Plant',
+                    'quantity' => 1,
+                    'price' => 11.00,
+                ],
+            ],
+        ]);
+
+        $payment = \App\Models\Payment::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $order->id,
+            'shopify_order_id' => $order->shopify_order_id,
+            'shopify_transaction_id' => 'gid://shopify/OrderTransaction/9991051',
+            'payment_reference' => 'TXN-9991051',
+            'amount' => 41.00,
+            'currency' => 'USD',
+            'payment_date' => now(),
+            'payment_method' => 'bogus',
+            'status' => 'paid',
+            'sync_status' => \App\Models\Payment::SYNC_STATUS_PENDING,
+        ]);
+
+        $service = new ZohoService($this->shop);
+        $result = $service->syncPayment($payment);
+
+        $this->assertTrue($result['success']);
+        $this->assertEquals(\App\Models\Payment::SYNC_STATUS_SYNCED, $payment->fresh()->sync_status);
+
+        // Verify Customer Payment POST payload contains strictly required payment fields and omits shipping_address
+        Http::assertSent(function ($request) {
+            if ($request->method() !== 'POST' || !str_contains($request->url(), '/customerpayments')) {
+                return false;
+            }
+            $body = json_decode($request->body(), true) ?? [];
+            return isset($body['customer_id'])
+                && isset($body['amount'])
+                && !isset($body['shipping_address'])
+                && !isset($body['billing_address']);
+        });
     }
 }

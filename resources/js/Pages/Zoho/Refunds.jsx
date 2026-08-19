@@ -113,6 +113,23 @@ export default function Refunds({
     const [bulkSyncing, setBulkSyncing] = useState(false);
     const [bulkResultsModal, setBulkResultsModal] = useState(null);
 
+    const formatCurrency = (amount, currencyCode = "USD") => {
+        const val = parseFloat(amount || 0);
+        const code = (currencyCode || "USD").toUpperCase();
+        try {
+            return new Intl.NumberFormat("en-US", {
+                style: "currency",
+                currency: code,
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+            }).format(val);
+        } catch (e) {
+            const symbols = { INR: "₹", USD: "$", EUR: "€", GBP: "£" };
+            const symbol = symbols[code] || `${code} `;
+            return `${symbol}${val.toFixed(2)}`;
+        }
+    };
+
     const getCsrfToken = () =>
         document
             .querySelector('meta[name="csrf-token"]')
@@ -430,10 +447,7 @@ export default function Refunds({
                 </IndexTable.Cell>
                 <IndexTable.Cell>
                     <Text variant="bodyMd" fontWeight="bold" as="span">
-                        ${parseFloat(r.amount || 0).toFixed(2)}{" "}
-                        <Text variant="bodySm" tone="subdued" as="span">
-                            {r.currency || "USD"}
-                        </Text>
+                        {formatCurrency(r.amount, r.currency || r.order?.currency)}
                     </Text>
                 </IndexTable.Cell>
                 <IndexTable.Cell>
@@ -758,7 +772,7 @@ export default function Refunds({
                                                                         </Badge>
                                                                     </td>
                                                                     <td style={{ padding: "8px 12px", textAlign: "right", fontWeight: 600 }}>
-                                                                        ${(price * (item.price ? qty : 1)).toFixed(2)}
+                                                                        {formatCurrency(price * (item.price ? qty : 1), selectedRefund.currency || selectedRefund.order?.currency)}
                                                                     </td>
                                                                 </tr>
                                                             );
@@ -783,21 +797,21 @@ export default function Refunds({
                                         <BlockStack gap="100">
                                             <InlineStack align="space-between">
                                                 <Text tone="subdued" as="span">Subtotal:</Text>
-                                                <Text as="span">${calculateSubtotal(selectedRefund).toFixed(2)}</Text>
+                                                <Text as="span">{formatCurrency(calculateSubtotal(selectedRefund), selectedRefund.currency || selectedRefund.order?.currency)}</Text>
                                             </InlineStack>
                                             <InlineStack align="space-between">
                                                 <Text tone="subdued" as="span">Tax:</Text>
-                                                <Text as="span">${calculateTax(selectedRefund).toFixed(2)}</Text>
+                                                <Text as="span">{formatCurrency(calculateTax(selectedRefund), selectedRefund.currency || selectedRefund.order?.currency)}</Text>
                                             </InlineStack>
                                             <InlineStack align="space-between">
                                                 <Text tone="subdued" as="span">Shipping:</Text>
-                                                <Text as="span">${calculateShipping(selectedRefund).toFixed(2)}</Text>
+                                                <Text as="span">{formatCurrency(calculateShipping(selectedRefund), selectedRefund.currency || selectedRefund.order?.currency)}</Text>
                                             </InlineStack>
                                             <Divider />
                                             <InlineStack align="space-between">
                                                 <Text fontWeight="bold" as="span">Total Refunded:</Text>
                                                 <Text fontWeight="bold" variant="headingSm" as="span">
-                                                    ${parseFloat(selectedRefund.amount || 0).toFixed(2)} {selectedRefund.currency || "USD"}
+                                                    {formatCurrency(selectedRefund.amount, selectedRefund.currency || selectedRefund.order?.currency)}
                                                 </Text>
                                             </InlineStack>
                                         </BlockStack>

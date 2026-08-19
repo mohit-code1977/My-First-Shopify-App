@@ -124,6 +124,23 @@ export default function Products({ shop, variants = [], failedCount = 0, zohoCon
         }
     };
 
+    const formatCurrency = (amount, currencyCode = "USD") => {
+        const val = parseFloat(amount || 0);
+        const code = (currencyCode || "USD").toUpperCase();
+        try {
+            return new Intl.NumberFormat("en-US", {
+                style: "currency",
+                currency: code,
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+            }).format(val);
+        } catch (e) {
+            const symbols = { INR: "₹", USD: "$", EUR: "€", GBP: "£" };
+            const symbol = symbols[code] || `${code} `;
+            return `${symbol}${val.toFixed(2)}`;
+        }
+    };
+
     const filteredVariants = variantList.filter((v) => {
         const titleMatch = (v.product?.title || "").toLowerCase().includes(search.toLowerCase()) ||
             (v.title || "").toLowerCase().includes(search.toLowerCase()) ||
@@ -348,7 +365,7 @@ export default function Products({ shop, variants = [], failedCount = 0, zohoCon
                                                 {v.sku || "—"}
                                             </td>
                                             <td style={{ padding: "12px 16px", fontWeight: 600 }}>
-                                                ${parseFloat(v.price || 0).toFixed(2)}
+                                                {formatCurrency(v.price, v.currency || "USD")}
                                             </td>
                                             <td style={{ padding: "12px 16px", color: "#202223" }}>
                                                 {v.inventory_quantity ?? 0} in stock

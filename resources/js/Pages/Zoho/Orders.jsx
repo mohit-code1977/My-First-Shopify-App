@@ -251,46 +251,67 @@ export default function Orders({
                 type: "error",
                 message: "Network error during payment sync.",
             });
-        } finally {
+} finally {
             setSyncingPaymentId(null);
+        }
+    };
+
+    const formatCurrency = (amount, currencyCode = "USD") => {
+        const val = parseFloat(amount || 0);
+        const code = (currencyCode || "USD").toUpperCase();
+        try {
+            return new Intl.NumberFormat("en-US", {
+                style: "currency",
+                currency: code,
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+            }).format(val);
+        } catch (e) {
+            const symbols = { INR: "₹", USD: "$", EUR: "€", GBP: "£" };
+            const symbol = symbols[code] || `${code} `;
+            return `${symbol}${val.toFixed(2)}`;
         }
     };
 
     const getPaymentSummary = (order) => {
         const payments = order.payments || [];
         const total = parseFloat(order.total_price || 0);
-
-        const paidSum = payments.reduce((sum, p) => {
-            if (p.status === "paid" || p.sync_status === "synced") {
-                return sum + parseFloat(p.amount || 0);
-            }
-            return sum;
-        }, 0);
+        const invoice = order.invoice;
 
         const hasFailed = payments.some((p) => p.sync_status === "failed");
-        const hasPending = payments.some((p) => p.sync_status === "pending");
-
-        if (paidSum >= total && total > 0) {
-            return {
-                status: "paid",
-                label: `Paid ($${total.toFixed(2)})`,
-                tone: "success",
-            };
-        }
-
-        if (paidSum > 0 && paidSum < total) {
-            return {
-                status: "partial",
-                label: `$${paidSum.toFixed(2)} / $${total.toFixed(2)} Partial`,
-                tone: "warning",
-            };
-        }
+        const hasPending = payments.some((p) => p.sync_status === "pending" || p.sync_status === "processing");
 
         if (hasFailed) {
             return {
                 status: "failed",
                 label: "Sync Failed",
                 tone: "critical",
+            };
+        }
+
+        const syncedPaidSum = payments.reduce((sum, p) => {
+            if (p.sync_status === "synced" && !!p.zoho_payment_id) {
+                return sum + parseFloat(p.amount || 0);
+            }
+            return sum;
+        }, 0);
+
+        const isInvoicePartiallyPaid = invoice && (invoice.status === "partially_paid" || parseFloat(invoice.balance || 0) > 0);
+
+        if (syncedPaidSum >= total && total > 0 && !isInvoicePartiallyPaid) {
+            return {
+                status: "paid",
+                label: `Paid (${formatCurrency(total, order.currency)})`,
+                tone: "success",
+            };
+        }
+
+        if (syncedPaidSum > 0 || isInvoicePartiallyPaid) {
+            const displaySum = isInvoicePartiallyPaid ? Math.min(syncedPaidSum, total) : syncedPaidSum;
+            return {
+                status: "partial",
+                label: `${formatCurrency(displaySum, order.currency)} / ${formatCurrency(total, order.currency)} Synced`,
+                tone: "warning",
             };
         }
 
@@ -305,10 +326,14 @@ export default function Orders({
             };
         }
 
-        if (order.financial_status === "paid") {
+        if (
+            order.financial_status === "paid" ||
+            payments.some((p) => p.status === "paid") ||
+            hasPending
+        ) {
             return {
                 status: "paid_pending_sync",
-                label: hasPending ? "Sync Pending" : "Paid (Shopify)",
+                label: "Sync Pending",
                 tone: "info",
             };
         }
@@ -334,13 +359,11 @@ export default function Orders({
         ).toLowerCase();
 
         const matchesSearch =
-            orderNum.includes(search.toLowerCase()) ||
-            custName.includes(search.toLowerCase());
+            !search || orderNum.includes(search.toLowerCase()) || custName.includes(search.toLowerCase());
         if (!matchesSearch) return false;
 
-        const hasInvoice = o.invoice && o.invoice.zoho_invoice_id;
-        if (currentTabKey === "invoiced") return hasInvoice;
-        if (currentTabKey === "pending") return !hasInvoice;
+        if (currentTabKey === "invoiced") return !!o.invoice?.zoho_invoice_id;
+        if (currentTabKey === "pending") return !o.invoice?.zoho_invoice_id;
 
         return true;
     });
@@ -513,10 +536,7 @@ export default function Orders({
                 </IndexTable.Cell>
                 <IndexTable.Cell>
                     <Text variant="bodyMd" fontWeight="bold" as="span">
-                        ${parseFloat(o.total_price || 0).toFixed(2)}{" "}
-                        <Text variant="bodySm" tone="subdued" as="span">
-                            {o.currency || "USD"}
-                        </Text>
+                        {formatCurrency(o.total_price, o.currency)}
                     </Text>
                 </IndexTable.Cell>
                 <IndexTable.Cell>
@@ -923,60 +943,57 @@ export default function Orders({
                                             Order Total
                                         </Text>
                                         <Text variant="headingSm" as="p">
-                                            $
-                                            {parseFloat(
-                                                selectedOrderForPayment.total_price ||
-                                                    0,
-                                            ).toFixed(2)}{" "}
-                                            {selectedOrderForPayment.currency ||
-                                                "USD"}
-                                        </Text>
-                                    </Box>
-                                    <Box
-                                        padding="300"
-                                        background="bg-surface-secondary"
-                                        borderRadius="200"
-                                        style={{ flex: 1 }}
-                                    >
-                                        <Text
-                                            tone="subdued"
-                                            variant="bodySm"
-                                            as="p"
-                                        >
-                                            Financial Status
-                                        </Text>
-                                        <Text
-                                            variant="headingSm"
-                                            as="p"
-                                            style={{
-                                                textTransform: "capitalize",
-                                            }}
-                                        >
-                                            {selectedOrderForPayment.financial_status ||
-                                                "pending"}
-                                        </Text>
-                                    </Box>
-                                    <Box
-                                        padding="300"
-                                        background="bg-surface-secondary"
-                                        borderRadius="200"
-                                        style={{ flex: 1 }}
-                                    >
-                                        <Text
-                                            tone="subdued"
-                                            variant="bodySm"
-                                            as="p"
-                                        >
-                                            Shipping Charge
-                                        </Text>
-                                        <Text variant="headingSm" as="p">
-                                            {parseFloat(
-                                                selectedOrderForPayment.shipping_total ||
-                                                    0,
-                                            ) > 0
-                                                ? `$${parseFloat(selectedOrderForPayment.shipping_total).toFixed(2)} ${selectedOrderForPayment.currency || "USD"}`
-                                                : "Free Shipping"}
-                                        </Text>
+                                             {formatCurrency(
+                                                 selectedOrderForPayment.total_price,
+                                                 selectedOrderForPayment.currency
+                                             )}
+                                         </Text>
+                                     </Box>
+                                     <Box
+                                         padding="300"
+                                         background="bg-surface-secondary"
+                                         borderRadius="200"
+                                         style={{ flex: 1 }}
+                                     >
+                                         <Text
+                                             tone="subdued"
+                                             variant="bodySm"
+                                             as="p"
+                                         >
+                                             Financial Status
+                                         </Text>
+                                         <Text
+                                             variant="headingSm"
+                                             as="p"
+                                             style={{
+                                                 textTransform: "capitalize",
+                                             }}
+                                         >
+                                             {selectedOrderForPayment.financial_status ||
+                                                 "pending"}
+                                         </Text>
+                                     </Box>
+                                     <Box
+                                         padding="300"
+                                         background="bg-surface-secondary"
+                                         borderRadius="200"
+                                         style={{ flex: 1 }}
+                                     >
+                                         <Text
+                                             tone="subdued"
+                                             variant="bodySm"
+                                             as="p"
+                                         >
+                                             Shipping Charge
+                                         </Text>
+                                         <Text variant="headingSm" as="p">
+                                             {parseFloat(
+                                                 selectedOrderForPayment.shipping_total ||
+                                                     0,
+                                             ) > 0
+                                                 ? formatCurrency(selectedOrderForPayment.shipping_total, selectedOrderForPayment.currency)
+                                                 : "Free Shipping"}
+                                         </Text>
                                     </Box>
                                 </InlineStack>
 
@@ -1227,15 +1244,7 @@ export default function Orders({
                                                                     variant="headingSm"
                                                                     as="span"
                                                                 >
-                                                                    $
-                                                                    {parseFloat(
-                                                                        p.amount ||
-                                                                            0,
-                                                                    ).toFixed(
-                                                                        2,
-                                                                    )}{" "}
-                                                                    {p.currency ||
-                                                                        "USD"}
+                                                                    {formatCurrency(p.amount, p.currency || selectedOrderForPayment.currency)}
                                                                 </Text>
                                                                 <Badge
                                                                     tone={

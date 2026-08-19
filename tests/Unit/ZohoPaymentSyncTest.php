@@ -814,4 +814,67 @@ class ZohoPaymentSyncTest extends TestCase
             Http::assertNothingSent();
         }
     }
+
+    public function test_1929_invoice_and_1930_shop_money_payment_applies_1929_and_settles_invoice_successfully(): void
+    {
+        $postedPayload = null;
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/customerpayments*' => function (\Illuminate\Http\Client\Request $request) use (&$postedPayload) {
+                if ($request->method() === 'GET') {
+                    return Http::response(['code' => 0, 'customerpayments' => []], 200);
+                }
+                $postedPayload = $request->data();
+                return Http::response(['code' => 0, 'payment' => ['payment_id' => 'zoho_pay_1930_rounding']], 201);
+            },
+        ]);
+
+        $order = Order::create([
+            'shop_id' => $this->shop->id,
+            'customer_id' => $this->customer->id,
+            'shopify_order_id' => 'gid://shopify/Order/1017_round',
+            'order_number' => '#1017_round',
+            'order_date' => now(),
+            'currency' => 'USD',
+            'subtotal' => 11.17,
+            'shipping_total' => 8.12,
+            'total_price' => 19.29,
+        ]);
+
+        $invoice = Invoice::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $order->id,
+            'shopify_order_id' => $order->shopify_order_id,
+            'zoho_invoice_id' => '4081216000000205025_round',
+            'invoice_number' => 'INV-1017-ROUND',
+            'status' => 'sent',
+            'amount' => 19.29,
+            'currency' => 'USD',
+            'sync_status' => 'synced',
+        ]);
+
+        $payment = Payment::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $order->id,
+            'invoice_id' => $invoice->id,
+            'shopify_order_id' => $order->shopify_order_id,
+            'shopify_transaction_id' => 'gid://shopify/OrderTransaction/1017_round_txn',
+            'payment_reference' => 'TXN-1017-ROUND',
+            'amount' => 19.30, // $19.30 shopMoney payment (1 cent over $19.29 invoice)
+            'currency' => 'USD',
+            'payment_method' => 'bogus',
+            'status' => 'paid',
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncPayment($payment);
+
+        $this->assertTrue($result['success']);
+        $this->assertEquals('zoho_pay_1930_rounding', $result['zoho_payment_id']);
+        $payment->refresh();
+        $this->assertEquals(Payment::SYNC_STATUS_SYNCED, $payment->sync_status);
+
+        $this->assertNotNull($postedPayload);
+        $this->assertEquals(19.30, (float) $postedPayload['amount']);
+        $this->assertEquals(19.29, (float) $postedPayload['invoices'][0]['amount_applied']);
+    }
 }
