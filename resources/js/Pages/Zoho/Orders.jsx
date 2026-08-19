@@ -32,7 +32,7 @@ export default function Orders({
     zohoConnected = false,
     host = "",
 }) {
-    const [initialLoading, setInitialLoading] = useState(true);
+    const [initialLoading, setInitialLoading] = useState(!orders || orders.length === 0);
     const [refreshing, setRefreshing] = useState(false);
     const [shopData, setShopData] = useState(shop || {});
     const [connectedState, setConnectedState] = useState(zohoConnected);
@@ -54,7 +54,7 @@ export default function Orders({
     const loadData = async (isRefresh = false) => {
         if (isRefresh) {
             setRefreshing(true);
-        } else {
+        } else if (!orderList || orderList.length === 0) {
             setInitialLoading(true);
         }
         try {
@@ -81,7 +81,7 @@ export default function Orders({
     };
 
     useEffect(() => {
-        loadData();
+        loadData(false);
     }, []);
 
     // Sync selected order in modal when orderList updates
@@ -1214,10 +1214,22 @@ export default function Orders({
                                                         syncingPaymentId ===
                                                         selectedOrderForPayment.id
                                                     }
+                                                    disabled={
+                                                        selectedOrderForPayment.financial_status === "refunded" ||
+                                                        selectedOrderForPayment.financial_status === "voided"
+                                                    }
                                                 >
                                                     Record &amp; Sync Payment to
                                                     Zoho
                                                 </Button>
+                                                {(selectedOrderForPayment.financial_status === "refunded" ||
+                                                    selectedOrderForPayment.financial_status === "voided") && (
+                                                    <Box paddingTop="100">
+                                                        <Text tone="subdued" variant="bodySm" as="p">
+                                                            Payment recording is disabled for refunded or voided orders.
+                                                        </Text>
+                                                    </Box>
+                                                )}
                                             </Box>
                                         )}
                                     </Box>

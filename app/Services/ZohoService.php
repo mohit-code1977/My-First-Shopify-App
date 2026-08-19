@@ -2889,9 +2889,11 @@ class ZohoService {
             if (isset($shopSettings[$rawGateway]) && is_array($shopSettings[$rawGateway])) {
                 $custom = $shopSettings[$rawGateway];
                 if (!empty($custom['payment_mode'])) {
+                    $rawAccId = !empty($custom['account_id']) ? trim((string) $custom['account_id']) : null;
+                    $validAccId = ($rawAccId && preg_match('/^\d+$/', $rawAccId)) ? $rawAccId : null;
                     return [
                         'payment_mode' => strtolower(trim((string) $custom['payment_mode'])),
-                        'account_id' => !empty($custom['account_id']) ? (string) $custom['account_id'] : null,
+                        'account_id' => $validAccId,
                     ];
                 }
             }
@@ -2900,16 +2902,17 @@ class ZohoService {
         $configured = config("services.zoho.payment_gateways.{$rawGateway}");
         if (is_array($configured) && !empty($configured['payment_mode'])) {
             $mode = strtolower(trim((string) $configured['payment_mode']));
-            $accountId = !empty($configured['account_id']) ? (string) $configured['account_id'] : null;
+            $rawAccId = !empty($configured['account_id']) ? trim((string) $configured['account_id']) : null;
+            $validAccId = ($rawAccId && preg_match('/^\d+$/', $rawAccId)) ? $rawAccId : null;
             $requireAccount = !empty($configured['require_account_id']);
 
-            if ($requireAccount && empty($accountId)) {
-                throw new \Exception("Payment account ID is required for gateway '{$gateway}' but could not be resolved.");
+            if ($requireAccount && empty($validAccId)) {
+                throw new \Exception("Payment account ID is required for gateway '{$gateway}' but could not be resolved or is invalid.");
             }
 
             return [
                 'payment_mode' => $mode,
-                'account_id' => $accountId,
+                'account_id' => $validAccId,
             ];
         }
 
@@ -3032,6 +3035,10 @@ class ZohoService {
 
             $order->unsetRelations();
             $order->refresh();
+
+            if (in_array(strtolower((string) $order->financial_status), ['refunded', 'voided'])) {
+                throw new \Exception("Cannot sync payment #{$payment->id} for order #{$order->order_number}: Order financial status is '{$order->financial_status}'. Payments cannot be recorded or synchronized for refunded or voided orders.");
+            }
 
             // 2. Resolve & Validate Invoice
             $invoice = Invoice::where('shop_id', $this->shop->id)

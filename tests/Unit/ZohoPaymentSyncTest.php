@@ -877,4 +877,138 @@ class ZohoPaymentSyncTest extends TestCase
         $this->assertEquals(19.30, (float) $postedPayload['amount']);
         $this->assertEquals(19.29, (float) $postedPayload['invoices'][0]['amount_applied']);
     }
+
+    public function test_invalid_non_numeric_account_id_is_stripped_and_uses_default_deposit_account(): void
+    {
+        // Set non-numeric string placeholder in shop settings
+        $this->shop->update([
+            'payment_gateway_settings' => [
+                'shopify_payments' => [
+                    'account_id' => 'primary_bank_account',
+                    'payment_mode' => 'creditcard',
+                ],
+            ],
+        ]);
+
+        $postedPayload = null;
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/customerpayments*' => function (Request $request) use (&$postedPayload) {
+                if ($request->method() === 'GET') {
+                    return Http::response(['code' => 0, 'customerpayments' => []], 200);
+                }
+                $postedPayload = $request->data();
+                return Http::response(['code' => 0, 'payment' => ['payment_id' => 'zoho_pay_strip_acc_id']], 201);
+            },
+        ]);
+
+        $payment = Payment::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $this->order->id,
+            'invoice_id' => $this->invoice->id,
+            'shopify_order_id' => $this->order->shopify_order_id,
+            'shopify_transaction_id' => 'gid://shopify/OrderTransaction/strip_acc_1',
+            'payment_reference' => 'TXN-STRIP-ACC-1',
+            'amount' => 100.00,
+            'currency' => 'USD',
+            'payment_method' => 'shopify_payments',
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncPayment($payment);
+
+        $this->assertTrue($result['success']);
+        $this->assertNotNull($postedPayload);
+        // Assert non-numeric account_id is omitted from payload so Zoho defaults to Undeposited Funds / Petty Cash
+        $this->assertArrayNotHasKey('account_id', $postedPayload);
+    }
+
+    public function test_valid_numeric_account_id_is_sent_to_zoho(): void
+    {
+        $this->shop->update([
+            'payment_gateway_settings' => [
+                'shopify_payments' => [
+                    'account_id' => '4081216000000000355',
+                    'payment_mode' => 'creditcard',
+                ],
+            ],
+        ]);
+
+        $postedPayload = null;
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/customerpayments*' => function (Request $request) use (&$postedPayload) {
+                if ($request->method() === 'GET') {
+                    return Http::response(['code' => 0, 'customerpayments' => []], 200);
+                }
+                $postedPayload = $request->data();
+                return Http::response(['code' => 0, 'payment' => ['payment_id' => 'zoho_pay_valid_acc_id']], 201);
+            },
+        ]);
+
+        $payment = Payment::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $this->order->id,
+            'invoice_id' => $this->invoice->id,
+            'shopify_order_id' => $this->order->shopify_order_id,
+            'shopify_transaction_id' => 'gid://shopify/OrderTransaction/valid_acc_1',
+            'payment_reference' => 'TXN-VALID-ACC-1',
+            'amount' => 100.00,
+            'currency' => 'USD',
+            'payment_method' => 'shopify_payments',
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncPayment($payment);
+
+        $this->assertTrue($result['success']);
+        $this->assertNotNull($postedPayload);
+        $this->assertEquals('4081216000000000355', $postedPayload['account_id']);
+    }
+
+    public function test_payment_sync_for_refunded_order_fails_with_clear_error(): void
+    {
+        $this->order->update(['financial_status' => 'refunded']);
+
+        $payment = Payment::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $this->order->id,
+            'invoice_id' => $this->invoice->id,
+            'shopify_order_id' => $this->order->shopify_order_id,
+            'shopify_transaction_id' => 'gid://shopify/OrderTransaction/refunded_order_pay',
+            'payment_reference' => 'TXN-REFUNDED-ORD-1',
+            'amount' => 100.00,
+            'currency' => 'USD',
+            'payment_method' => 'shopify_payments',
+        ]);
+
+        Http::fake();
+
+        try {
+            $zohoService = new ZohoService($this->shop);
+            $zohoService->syncPayment($payment);
+            $this->fail("Expected exception for refunded order payment sync was not thrown.");
+        } catch (\Throwable $e) {
+            $payment->refresh();
+            $this->assertEquals(Payment::SYNC_STATUS_FAILED, $payment->sync_status);
+            $this->assertStringContainsString("Order financial status is 'refunded'", $e->getMessage());
+            Http::assertNothingSent();
+        }
+    }
+
+    public function test_controller_blocks_manual_payment_creation_for_refunded_order(): void
+    {
+        $this->order->update(['financial_status' => 'refunded']);
+
+        $controller = app(\App\Http\Controllers\ZohoSyncController::class);
+        $request = \Illuminate\Http\Request::create('/zoho/sync-payment', 'POST', [
+            'order_id' => $this->order->id,
+        ]);
+        $request->attributes->set('shop', $this->shop);
+
+        $response = $controller->syncPayment($request);
+        $data = $response->getData(true);
+
+        $this->assertEquals(422, $response->getStatusCode());
+        $this->assertFalse($data['success']);
+        $this->assertStringContainsString("Order financial status is 'refunded'", $data['message']);
+    }
 }

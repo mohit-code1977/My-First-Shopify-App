@@ -201,66 +201,14 @@ class ZohoSyncController extends Controller {
         $orders = [];
 
         if ($shopModel) {
-            $orders = Order::with(['customer', 'invoice', 'payments', 'refunds'])
-                ->where('shop_id', $shopModel->id)
-                ->latest()
-                ->take(50)
-                ->get();
+            $orders = $this->fetchLocalOrders($shopModel->id);
 
             if ($orders->isEmpty()) {
                 try {
                     $shopifyService = app(\App\Services\ShopifyService::class);
                     $rawOrders = $shopifyService->fetchOrders($shopModel);
-
-                    foreach ($rawOrders as $raw) {
-                        $customerId = null;
-                        if (!empty($raw['customer'])) {
-                            $rawCust = $raw['customer'];
-                            $custObj = Customer::updateOrCreate(
-                                [
-                                    'shop_id' => $shopModel->id,
-                                    'shopify_customer_id' => (string) $rawCust['id'],
-                                ],
-                                [
-                                    'first_name' => $rawCust['first_name'] ?? '',
-                                    'last_name' => $rawCust['last_name'] ?? '',
-                                    'email' => $rawCust['email'] ?? '',
-                                    'phone' => $rawCust['phone'] ?? null,
-                                    'billing_address' => $rawCust['default_address'] ?? [],
-                                    'shipping_address' => $rawCust['default_address'] ?? [],
-                                ]
-                            );
-                            $customerId = $custObj->id;
-                        }
-
-                        Order::updateOrCreate(
-                            [
-                                'shop_id' => $shopModel->id,
-                                'shopify_order_id' => (string) $raw['id'],
-                            ],
-                            [
-                                'customer_id' => $customerId,
-                                'order_number' => (string) ($raw['order_number'] ?? $raw['name'] ?? $raw['id']),
-                                'financial_status' => $raw['financial_status'] ?? 'pending',
-                                'fulfillment_status' => $raw['fulfillment_status'] ?? 'unfulfilled',
-                                'subtotal' => $raw['subtotal_price'] ?? 0.00,
-                                'discount_total' => $raw['total_discounts'] ?? 0.00,
-                                'shipping_total' => !empty($raw['shipping_lines']) ? array_sum(array_column($raw['shipping_lines'], 'price')) : 0.00,
-                                'tax_total' => $raw['total_tax'] ?? 0.00,
-                                'total_price' => $raw['total_price'] ?? 0.00,
-                                'currency' => $raw['currency'] ?? 'USD',
-                                'line_items' => $raw['line_items'] ?? [],
-                                'notes' => $raw['note'] ?? null,
-                                'order_date' => !empty($raw['created_at']) ? \Carbon\Carbon::parse($raw['created_at']) : now(),
-                            ]
-                        );
-                    }
-
-                    $orders = Order::with(['customer', 'invoice', 'payments'])
-                        ->where('shop_id', $shopModel->id)
-                        ->latest()
-                        ->take(50)
-                        ->get();
+                    $this->ingestShopifyOrders($shopModel, $rawOrders);
+                    $orders = $this->fetchLocalOrders($shopModel->id);
                 } catch (\Exception $e) {
                     Log::warning('Could not fetch existing Shopify orders for view', [
                         'error' => $e->getMessage(),
@@ -416,6 +364,207 @@ class ZohoSyncController extends Controller {
         ]);
     }
 
+    /**
+     * Helper to fetch local orders with all required relationships eager-loaded.
+     */
+    protected function fetchLocalOrders(int $shopId, int $limit = 50)
+    {
+        return Order::with(['customer', 'invoice', 'payments', 'refunds'])
+            ->where('shop_id', $shopId)
+            ->latest()
+            ->take($limit)
+            ->get();
+    }
+
+    /**
+     * Extract pure numeric ID from a Shopify ID string.
+     */
+    public static function extractNumericId(?string $id): ?string
+    {
+        if (empty($id)) {
+            return null;
+        }
+        if (preg_match('/(\d+)$/', $id, $matches)) {
+            return $matches[1];
+        }
+        return $id;
+    }
+
+    /**
+     * Format a Shopify Order ID into canonical GID format.
+     */
+    public static function formatShopifyOrderId(?string $id): ?string
+    {
+        $num = static::extractNumericId($id);
+        return $num ? "gid://shopify/Order/{$num}" : $id;
+    }
+
+    /**
+     * Format a Shopify Customer ID into canonical GID format.
+     */
+    public static function formatShopifyCustomerId(?string $id): ?string
+    {
+        $num = static::extractNumericId($id);
+        return $num ? "gid://shopify/Customer/{$num}" : $id;
+    }
+
+    /**
+     * Normalize a Shopify Order ID into its candidate variations: [GID, numeric].
+     */
+    public static function normalizeShopifyOrderId(string $id): array
+    {
+        $num = static::extractNumericId($id);
+        if (empty($num)) {
+            return [$id];
+        }
+        return array_unique([
+            "gid://shopify/Order/{$num}",
+            $num,
+        ]);
+    }
+
+    /**
+     * Normalize a Shopify Customer ID into its candidate variations: [GID, numeric].
+     */
+    public static function normalizeShopifyCustomerId(string $id): array
+    {
+        $num = static::extractNumericId($id);
+        if (empty($num)) {
+            return [$id];
+        }
+        return array_unique([
+            "gid://shopify/Customer/{$num}",
+            $num,
+        ]);
+    }
+
+    /**
+     * Batch ingest raw Shopify orders and customers to prevent N+1 query overhead.
+     */
+    protected function ingestShopifyOrders(Shop $shop, array $rawOrders): void
+    {
+        if (empty($rawOrders)) {
+            return;
+        }
+
+        $rawCustomers = [];
+        $allCustomerCandidates = [];
+        foreach ($rawOrders as $raw) {
+            if (!empty($raw['customer']) && !empty($raw['customer']['id'])) {
+                $rawCustId = (string) $raw['customer']['id'];
+                $rawCustomers[$rawCustId] = $raw['customer'];
+                foreach (static::normalizeShopifyCustomerId($rawCustId) as $candidate) {
+                    $allCustomerCandidates[] = $candidate;
+                }
+            }
+        }
+
+        $customerMap = [];
+        if (!empty($allCustomerCandidates)) {
+            $existingCustomers = Customer::where('shop_id', $shop->id)
+                ->whereIn('shopify_customer_id', array_unique($allCustomerCandidates))
+                ->get();
+
+            $customerLookup = [];
+            foreach ($existingCustomers as $cust) {
+                $customerLookup[$cust->shopify_customer_id] = $cust;
+                $num = static::extractNumericId($cust->shopify_customer_id);
+                if ($num) {
+                    $customerLookup[$num] = $cust;
+                    $customerLookup["gid://shopify/Customer/{$num}"] = $cust;
+                }
+            }
+
+            foreach ($rawCustomers as $rawCustId => $rawCust) {
+                $custObj = $customerLookup[$rawCustId] ?? null;
+                $defaultAddr = $rawCust['default_address'] ?? [];
+                $phone = !empty($rawCust['phone']) ? $rawCust['phone'] : ($defaultAddr['phone'] ?? null);
+                $custData = [
+                    'first_name' => $rawCust['first_name'] ?? '',
+                    'last_name' => $rawCust['last_name'] ?? '',
+                    'email' => $rawCust['email'] ?? '',
+                    'billing_address' => $defaultAddr,
+                    'shipping_address' => $defaultAddr,
+                ];
+                if ($phone !== null) {
+                    $custData['phone'] = $phone;
+                }
+
+                if ($custObj) {
+                    $custObj->update($custData);
+                } else {
+                    $custObj = Customer::create(array_merge([
+                        'shop_id' => $shop->id,
+                        'shopify_customer_id' => static::formatShopifyCustomerId($rawCustId),
+                    ], $custData));
+                }
+                $customerMap[$rawCustId] = $custObj->id;
+            }
+        }
+
+        $allOrderCandidates = [];
+        foreach ($rawOrders as $raw) {
+            $rawOrdId = (string) $raw['id'];
+            foreach (static::normalizeShopifyOrderId($rawOrdId) as $candidate) {
+                $allOrderCandidates[] = $candidate;
+            }
+        }
+
+        $existingOrders = Order::where('shop_id', $shop->id)
+            ->whereIn('shopify_order_id', array_unique($allOrderCandidates))
+            ->get();
+
+        $orderLookup = [];
+        foreach ($existingOrders as $ord) {
+            $orderLookup[$ord->shopify_order_id] = $ord;
+            $num = static::extractNumericId($ord->shopify_order_id);
+            if ($num) {
+                $orderLookup[$num] = $ord;
+                $orderLookup["gid://shopify/Order/{$num}"] = $ord;
+            }
+        }
+
+        foreach ($rawOrders as $raw) {
+            $rawOrdId = (string) $raw['id'];
+            $custShopifyId = !empty($raw['customer']) ? (string) $raw['customer']['id'] : null;
+            $customerId = $custShopifyId ? ($customerMap[$custShopifyId] ?? null) : null;
+
+            $existingOrder = $orderLookup[$rawOrdId] ?? null;
+
+            $orderData = [
+                'customer_id' => $customerId,
+                'financial_status' => $raw['financial_status'] ?? 'pending',
+                'fulfillment_status' => $raw['fulfillment_status'] ?? 'unfulfilled',
+                'subtotal' => $raw['subtotal_price'] ?? 0.00,
+                'discount_total' => $raw['total_discounts'] ?? 0.00,
+                'shipping_total' => !empty($raw['shipping_lines']) ? array_sum(array_column($raw['shipping_lines'], 'price')) : 0.00,
+                'tax_total' => $raw['total_tax'] ?? 0.00,
+                'total_price' => $raw['total_price'] ?? 0.00,
+                'currency' => $raw['currency'] ?? 'USD',
+                'line_items' => $raw['line_items'] ?? [],
+                'notes' => $raw['note'] ?? null,
+                'order_date' => !empty($raw['created_at']) ? \Carbon\Carbon::parse($raw['created_at']) : now(),
+            ];
+
+            if (!$existingOrder || empty($existingOrder->order_number) || !str_starts_with($existingOrder->order_number, '#')) {
+                $rawNumber = (string) ($raw['order_number'] ?? $raw['name'] ?? $raw['id']);
+                if (!str_starts_with($rawNumber, '#') && !empty($raw['name']) && str_starts_with($raw['name'], '#')) {
+                    $rawNumber = $raw['name'];
+                }
+                $orderData['order_number'] = $rawNumber;
+            }
+
+            if ($existingOrder) {
+                $existingOrder->update($orderData);
+            } else {
+                Order::create(array_merge([
+                    'shop_id' => $shop->id,
+                    'shopify_order_id' => static::formatShopifyOrderId($rawOrdId),
+                ], $orderData));
+            }
+        }
+    }
+
     public function ordersData(Request $request): JsonResponse
     {
         $shop = $request->attributes->get('shop') ?? $this->resolveShopModel($request);
@@ -427,66 +576,14 @@ class ZohoSyncController extends Controller {
             ], 404);
         }
 
-        $orders = Order::with(['customer', 'invoice', 'payments', 'refunds'])
-            ->where('shop_id', $shop->id)
-            ->latest()
-            ->take(50)
-            ->get();
+        $orders = $this->fetchLocalOrders($shop->id);
 
-        if ($orders->isEmpty() || $request->boolean('refresh')) {
+        if ($orders->isEmpty() || $request->boolean('refresh_shopify') || $request->boolean('sync_shopify')) {
             try {
                 $shopifyService = app(\App\Services\ShopifyService::class);
                 $rawOrders = $shopifyService->fetchOrders($shop);
-
-                foreach ($rawOrders as $raw) {
-                    $customerId = null;
-                    if (!empty($raw['customer'])) {
-                        $rawCust = $raw['customer'];
-                        $custObj = Customer::updateOrCreate(
-                            [
-                                'shop_id' => $shop->id,
-                                'shopify_customer_id' => (string) $rawCust['id'],
-                            ],
-                            [
-                                'first_name' => $rawCust['first_name'] ?? '',
-                                'last_name' => $rawCust['last_name'] ?? '',
-                                'email' => $rawCust['email'] ?? '',
-                                'phone' => $rawCust['phone'] ?? null,
-                                'billing_address' => $rawCust['default_address'] ?? [],
-                                'shipping_address' => $rawCust['default_address'] ?? [],
-                            ]
-                        );
-                        $customerId = $custObj->id;
-                    }
-
-                    Order::updateOrCreate(
-                        [
-                            'shop_id' => $shop->id,
-                            'shopify_order_id' => (string) $raw['id'],
-                        ],
-                        [
-                            'customer_id' => $customerId,
-                            'order_number' => (string) ($raw['order_number'] ?? $raw['name'] ?? $raw['id']),
-                            'financial_status' => $raw['financial_status'] ?? 'pending',
-                            'fulfillment_status' => $raw['fulfillment_status'] ?? 'unfulfilled',
-                            'subtotal' => $raw['subtotal_price'] ?? 0.00,
-                            'discount_total' => $raw['total_discounts'] ?? 0.00,
-                            'shipping_total' => !empty($raw['shipping_lines']) ? array_sum(array_column($raw['shipping_lines'], 'price')) : 0.00,
-                            'tax_total' => $raw['total_tax'] ?? 0.00,
-                            'total_price' => $raw['total_price'] ?? 0.00,
-                            'currency' => $raw['currency'] ?? 'USD',
-                            'line_items' => $raw['line_items'] ?? [],
-                            'notes' => $raw['note'] ?? null,
-                            'order_date' => !empty($raw['created_at']) ? \Carbon\Carbon::parse($raw['created_at']) : now(),
-                        ]
-                    );
-                }
-
-                $orders = Order::with(['customer', 'invoice', 'payments'])
-                    ->where('shop_id', $shop->id)
-                    ->latest()
-                    ->take(50)
-                    ->get();
+                $this->ingestShopifyOrders($shop, $rawOrders);
+                $orders = $this->fetchLocalOrders($shop->id);
             } catch (\Exception $e) {
                 Log::warning('Could not fetch existing Shopify orders for list view', [
                     'error' => $e->getMessage(),
@@ -1117,6 +1214,13 @@ GRAPHQL;
                 ->first();
 
             if ($order) {
+                if (in_array(strtolower((string) $order->financial_status), ['refunded', 'voided'])) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => "Cannot record or sync payment for order #{$order->order_number}: Order financial status is '{$order->financial_status}'. Manual payments cannot be recorded on refunded or voided orders.",
+                    ], 422);
+                }
+
                 $payment = Payment::where('order_id', $order->id)
                     ->where('shop_id', $shop->id)
                     ->latest()
@@ -1139,6 +1243,13 @@ GRAPHQL;
                     ]);
                 }
             }
+        }
+
+        if ($payment && $payment->order && in_array(strtolower((string) $payment->order->financial_status), ['refunded', 'voided'])) {
+            return response()->json([
+                'success' => false,
+                'message' => "Cannot record or sync payment for order #{$payment->order->order_number}: Order financial status is '{$payment->order->financial_status}'. Manual payments cannot be recorded on refunded or voided orders.",
+            ], 422);
         }
 
         if (!$payment) {
