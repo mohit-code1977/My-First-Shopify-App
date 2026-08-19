@@ -2090,6 +2090,24 @@ class ZohoService {
     }
 
     /**
+     * Confirm / Open a Zoho Sales Order.
+     */
+    public function confirmSalesOrder(string $zohoSalesOrderId): array
+    {
+        try {
+            $response = $this->makeRequest('POST', "/books/v3/salesorders/{$zohoSalesOrderId}/status/confirmed");
+            return $response['salesorder'] ?? $response;
+        } catch (\Throwable $e) {
+            $msg = strtolower($e->getMessage());
+            if (str_contains($msg, 'already confirmed') || str_contains($msg, 'already open') || str_contains($msg, 'status cannot be changed') || str_contains($msg, 'already invoiced')) {
+                Log::info("confirmSalesOrder: Sales order {$zohoSalesOrderId} is already confirmed/open in Zoho Books.");
+                return ['salesorder_id' => $zohoSalesOrderId, 'status' => 'confirmed'];
+            }
+            throw $e;
+        }
+    }
+
+    /**
      * Update an existing Sales Order in Zoho Books.
      */
     public function updateSalesOrder(string $salesOrderId, array $payload): array
@@ -2106,9 +2124,18 @@ class ZohoService {
             $response = $this->makeRequest('POST', "/books/v3/salesorders/{$zohoSalesOrderId}/status/void");
             return $response['salesorder'] ?? $response;
         } catch (\Throwable $e) {
-            if (str_contains(strtolower($e->getMessage()), 'already void')) {
+            $msg = strtolower($e->getMessage());
+            if (str_contains($msg, 'already void')) {
                 Log::info("voidSalesOrder: Sales order {$zohoSalesOrderId} is already void in Zoho Books.");
                 return ['salesorder_id' => $zohoSalesOrderId, 'status' => 'void'];
+            }
+            if (str_contains($msg, 'invoiced sales order cannot be marked void') || str_contains($msg, '36009')) {
+                Log::info("voidSalesOrder: Sales order {$zohoSalesOrderId} is invoiced/closed and cannot be marked void in Zoho Books.");
+                return [
+                    'salesorder_id' => $zohoSalesOrderId,
+                    'status' => 'invoiced_cannot_void',
+                    'message' => 'Invoiced/closed sales order cannot be marked void in Zoho Books.',
+                ];
             }
             throw $e;
         }
@@ -2385,6 +2412,16 @@ class ZohoService {
             Log::info("syncOrder: Created new Zoho Sales Order ID {$zohoSalesOrderId} for order ID {$order->id}.");
         }
 
+        // 6. Confirm / Open Sales Order in Zoho Books
+        if ($zohoSalesOrderId) {
+            try {
+                $this->confirmSalesOrder($zohoSalesOrderId);
+                Log::info("syncOrder: Confirmed Sales Order ID {$zohoSalesOrderId} for order ID {$order->id}.");
+            } catch (\Throwable $e) {
+                Log::warning("syncOrder: Could not confirm Sales Order ID {$zohoSalesOrderId}: " . $e->getMessage());
+            }
+        }
+
         $hash = hash('sha256', json_encode([
             'order_number' => $order->order_number,
             'subtotal' => $order->subtotal,
@@ -2472,6 +2509,15 @@ class ZohoService {
     public function createInvoice(Order $order, array $payload): array
     {
         $response = $this->makeRequest('POST', '/books/v3/invoices', $payload);
+        return $response['invoice'] ?? [];
+    }
+
+    /**
+     * Create a new Zoho Invoice from a confirmed Sales Order.
+     */
+    public function createInvoiceFromSalesOrder(string $zohoSalesOrderId, array $payload = []): array
+    {
+        $response = $this->makeRequest('POST', "/books/v3/invoices/fromsalesorder?salesorder_id={$zohoSalesOrderId}", $payload);
         return $response['invoice'] ?? [];
     }
 
@@ -2776,7 +2822,7 @@ class ZohoService {
                 $zohoData = $this->updateInvoice($localInvoice, $order, $invoicePayload);
                 $updated = true;
             } else {
-                $zohoData = $this->createInvoice($order, $invoicePayload);
+                $zohoData = $this->createInvoiceFromSalesOrder($order->zoho_sales_order_id);
                 $zohoInvoiceId = $zohoData['invoice_id'] ?? null;
                 $created = true;
             }
@@ -3558,6 +3604,12 @@ class ZohoService {
             }
         }
 
+        if (in_array(strtolower((string) $order->financial_status), ['cancelled', 'voided'], true)) {
+            $order->cancel_sync_status = 'synced';
+            $order->cancel_sync_error = null;
+            $order->save();
+        }
+
         // 5. Record Sync History
         SyncHistory::create([
             'shop_id' => $this->shop->id,
@@ -3603,33 +3655,118 @@ class ZohoService {
         $order->save();
 
         try {
-            $soResult = $this->syncOrder($order);
-            $invResult = $this->syncInvoice($order);
+            $soId = $order->zoho_sales_order_id;
+            if (!$soId && !empty($order->order_number)) {
+                $refNumber = $order->order_number;
+                $existing = $this->findZohoSalesOrderByReferenceNumber($refNumber);
+                if ($existing && !empty($existing['salesorder_id'])) {
+                    $soId = (string) $existing['salesorder_id'];
+                    $order->zoho_sales_order_id = $soId;
+                    $order->zoho_sales_order_number = $existing['salesorder_number'] ?? null;
+                    $order->save();
+                }
+            }
+
+            $invoice = $order->invoice;
+            $soVoidRes = null;
+            $invVoidRes = null;
+
+            if ($invoice && $invoice->zoho_invoice_id) {
+                try {
+                    $invVoidRes = $this->voidInvoice($invoice->zoho_invoice_id);
+                    if (($invVoidRes['status'] ?? '') === 'void') {
+                        $invoice->update(['status' => 'void']);
+                    }
+                } catch (\Throwable $e) {
+                    Log::warning("cancelOrder: Void invoice {$invoice->zoho_invoice_id} threw: " . $e->getMessage());
+                }
+            }
+
+            if ($soId) {
+                try {
+                    $soVoidRes = $this->voidSalesOrder($soId);
+                } catch (\Throwable $e) {
+                    Log::warning("cancelOrder: Void sales order {$soId} threw: " . $e->getMessage());
+                    throw $e;
+                }
+            }
+
+            $hasCreditNote = $order->refunds()->where(function ($q) {
+                $q->whereNotNull('zoho_creditnote_id')->orWhere('sync_status', 'synced');
+            })->exists();
+
+            $soVoided = ($soVoidRes['status'] ?? '') === 'void' || ($soVoidRes['status'] ?? '') === 'confirmed' && empty($soId);
+            $soCannotVoid = ($soVoidRes['status'] ?? '') === 'invoiced_cannot_void';
+            $invCannotVoid = ($invVoidRes['status'] ?? '') === 'paid_cannot_void';
+
+            if ($soVoided || !$soId || $hasCreditNote) {
+                $order->cancel_sync_status = 'synced';
+                $order->cancel_sync_error = null;
+                $order->save();
+
+                SyncHistory::create([
+                    'shop_id' => $this->shop->id,
+                    'order_id' => $order->id,
+                    'invoice_id' => $order->invoice->id ?? null,
+                    'action' => 'order_cancelled',
+                    'status' => 'success',
+                    'zoho_sales_order_id' => $order->zoho_sales_order_id,
+                    'zoho_invoice_id' => $order->invoice->zoho_invoice_id ?? null,
+                    'message' => "Order #{$order->order_number} cancellation synchronized to Zoho Books.",
+                    'synced_at' => now(),
+                ]);
+
+                return [
+                    'success' => true,
+                    'status' => 'synced',
+                    'order_id' => $order->id,
+                    'sales_order_result' => $soVoidRes,
+                    'invoice_result' => $invVoidRes,
+                    'message' => "Order #{$order->order_number} cancellation synchronized successfully.",
+                ];
+            }
+
+            if ($soCannotVoid || $invCannotVoid) {
+                $order->cancel_sync_status = 'requires_refund';
+                $order->cancel_sync_error = 'Zoho Sales Order is CLOSED and Invoice is PAID. Zoho requires a Credit Note (Refund) to reverse paid documents.';
+                $order->save();
+
+                SyncHistory::create([
+                    'shop_id' => $this->shop->id,
+                    'order_id' => $order->id,
+                    'invoice_id' => $order->invoice->id ?? null,
+                    'action' => 'order_cancelled',
+                    'status' => 'requires_refund',
+                    'zoho_sales_order_id' => $order->zoho_sales_order_id,
+                    'zoho_invoice_id' => $order->invoice->zoho_invoice_id ?? null,
+                    'message' => "Order #{$order->order_number} cancellation recorded locally. Zoho Sales Order is CLOSED/PAID; awaiting Shopify Refund to generate Credit Note.",
+                    'synced_at' => now(),
+                ]);
+
+                return [
+                    'success' => true,
+                    'status' => 'requires_refund',
+                    'order_id' => $order->id,
+                    'sales_order_result' => $soVoidRes,
+                    'invoice_result' => $invVoidRes,
+                    'message' => "Order #{$order->order_number} cancellation recorded. Zoho Sales Order is CLOSED/PAID; awaiting Shopify Refund to generate Credit Note.",
+                ];
+            }
 
             $order->cancel_sync_status = 'synced';
+            $order->cancel_sync_error = null;
             $order->save();
-
-            SyncHistory::create([
-                'shop_id' => $this->shop->id,
-                'order_id' => $order->id,
-                'invoice_id' => $order->invoice->id ?? null,
-                'action' => 'order_cancelled',
-                'status' => 'success',
-                'zoho_sales_order_id' => $order->zoho_sales_order_id,
-                'zoho_invoice_id' => $order->invoice->zoho_invoice_id ?? null,
-                'message' => "Order #{$order->order_number} cancellation synchronized to Zoho Books.",
-                'synced_at' => now(),
-            ]);
 
             return [
                 'success' => true,
+                'status' => 'synced',
                 'order_id' => $order->id,
-                'sales_order_result' => $soResult,
-                'invoice_result' => $invResult,
-                'message' => "Order #{$order->order_number} cancellation synchronized successfully.",
+                'message' => "Order #{$order->order_number} cancellation processed.",
             ];
+
         } catch (\Throwable $e) {
             $order->cancel_sync_status = 'failed';
+            $order->cancel_sync_error = $e->getMessage();
             $order->save();
 
             SyncHistory::create([

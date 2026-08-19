@@ -19,6 +19,9 @@ return new class extends Migration {
             if (!Schema::hasColumn('orders', 'cancel_sync_status')) {
                 $table->string('cancel_sync_status')->nullable()->after('cancel_reason')->index();
             }
+            if (!Schema::hasColumn('orders', 'cancel_sync_error')) {
+                $table->text('cancel_sync_error')->nullable()->after('cancel_sync_status');
+            }
         });
     }
 

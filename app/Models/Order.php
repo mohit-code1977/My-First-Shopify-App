@@ -34,6 +34,7 @@ class Order extends Model
         'cancelled_at',
         'cancel_reason',
         'cancel_sync_status',
+        'cancel_sync_error',
         'fulfillment_status',
         'line_items',
         'tax_lines',

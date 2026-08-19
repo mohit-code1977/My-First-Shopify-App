@@ -950,6 +950,107 @@ class ZohoOrderCancellationSyncTest extends TestCase
     }
 
     /**
+     * Test: CLOSED + PAID Sales Order cancellation without refund sets cancel_sync_status = requires_refund.
+     */
+    public function test_closed_paid_order_cancellation_without_refund_sets_requires_refund()
+    {
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/salesorders/zoho_so_closed/status/void*' => Http::response([
+                'code' => 36009,
+                'message' => 'Invoiced sales order cannot be marked void.',
+            ], 400),
+            'https://www.zohoapis.com/books/v3/invoices/zoho_inv_paid/status/void*' => Http::response([
+                'code' => 36004,
+                'message' => 'Invoice has associated customer payments and cannot be voided.',
+            ], 400),
+        ]);
+
+        $order = Order::create([
+            'shop_id' => $this->shop->id,
+            'customer_id' => $this->customer->id,
+            'shopify_order_id' => '1030',
+            'order_number' => '#1030',
+            'zoho_sales_order_id' => 'zoho_so_closed',
+            'financial_status' => 'paid',
+            'total_price' => 7864.83,
+            'currency' => 'INR',
+        ]);
+
+        Invoice::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $order->id,
+            'shopify_order_id' => '1030',
+            'zoho_invoice_id' => 'zoho_inv_paid',
+            'status' => 'paid',
+            'total' => 7864.83,
+            'balance' => 0.00,
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->cancelOrder($order);
+
+        $this->assertTrue($result['success']);
+        $this->assertEquals('requires_refund', $result['status']);
+        $this->assertEquals('requires_refund', $order->fresh()->cancel_sync_status);
+        $this->assertStringContainsString('Zoho requires a Credit Note', $order->fresh()->cancel_sync_error);
+
+        $this->assertDatabaseHas('sync_histories', [
+            'shop_id' => $this->shop->id,
+            'order_id' => $order->id,
+            'action' => 'order_cancelled',
+            'status' => 'requires_refund',
+        ]);
+    }
+
+    /**
+     * Test: Subsequent refund sync transitions cancel_sync_status from requires_refund to synced.
+     */
+    public function test_refund_sync_updates_requires_refund_to_synced()
+    {
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/creditnotes*' => Http::response([
+                'code' => 0,
+                'creditnote' => [
+                    'creditnote_id' => 'cn_9988',
+                    'creditnote_number' => 'CN-00099',
+                    'total' => 7864.83,
+                    'balance' => 7864.83,
+                    'status' => 'open',
+                ],
+            ], 200),
+        ]);
+
+        $order = Order::create([
+            'shop_id' => $this->shop->id,
+            'customer_id' => $this->customer->id,
+            'shopify_order_id' => '1030',
+            'order_number' => '#1030',
+            'zoho_sales_order_id' => 'zoho_so_closed',
+            'financial_status' => 'cancelled',
+            'cancel_sync_status' => 'requires_refund',
+            'total_price' => 7864.83,
+            'currency' => 'INR',
+        ]);
+
+        $refund = Refund::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $order->id,
+            'shopify_order_id' => '1030',
+            'shopify_refund_id' => 'rf_1030',
+            'amount' => 7864.83,
+            'currency' => 'INR',
+            'sync_status' => 'pending',
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncRefund($refund);
+
+        $this->assertTrue($result['success']);
+        $this->assertEquals('synced', $order->fresh()->cancel_sync_status);
+        $this->assertNull($order->fresh()->cancel_sync_error);
+    }
+
+    /**
      * Helper to set authenticated shop domain attribute on requests.
      */
     private function actingAsShopDomain(string $shopDomain)

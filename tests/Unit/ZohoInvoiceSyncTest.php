@@ -142,12 +142,8 @@ class ZohoInvoiceSyncTest extends TestCase {
 
         Http::assertSent(function (Request $request) {
             return $request->method() === 'POST' &&
-                str_contains($request->url(), '/books/v3/invoices') &&
-                $request->data()['customer_id'] === 'zoho_contact_3001' &&
-                $request->data()['salesorder_id'] === 'zoho_so_9001' &&
-                $request->data()['reference_number'] === '#INV-1001' &&
-                $request->data()['shipping_charge'] === 12.0 &&
-                $request->data()['discount'] === 10.0;
+                str_contains($request->url(), '/books/v3/invoices/fromsalesorder') &&
+                str_contains($request->url(), 'salesorder_id=zoho_so_9001');
         });
     }
 
@@ -176,12 +172,9 @@ class ZohoInvoiceSyncTest extends TestCase {
         $this->assertTrue($result['success']);
 
         Http::assertSent(function (Request $request) {
-            if ($request->method() !== 'POST') {
-                return false;
-            }
-            $data = $request->data();
-            return ($data['customer_id'] ?? null) === 'zoho_contact_3001' &&
-                ($data['salesorder_id'] ?? null) === 'zoho_so_9001';
+            return $request->method() === 'POST' &&
+                str_contains($request->url(), '/books/v3/invoices/fromsalesorder') &&
+                str_contains($request->url(), 'salesorder_id=zoho_so_9001');
         });
     }
 
@@ -370,8 +363,8 @@ class ZohoInvoiceSyncTest extends TestCase {
 
         Http::assertSent(function (Request $request) {
             return $request->method() === 'POST' &&
-                str_contains($request->url(), '/books/v3/invoices') &&
-                ($request->data()['salesorder_id'] ?? null) === 'zoho_so_new_9988';
+                str_contains($request->url(), '/books/v3/invoices/fromsalesorder') &&
+                str_contains($request->url(), 'salesorder_id=zoho_so_new_9988');
         });
     }
 

@@ -177,7 +177,7 @@ class TaxMappingTest extends \Tests\TestCase
         $this->assertEquals('zoho_so_tax_101', $order->fresh()->zoho_sales_order_id);
 
         Http::assertSent(function ($request) {
-            if ($request->method() !== 'POST' || !str_contains($request->url(), '/salesorders')) {
+            if ($request->method() !== 'POST' || !str_contains($request->url(), '/salesorders') || str_contains($request->url(), '/status/confirmed')) {
                 return false;
             }
             $body = json_decode($request->body(), true) ?? [];
@@ -297,7 +297,7 @@ class TaxMappingTest extends \Tests\TestCase
         $this->assertEquals('zoho_inv_tax_202', $result['zoho_invoice_id']);
 
         Http::assertSent(function ($request) {
-            if ($request->method() !== 'POST' || !str_contains($request->url(), '/invoices')) {
+            if ($request->method() !== 'POST' || !str_contains($request->url(), '/salesorders') || str_contains($request->url(), '/status/confirmed')) {
                 return false;
             }
             $body = json_decode($request->body(), true) ?? [];

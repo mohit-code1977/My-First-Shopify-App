@@ -154,6 +154,7 @@ class ZohoOrderSyncTest extends TestCase
         Http::assertSent(function (Request $request) {
             return $request->method() === 'POST' &&
                 str_contains($request->url(), '/books/v3/salesorders') &&
+                !str_contains($request->url(), '/status/confirmed') &&
                 $request->data()['customer_id'] === 'zoho_contact_2001' &&
                 $request->data()['reference_number'] === '#1001' &&
                 count($request->data()['line_items']) === 2 &&

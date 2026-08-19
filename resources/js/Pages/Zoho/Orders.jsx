@@ -334,6 +334,23 @@ export default function Orders({
             (order.refunds && order.refunds.length > 0) ||
             payments.some((p) => p.status === "refunded");
 
+        const hasPaidPayment = payments.some((p) => p.status === "success" || p.sync_status === "synced" || !!p.zoho_payment_id);
+        const hasFailed = payments.some((p) => p.sync_status === "failed");
+        const hasPending = payments.some((p) => p.sync_status === "pending" || p.sync_status === "processing");
+
+        const syncedPaidSum = payments.reduce((sum, p) => {
+            if (p.sync_status === "synced" && !!p.zoho_payment_id) {
+                return sum + parseFloat(p.amount || 0);
+            }
+            return sum;
+        }, 0);
+
+        const paidSum = payments
+            .filter((p) => p.status === "success" || p.sync_status === "synced" || !!p.zoho_payment_id)
+            .reduce((acc, p) => acc + parseFloat(p.amount || 0), 0);
+
+        const isInvoicePartiallyPaid = invoice && (invoice.status === "partially_paid" || parseFloat(invoice.balance || 0) > 0);
+
         if (isCancelled && order.cancel_sync_status === "failed") {
             return {
                 status: "cancel_failed",
@@ -366,9 +383,6 @@ export default function Orders({
             };
         }
 
-        const hasFailed = payments.some((p) => p.sync_status === "failed");
-        const hasPending = payments.some((p) => p.sync_status === "pending" || p.sync_status === "processing");
-
         if (hasFailed) {
             return {
                 status: "failed",
@@ -377,16 +391,23 @@ export default function Orders({
             };
         }
 
-        const syncedPaidSum = payments.reduce((sum, p) => {
-            if (p.sync_status === "synced" && !!p.zoho_payment_id) {
-                return sum + parseFloat(p.amount || 0);
-            }
-            return sum;
-        }, 0);
-
-        const isInvoicePartiallyPaid = invoice && (invoice.status === "partially_paid" || parseFloat(invoice.balance || 0) > 0);
+        if (payments.length === 0) {
+            return {
+                status: "pending",
+                label: "Unpaid",
+                tone: "warning",
+            };
+        }
 
         if (syncedPaidSum >= total && total > 0 && !isInvoicePartiallyPaid) {
+            return {
+                status: "paid",
+                label: `Paid (${formatCurrency(total, order.currency)})`,
+                tone: "success",
+            };
+        }
+
+        if (paidSum >= total - 0.05) {
             return {
                 status: "paid",
                 label: `Paid (${formatCurrency(total, order.currency)})`,
@@ -417,7 +438,7 @@ export default function Orders({
 
         return {
             status: "pending",
-            label: "Pending",
+            label: "Unpaid",
             tone: "warning",
         };
     };
@@ -664,7 +685,15 @@ export default function Orders({
                 <IndexTable.Cell>
                     {o.financial_status === "cancelled" || o.financial_status === "voided" || !!o.cancelled_at || o.financial_status === "refunded" || (o.refunds && o.refunds.length > 0) ? (
                         <Badge tone={o.cancel_sync_status === "failed" ? "critical" : (o.invoice?.status === "void" ? "subdued" : (hasInvoice ? "subdued" : "warning"))}>
-                            {o.cancel_sync_status === "failed" ? "Cancel Sync Failed" : (o.invoice?.status === "void" ? "Voided" : (o.refunds && o.refunds.some(r => !!r.zoho_creditnote_id || r.sync_status === "synced") ? "Invoiced (Credit Note)" : (o.financial_status === "refunded" ? "Invoiced (Refunded)" : (hasInvoice ? "Invoiced (Cancelled)" : "Pending Invoice"))))}
+                            {o.cancel_sync_status === "failed" 
+                                ? "Cancel Sync Failed" 
+                                : (o.invoice?.status === "void" 
+                                    ? "Voided" 
+                                    : (o.refunds && o.refunds.some(r => !!r.zoho_creditnote_id || r.sync_status === "synced") 
+                                        ? "Invoiced (Credit Note)" 
+                                        : (o.financial_status === "refunded" 
+                                            ? "Invoiced (Refunded)" 
+                                            : (hasInvoice ? "Invoiced (Cancelled)" : "Pending Invoice"))))}
                         </Badge>
                     ) : (
                         <Badge tone={hasInvoice ? "success" : "warning"}>
