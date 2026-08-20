@@ -135,9 +135,15 @@ class ZohoSyncController extends Controller
             return $failedVariantIds->contains($localVariant->id);
         })->count();
 
-        // Orders stats based on current Order entity state
-        $totalOrders = Order::where('shop_id', $shop->id)->count();
-        $syncedOrders = Order::where('shop_id', $shop->id)->whereNotNull('zoho_sales_order_id')->count();
+        // Orders stats based on current Order entity state (excluding synthetic test records)
+        $orderQuery = Order::where('shop_id', $shop->id)->where('order_number', 'NOT LIKE', '#TEST-%');
+        $totalOrders = (clone $orderQuery)->count();
+        $syncedOrders = (clone $orderQuery)->whereNotNull('zoho_sales_order_id')->count();
+
+        $testOrdersCount = Order::where('shop_id', $shop->id)->where('order_number', 'LIKE', '#TEST-%')->count();
+        $historicalOrdersCount = Order::where('shop_id', $shop->id)
+            ->whereIn('id', [17, 18, 19, 20])
+            ->count();
 
         $failedOrderIds = SyncHistory::where('shop_id', $shop->id)
             ->whereNotNull('order_id')
@@ -556,6 +562,17 @@ class ZohoSyncController extends Controller
                     $rawCustomers = $shopifyService->fetchCustomers($shopModel);
 
                     foreach ($rawCustomers as $raw) {
+                        $rawId = (string) ($raw['id'] ?? '');
+                        $numericId = preg_replace('/[^0-9]/', '', $rawId);
+                        $canonicalGid = "gid://shopify/Customer/{$numericId}";
+                        $candidateIds = array_filter(array_unique([$rawId, $numericId, $canonicalGid]));
+
+                        $existing = Customer::where('shop_id', $shopModel->id)
+                            ->whereIn('shopify_customer_id', $candidateIds)
+                            ->first();
+
+                        $targetShopifyCustId = $existing ? $existing->shopify_customer_id : $canonicalGid;
+
                         $defaultAddr = $raw['default_address'] ?? [];
                         $phone = !empty($raw['phone']) ? $raw['phone'] : ($defaultAddr['phone'] ?? null);
                         $updateData = [
@@ -571,7 +588,7 @@ class ZohoSyncController extends Controller
                         Customer::updateOrCreate(
                             [
                                 'shop_id' => $shopModel->id,
-                                'shopify_customer_id' => (string) $raw['id'],
+                                'shopify_customer_id' => $targetShopifyCustId,
                             ],
                             $updateData
                         );
@@ -616,6 +633,17 @@ class ZohoSyncController extends Controller
                 $rawCustomers = $shopifyService->fetchCustomers($shop);
 
                 foreach ($rawCustomers as $raw) {
+                    $rawId = (string) ($raw['id'] ?? '');
+                    $numericId = preg_replace('/[^0-9]/', '', $rawId);
+                    $canonicalGid = "gid://shopify/Customer/{$numericId}";
+                    $candidateIds = array_filter(array_unique([$rawId, $numericId, $canonicalGid]));
+
+                    $existing = Customer::where('shop_id', $shop->id)
+                        ->whereIn('shopify_customer_id', $candidateIds)
+                        ->first();
+
+                    $targetShopifyCustId = $existing ? $existing->shopify_customer_id : $canonicalGid;
+
                     $defaultAddr = $raw['default_address'] ?? [];
                     $phone = !empty($raw['phone']) ? $raw['phone'] : ($defaultAddr['phone'] ?? null);
                     $updateData = [
@@ -631,7 +659,7 @@ class ZohoSyncController extends Controller
                     Customer::updateOrCreate(
                         [
                             'shop_id' => $shop->id,
-                            'shopify_customer_id' => (string) $raw['id'],
+                            'shopify_customer_id' => $targetShopifyCustId,
                         ],
                         $updateData
                     );
@@ -738,7 +766,7 @@ class ZohoSyncController extends Controller
     /**
      * Batch ingest raw Shopify orders and customers to prevent N+1 query overhead.
      */
-    protected function ingestShopifyOrders(Shop $shop, array $rawOrders): void
+    public function ingestShopifyOrders(Shop $shop, array $rawOrders): void
     {
         if (empty($rawOrders)) {
             return;
@@ -861,12 +889,122 @@ class ZohoSyncController extends Controller
 
             if ($existingOrder) {
                 $existingOrder->update($orderData);
+                $targetOrder = $existingOrder->fresh();
             } else {
-                Order::create(array_merge([
+                $targetOrder = Order::create(array_merge([
                     'shop_id' => $shop->id,
                     'shopify_order_id' => static::formatShopifyOrderId($rawOrdId),
                 ], $orderData));
             }
+
+            if (!empty($raw['refunds']) && is_array($raw['refunds'])) {
+                $this->ingestShopifyRefunds($shop, $raw['refunds'], $targetOrder);
+            }
+        }
+    }
+
+    public function ingestShopifyRefunds(Shop $shop, array $rawRefunds, Order $order): void
+    {
+        if (empty($rawRefunds)) {
+            return;
+        }
+
+        foreach ($rawRefunds as $rawRefund) {
+            if (empty($rawRefund['id'])) {
+                continue;
+            }
+
+            $rawRefundId = (string) $rawRefund['id'];
+            $numericRefundId = preg_replace('/[^0-9]/', '', $rawRefundId);
+            $canonicalRefundGid = "gid://shopify/Refund/{$numericRefundId}";
+            $candidateRefundIds = array_filter(array_unique([$rawRefundId, $numericRefundId, $canonicalRefundGid]));
+
+            $existingRefund = \App\Models\Refund::where('shop_id', $shop->id)
+                ->whereIn('shopify_refund_id', $candidateRefundIds)
+                ->first();
+
+            $targetShopifyRefundId = $existingRefund ? $existingRefund->shopify_refund_id : $rawRefundId;
+
+            $totalAmount = 0.0;
+            if (isset($rawRefund['total_refunded'])) {
+                $totalAmount = (float) $rawRefund['total_refunded'];
+            } elseif (!empty($rawRefund['total_refunded_set']['presentment_money']['amount'])) {
+                $totalAmount = (float) $rawRefund['total_refunded_set']['presentment_money']['amount'];
+            } elseif (!empty($rawRefund['total_refunded_set']['shop_money']['amount'])) {
+                $totalAmount = (float) $rawRefund['total_refunded_set']['shop_money']['amount'];
+            }
+
+            $refundLineItems = [];
+            $restock = false;
+
+            $itemsSource = $rawRefund['refund_line_items'] ?? $rawRefund['refundLineItems'] ?? [];
+            if (is_array($itemsSource)) {
+                foreach ($itemsSource as $item) {
+                    $restockType = strtolower((string) ($item['restock_type'] ?? $item['restockType'] ?? ''));
+                    if (in_array($restockType, ['cancel', 'return'], true)) {
+                        $restock = true;
+                    }
+
+                    $lineItem = $item['line_item'] ?? $item['lineItem'] ?? [];
+                    $refundLineItems[] = [
+                        'line_item_id' => $item['line_item_id'] ?? preg_replace('/[^0-9]/', '', $lineItem['id'] ?? ''),
+                        'variant_id' => $item['variant_id'] ?? (!empty($lineItem['variant']['id']) ? preg_replace('/[^0-9]/', '', $lineItem['variant']['id']) : null),
+                        'title' => $item['title'] ?? $lineItem['title'] ?? 'Refunded Item',
+                        'quantity' => (int) ($item['quantity'] ?? 1),
+                        'price' => (float) ($item['price'] ?? $lineItem['price'] ?? 0.0),
+                        'restock_type' => $item['restock_type'] ?? $item['restockType'] ?? null,
+                    ];
+
+                    if ($totalAmount <= 0) {
+                        $totalAmount += (float) ($item['subtotal'] ?? 0.0);
+                    }
+                }
+            }
+
+            if ($totalAmount <= 0 && !empty($rawRefund['transactions']) && is_array($rawRefund['transactions'])) {
+                foreach ($rawRefund['transactions'] as $tx) {
+                    if (($tx['status'] ?? '') === 'success' && in_array(strtolower((string) ($tx['kind'] ?? '')), ['refund', 'change'], true)) {
+                        $txAmount = !empty($tx['amount_set']['presentment_money']['amount'])
+                            ? (float) $tx['amount_set']['presentment_money']['amount']
+                            : (float) ($tx['amount'] ?? 0.0);
+                        $totalAmount += $txAmount;
+                    }
+                }
+            }
+
+            $currency = $rawRefund['currency'] ?? $order->currency ?? $shop->currency ?? 'USD';
+
+            $syncStatus = $existingRefund ? $existingRefund->sync_status : \App\Models\Refund::SYNC_STATUS_PENDING;
+
+            $createdDate = !empty($rawRefund['created_at'])
+                ? \Carbon\Carbon::parse($rawRefund['created_at'])
+                : now();
+
+            \App\Models\Refund::updateOrCreate(
+                [
+                    'shop_id' => $shop->id,
+                    'shopify_refund_id' => $targetShopifyRefundId,
+                ],
+                [
+                    'order_id' => $order->id,
+                    'shopify_order_id' => $order->shopify_order_id,
+                    'amount' => $totalAmount,
+                    'currency' => $currency,
+                    'note' => $rawRefund['note'] ?? null,
+                    'restock' => $restock,
+                    'refund_line_items' => $refundLineItems,
+                    'status' => \App\Models\Refund::STATUS_COMPLETED,
+                    'sync_status' => $syncStatus,
+                    'created_at' => $createdDate,
+                ]
+            );
+        }
+
+        $totalRefundedAmount = (float) \App\Models\Refund::where('order_id', $order->id)->sum('amount');
+        if ($totalRefundedAmount >= (float) $order->total_price && (float) $order->total_price > 0) {
+            $order->update(['financial_status' => 'refunded']);
+        } elseif ($totalRefundedAmount > 0) {
+            $order->update(['financial_status' => 'partially_refunded']);
         }
     }
 
@@ -926,6 +1064,23 @@ class ZohoSyncController extends Controller
             ->take(50)
             ->get();
 
+        if ($refunds->isEmpty() || $request->boolean('refresh_shopify') || $request->boolean('refresh')) {
+            try {
+                $shopifyService = app(\App\Services\ShopifyService::class);
+                $rawOrders = $shopifyService->fetchOrders($shop);
+                $this->ingestShopifyOrders($shop, $rawOrders);
+                $refunds = \App\Models\Refund::with(['order.customer'])
+                    ->where('shop_id', $shop->id)
+                    ->latest()
+                    ->take(50)
+                    ->get();
+            } catch (\Exception $e) {
+                Log::warning('Could not fetch existing Shopify refunds for list view', [
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
         $zohoConnection = $shop->zohoConnection;
 
         return response()->json([
@@ -982,8 +1137,9 @@ class ZohoSyncController extends Controller
         $variants = $this->getVariantsForShop($shop);
         $zohoConnection = $shop->zohoConnection;
 
-        $orders = Order::with(['customer', 'invoice'])
+        $orders = Order::with(['customer', 'invoice', 'payments', 'refunds', 'shop'])
             ->where('shop_id', $shop->id)
+            ->where('order_number', 'NOT LIKE', '#TEST-%')
             ->latest()
             ->take(50)
             ->get();
@@ -1740,22 +1896,25 @@ GRAPHQL;
     |--------------------------------------------------------------------------
     */
 
+        $rawProdId = (string) $shopifyProduct['id'];
+        $numProdId = preg_replace('/[^0-9]/', '', $rawProdId);
+        $canonicalProdId = "gid://shopify/Product/{$numProdId}";
+        $candidateProdIds = array_filter(array_unique([$rawProdId, $numProdId, $canonicalProdId]));
+
+        $existingProduct = Product::where('shop_id', $shop->id)
+            ->whereIn('shopify_product_id', $candidateProdIds)
+            ->first();
+
+        $targetProdId = $existingProduct ? $existingProduct->shopify_product_id : $canonicalProdId;
+
         $product = Product::updateOrCreate(
             [
-                'shop_id' =>
-                    $shop->id,
-
-                'shopify_product_id' =>
-                    $shopifyProduct['id'],
+                'shop_id' => $shop->id,
+                'shopify_product_id' => $targetProdId,
             ],
             [
-                'title' =>
-                    $shopifyProduct['title']
-                    ?? '',
-
-                'handle' =>
-                    $shopifyProduct['handle']
-                    ?? null,
+                'title' => $shopifyProduct['title'] ?? '',
+                'handle' => $shopifyProduct['handle'] ?? null,
             ]
         );
 
@@ -1765,15 +1924,21 @@ GRAPHQL;
     |--------------------------------------------------------------------------
     */
 
-        $variant = ProductVariant::firstOrNew(
-            [
-                'product_id' =>
-                    $product->id,
+        $rawVarId = (string) $shopifyVariant['id'];
+        $numVarId = preg_replace('/[^0-9]/', '', $rawVarId);
+        $canonicalVarId = "gid://shopify/ProductVariant/{$numVarId}";
+        $candidateVarIds = array_filter(array_unique([$rawVarId, $numVarId, $canonicalVarId]));
 
-                'shopify_variant_id' =>
-                    $shopifyVariant['id'],
-            ]
-        );
+        $variant = ProductVariant::where('product_id', $product->id)
+            ->whereIn('shopify_variant_id', $candidateVarIds)
+            ->first();
+
+        if (!$variant) {
+            $variant = new ProductVariant([
+                'product_id' => $product->id,
+                'shopify_variant_id' => $canonicalVarId,
+            ]);
+        }
 
         /*
     |--------------------------------------------------------------------------

@@ -887,9 +887,19 @@ class ShopifyWebhookController extends Controller
         }
 
         $rawCustomerId = (string) $payload['id'];
-        $shopifyCustomerId = str_starts_with($rawCustomerId, 'gid://')
-            ? $rawCustomerId
-            : "gid://shopify/Customer/{$rawCustomerId}";
+        $numericCustId = preg_replace('/[^0-9]/', '', $rawCustomerId);
+        $canonicalShopifyCustomerId = "gid://shopify/Customer/{$numericCustId}";
+        $candidateCustIds = array_filter(array_unique([
+            $rawCustomerId,
+            $numericCustId,
+            $canonicalShopifyCustomerId,
+        ]));
+
+        $existingCustomer = Customer::where('shop_id', $shop->id)
+            ->whereIn('shopify_customer_id', $candidateCustIds)
+            ->first();
+
+        $targetShopifyCustId = $existingCustomer ? $existingCustomer->shopify_customer_id : $canonicalShopifyCustomerId;
 
         $defaultAddr = $payload['default_address'] ?? ($payload['addresses'][0] ?? null);
         $billingAddr = $payload['billing_address'] ?? $defaultAddr;
@@ -910,7 +920,7 @@ class ShopifyWebhookController extends Controller
         $customer = Customer::updateOrCreate(
             [
                 'shop_id' => $shop->id,
-                'shopify_customer_id' => $shopifyCustomerId,
+                'shopify_customer_id' => $targetShopifyCustId,
             ],
             $updateData
         );
@@ -1017,9 +1027,19 @@ class ShopifyWebhookController extends Controller
         if (!empty($payload['customer']) && is_array($payload['customer']) && !empty($payload['customer']['id'])) {
             $custData = $payload['customer'];
             $rawCustId = (string) $custData['id'];
-            $shopifyCustId = str_starts_with($rawCustId, 'gid://')
-                ? $rawCustId
-                : "gid://shopify/Customer/{$rawCustId}";
+            $numericCustId = preg_replace('/[^0-9]/', '', $rawCustId);
+            $canonicalCustId = "gid://shopify/Customer/{$numericCustId}";
+            $candidateCustIds = array_filter(array_unique([
+                $rawCustId,
+                $numericCustId,
+                $canonicalCustId,
+            ]));
+
+            $existingCust = Customer::where('shop_id', $shop->id)
+                ->whereIn('shopify_customer_id', $candidateCustIds)
+                ->first();
+
+            $targetCustId = $existingCust ? $existingCust->shopify_customer_id : $canonicalCustId;
 
             $defaultAddr = $custData['default_address'] ?? ($custData['addresses'][0] ?? null);
             $billingAddr = $payload['billing_address'] ?? $defaultAddr;
@@ -1043,7 +1063,7 @@ class ShopifyWebhookController extends Controller
             $customer = Customer::updateOrCreate(
                 [
                     'shop_id' => $shop->id,
-                    'shopify_customer_id' => $shopifyCustId,
+                    'shopify_customer_id' => $targetCustId,
                 ],
                 $updateData
             );
@@ -1751,7 +1771,17 @@ class ShopifyWebhookController extends Controller
             ]);
         }
 
-        $shopifyRefundId = (string) $payload['id'];
+        $rawRefundId = (string) $payload['id'];
+        $numericRefundId = preg_replace('/[^0-9]/', '', $rawRefundId);
+        $canonicalRefundGid = "gid://shopify/Refund/{$numericRefundId}";
+        $candidateRefundIds = array_filter(array_unique([$rawRefundId, $numericRefundId, $canonicalRefundGid]));
+
+        $existingRefund = \App\Models\Refund::where('shop_id', $shop->id)
+            ->whereIn('shopify_refund_id', $candidateRefundIds)
+            ->first();
+
+        $targetShopifyRefundId = $existingRefund ? $existingRefund->shopify_refund_id : $rawRefundId;
+
         $rawOrderId = (string) $payload['order_id'];
         $numericOrderId = preg_replace('/^gid:\/\/shopify\/Order\//', '', $rawOrderId);
         $shopifyOrderId = $numericOrderId;
@@ -1842,11 +1872,12 @@ class ShopifyWebhookController extends Controller
         }
 
         $currency = $order ? $order->currency : ($payload['currency'] ?? $shop->currency ?? 'USD');
+        $syncStatus = $existingRefund ? $existingRefund->sync_status : \App\Models\Refund::SYNC_STATUS_PENDING;
 
         $refund = \App\Models\Refund::updateOrCreate(
             [
                 'shop_id' => $shop->id,
-                'shopify_refund_id' => $shopifyRefundId,
+                'shopify_refund_id' => $targetShopifyRefundId,
             ],
             [
                 'order_id' => $order->id,
@@ -1857,13 +1888,17 @@ class ShopifyWebhookController extends Controller
                 'restock' => $restock,
                 'refund_line_items' => $refundLineItems,
                 'status' => \App\Models\Refund::STATUS_COMPLETED,
-                'sync_status' => \App\Models\Refund::SYNC_STATUS_PENDING,
+                'sync_status' => $syncStatus,
             ]
         );
 
-        $order->financial_status = ($totalAmount >= (float) $order->total_price && (float) $order->total_price > 0)
-            ? 'refunded'
-            : 'partially_refunded';
+        $totalRefundedAmount = (float) \App\Models\Refund::where('order_id', $order->id)->sum('amount');
+        if ($totalRefundedAmount >= (float) $order->total_price && (float) $order->total_price > 0) {
+            $order->financial_status = 'refunded';
+        } elseif ($totalRefundedAmount > 0) {
+            $order->financial_status = 'partially_refunded';
+        }
+
         if (!empty($payload['cancelled_at']) && empty($order->cancelled_at)) {
             $order->cancelled_at = date('Y-m-d H:i:s', strtotime($payload['cancelled_at']));
             $order->cancel_reason = $payload['cancel_reason'] ?? null;
@@ -2033,7 +2068,7 @@ class ShopifyWebhookController extends Controller
             $shippingTotal = (float) array_sum(array_column($shippingLines, 'price'));
         }
 
-        return Order::updateOrCreate(
+        $order = Order::updateOrCreate(
             [
                 'shop_id' => $shop->id,
                 'shopify_order_id' => $numericOrderId,
@@ -2058,6 +2093,13 @@ class ShopifyWebhookController extends Controller
                 'line_items' => $lineItems,
             ]
         );
+
+        if (!empty($orderData['refunds']) && is_array($orderData['refunds'])) {
+            $zohoSyncController = app(\App\Http\Controllers\ZohoSyncController::class);
+            $zohoSyncController->ingestShopifyRefunds($shop, $orderData['refunds'], $order);
+        }
+
+        return $order;
     }
 
     /**
@@ -2106,6 +2148,111 @@ class ShopifyWebhookController extends Controller
         foreach ($pendingEvents as $pending) {
             $pending->update(['status' => 'processed']);
         }
+    }
+
+    /**
+     * Handle Shopify customers/delete webhook.
+     */
+    public function customersDelete(Request $request): JsonResponse
+    {
+        Log::info('Shopify customers/delete webhook received', [
+            'shop' => $request->header('X-Shopify-Shop-Domain'),
+            'webhook_id' => $request->header('X-Shopify-Webhook-Id'),
+            'topic' => $request->header('X-Shopify-Topic'),
+            'payload' => $request->getContent(),
+        ]);
+
+        $hmacHeader = $request->header('X-Shopify-Hmac-SHA256') ?? $request->header('X-Shopify-Hmac-Sha256');
+
+        if (empty($hmacHeader)) {
+            return response()->json(['error' => 'Missing HMAC signature.'], 401);
+        }
+
+        $secret = config('services.shopify.api_secret') ?? env('SHOPIFY_API_SECRET');
+
+        if (empty($secret)) {
+            return response()->json(['error' => 'Shopify API secret not configured.'], 500);
+        }
+
+        $calculatedHmac = base64_encode(hash_hmac('sha256', $request->getContent(), $secret, true));
+
+        if (!hash_equals($calculatedHmac, $hmacHeader)) {
+            return response()->json(['error' => 'Invalid HMAC signature.'], 401);
+        }
+
+        $shopDomain = $request->header('X-Shopify-Shop-Domain');
+
+        if (empty($shopDomain) || !is_string($shopDomain) || !preg_match('/^[a-zA-Z0-9][a-zA-Z0-9\-]*\.myshopify\.com$/', $shopDomain)) {
+            return response()->json(['error' => 'Invalid Shopify shop domain.'], 400);
+        }
+
+        $shop = Shop::where('shop_domain', $shopDomain)->first();
+
+        if (!$shop) {
+            return response()->json(['error' => 'Shop not found.'], 404);
+        }
+
+        $webhookId = $request->header('X-Shopify-Webhook-Id');
+
+        if (!empty($webhookId)) {
+            $alreadyProcessed = ShopifyProcessedWebhook::where('webhook_id', $webhookId)
+                ->where('shop_domain', $shopDomain)
+                ->exists();
+
+            if ($alreadyProcessed) {
+                return response()->json(['message' => 'Webhook already processed.'], 200);
+            }
+
+            ShopifyProcessedWebhook::create([
+                'webhook_id' => $webhookId,
+                'shop_domain' => $shopDomain,
+                'topic' => $request->header('X-Shopify-Topic') ?? 'customers/delete',
+            ]);
+        }
+
+        $payload = json_decode($request->getContent(), true);
+
+        if (empty($payload) || !is_array($payload) || empty($payload['id'])) {
+            return response()->json(['error' => 'Invalid customer delete payload.'], 400);
+        }
+
+        $rawCustomerId = (string) $payload['id'];
+        $numericCustId = preg_replace('/[^0-9]/', '', $rawCustomerId);
+        $candidateCustIds = array_filter(array_unique([
+            $rawCustomerId,
+            $numericCustId,
+            "gid://shopify/Customer/{$numericCustId}",
+        ]));
+
+        $customer = Customer::where('shop_id', $shop->id)
+            ->whereIn('shopify_customer_id', $candidateCustIds)
+            ->first();
+
+        if (!$customer) {
+            return response()->json(['message' => 'Customer not found locally.'], 200);
+        }
+
+        $zohoContactId = $customer->zoho_contact_id;
+        $zohoResult = ['status' => 'unmapped'];
+
+        if ($zohoContactId && $shop->zohoConnection) {
+            try {
+                $zohoService = new ZohoService($shop);
+                $zohoResult = $zohoService->deleteContact($zohoContactId);
+            } catch (\Throwable $e) {
+                Log::error("customersDelete: Zoho contact delete failed for contact ID {$zohoContactId}: " . $e->getMessage());
+                $zohoResult = ['status' => 'failed', 'error' => $e->getMessage()];
+            }
+        }
+
+        // Clean up local customer record safely: nullify orders.customer_id reference before deleting
+        Order::where('customer_id', $customer->id)->update(['customer_id' => null]);
+        $customer->delete();
+
+        return response()->json([
+            'message' => 'Customer delete webhook processed successfully.',
+            'zoho_result' => $zohoResult,
+        ], 200);
     }
 }
 

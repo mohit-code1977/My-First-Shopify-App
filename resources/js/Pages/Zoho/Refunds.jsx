@@ -412,7 +412,7 @@ export default function Refunds({
                         <span style={{ color: "#005bd3" }}>
                             {r.order?.name ||
                                 (r.order?.order_number
-                                    ? `#${r.order.order_number}`
+                                    ? (String(r.order.order_number).startsWith('#') ? r.order.order_number : `#${r.order.order_number}`)
                                     : `#${r.shopify_order_id}`)}
                         </span>
                     </Text>

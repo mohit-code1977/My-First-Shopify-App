@@ -62,6 +62,68 @@ class Order extends Model
         'total_price' => 'decimal:2',
     ];
 
+    protected $appends = [
+        'payment_status',
+        'payment_sync_status',
+        'zoho_payment_id',
+    ];
+
+    public function getPaymentStatusAttribute(): string
+    {
+        $status = strtolower($this->financial_status ?? 'pending');
+        if (in_array($status, ['partially_refunded', 'refunded', 'paid', 'partially_paid', 'authorized'])) {
+            return $status;
+        }
+        if (!empty($this->cancelled_at) || in_array($status, ['cancelled', 'voided'])) {
+            return in_array($status, ['cancelled', 'voided']) ? $status : 'cancelled';
+        }
+        return $status;
+    }
+
+    public function getZohoPaymentIdAttribute(): ?string
+    {
+        if ($this->relationLoaded('payments')) {
+            foreach ($this->payments as $p) {
+                if (!empty($p->zoho_payment_id)) {
+                    return (string) $p->zoho_payment_id;
+                }
+            }
+        }
+        return null;
+    }
+
+    public function getPaymentSyncStatusAttribute(): string
+    {
+        $payments = $this->relationLoaded('payments') ? $this->payments : collect();
+
+        $hasSynced = $payments->contains(function ($p) {
+            return $p->sync_status === 'synced' || !empty($p->zoho_payment_id);
+        });
+
+        if ($hasSynced) {
+            return 'synced';
+        }
+
+        $hasFailed = $payments->contains(function ($p) {
+            return $p->sync_status === 'failed';
+        });
+
+        if ($hasFailed) {
+            return 'failed';
+        }
+
+        $bizStatus = $this->payment_status;
+        if (in_array($bizStatus, ['paid', 'partially_paid'])) {
+            $shop = $this->relationLoaded('shop') ? $this->shop : Shop::find($this->shop_id);
+            if ($shop && $shop->zohoConnection !== null) {
+                return 'pending_sync';
+            }
+            return 'not_synced';
+        }
+
+        return 'not_synced';
+    }
+
     public function shop(): BelongsTo
     {
         return $this->belongsTo(Shop::class);

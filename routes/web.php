@@ -129,6 +129,9 @@ Route::post('/webhooks/inventory-levels', [ShopifyWebhookController::class, 'inv
 Route::post('/webhooks/customers', [ShopifyWebhookController::class, 'customersUpdate'])
     ->name('shopify.webhooks.customers');
 
+Route::post('/webhooks/customers/delete', [ShopifyWebhookController::class, 'customersDelete'])
+    ->name('shopify.webhooks.customers_delete');
+
 Route::post('/webhooks/orders', [ShopifyWebhookController::class, 'ordersUpdate'])
     ->name('shopify.webhooks.orders');
 

@@ -2457,6 +2457,65 @@ class ZohoService
     }
 
     /**
+     * Delete a contact in Zoho Books, falling back to marking inactive if linked to transactions.
+     */
+    public function deleteContact(string $contactId): array
+    {
+        try {
+            $response = $this->makeRequest('DELETE', '/books/v3/contacts/' . $contactId);
+            return [
+                'success' => true,
+                'status' => 'deleted',
+                'response' => $response,
+            ];
+        } catch (\Throwable $e) {
+            if ($this->isItemNotFoundException($e)) {
+                return [
+                    'success' => true,
+                    'status' => 'already_missing',
+                ];
+            }
+
+            $errMsg = strtolower($e->getMessage());
+            if (str_contains($errMsg, 'transaction') || str_contains($errMsg, 'invoice') || str_contains($errMsg, 'salesorder') || str_contains($errMsg, 'cannot be deleted') || str_contains($errMsg, '100010')) {
+                Log::info("deleteContact: Contact {$contactId} cannot be deleted because it has linked transactions. Marking contact inactive.");
+                return $this->markContactInactive($contactId);
+            }
+
+            return [
+                'success' => false,
+                'error' => $e->getMessage(),
+            ];
+        }
+    }
+
+    /**
+     * Mark a contact inactive in Zoho Books to preserve accounting integrity.
+     */
+    public function markContactInactive(string $contactId): array
+    {
+        try {
+            $response = $this->makeRequest('POST', "/books/v3/contacts/{$contactId}/status/inactive");
+            return [
+                'success' => true,
+                'status' => 'inactivated',
+                'response' => $response,
+            ];
+        } catch (\Throwable $e) {
+            if ($this->isItemNotFoundException($e)) {
+                return [
+                    'success' => true,
+                    'status' => 'already_missing',
+                ];
+            }
+            return [
+                'success' => false,
+                'error' => $e->getMessage(),
+            ];
+        }
+    }
+
+    /**
      * Find existing Zoho Item by SKU.
      */
     public function findZohoItemBySku(string $sku): ?array

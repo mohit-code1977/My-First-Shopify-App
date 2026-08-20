@@ -894,4 +894,203 @@ class ZohoRefundSyncTest extends TestCase {
         $this->assertEquals(150.00, round($lineSum, 2));
         $this->assertEquals('cn_new_123', $refund->fresh()->zoho_creditnote_id);
     }
+
+    public function test_historical_refund_backfill_creates_local_refunds()
+    {
+        $rawOrders = [
+            [
+                'id' => '7482130202799',
+                'name' => '#1099',
+                'created_at' => '2026-08-19T10:00:00Z',
+                'currency' => 'EUR',
+                'financial_status' => 'refunded',
+                'fulfillment_status' => 'unfulfilled',
+                'subtotal_price' => '100.00',
+                'total_discounts' => '0.00',
+                'total_tax' => '0.00',
+                'total_price' => '100.00',
+                'customer' => [
+                    'id' => '555111',
+                    'first_name' => 'Alice',
+                    'last_name' => 'Smith',
+                    'email' => 'alice@example.com',
+                ],
+                'line_items' => [
+                    [
+                        'id' => '9911',
+                        'title' => 'Sample Item',
+                        'quantity' => 2,
+                        'price' => '50.00',
+                        'variant_id' => 'var_202',
+                    ]
+                ],
+                'refunds' => [
+                    [
+                        'id' => '998258704999',
+                        'created_at' => '2026-08-19T11:00:00Z',
+                        'note' => 'Backfill test refund',
+                        'total_refunded' => 100.00,
+                        'currency' => 'EUR',
+                        'refund_line_items' => [
+                            [
+                                'line_item_id' => '9911',
+                                'variant_id' => 'var_202',
+                                'title' => 'Sample Item',
+                                'quantity' => 2,
+                                'price' => 50.00,
+                                'restock_type' => 'return',
+                            ]
+                        ]
+                    ]
+                ]
+            ]
+        ];
+
+        $controller = app(\App\Http\Controllers\ZohoSyncController::class);
+        $controller->ingestShopifyOrders($this->shop, $rawOrders);
+
+        $order = Order::where('shopify_order_id', 'like', '%7482130202799')->first();
+        $this->assertNotNull($order);
+        $this->assertEquals('refunded', $order->financial_status);
+
+        $refund = Refund::where('order_id', $order->id)->first();
+        $this->assertNotNull($refund);
+        $this->assertEquals('100.00', (string) $refund->amount);
+        $this->assertEquals('EUR', $refund->currency);
+        $this->assertTrue($refund->restock);
+        $this->assertEquals(Refund::SYNC_STATUS_PENDING, $refund->sync_status);
+    }
+
+    public function test_partial_refund_updates_order_financial_status()
+    {
+        $rawOrders = [
+            [
+                'id' => '7482130202888',
+                'name' => '#1088',
+                'created_at' => '2026-08-19T10:00:00Z',
+                'currency' => 'USD',
+                'financial_status' => 'partially_refunded',
+                'fulfillment_status' => 'unfulfilled',
+                'subtotal_price' => '200.00',
+                'total_price' => '200.00',
+                'line_items' => [
+                    ['id' => '8811', 'title' => 'Big Item', 'quantity' => 1, 'price' => '200.00']
+                ],
+                'refunds' => [
+                    [
+                        'id' => '998258704888',
+                        'created_at' => '2026-08-19T11:00:00Z',
+                        'total_refunded' => 50.00,
+                        'currency' => 'USD',
+                        'refund_line_items' => []
+                    ]
+                ]
+            ]
+        ];
+
+        $controller = app(\App\Http\Controllers\ZohoSyncController::class);
+        $controller->ingestShopifyOrders($this->shop, $rawOrders);
+
+        $order = Order::where('shopify_order_id', 'like', '%7482130202888')->first();
+        $this->assertNotNull($order);
+        $this->assertEquals('partially_refunded', $order->financial_status);
+        $this->assertEquals('partially_refunded', $order->payment_status);
+    }
+
+    public function test_cancelled_order_without_refund_does_not_create_refund_record()
+    {
+        $rawOrders = [
+            [
+                'id' => '7482130202777',
+                'name' => '#1077',
+                'created_at' => '2026-08-19T10:00:00Z',
+                'cancelled_at' => '2026-08-19T12:00:00Z',
+                'cancel_reason' => 'customer',
+                'currency' => 'USD',
+                'financial_status' => 'voided',
+                'fulfillment_status' => 'unfulfilled',
+                'subtotal_price' => '50.00',
+                'total_price' => '50.00',
+                'line_items' => [],
+                'refunds' => []
+            ]
+        ];
+
+        $controller = app(\App\Http\Controllers\ZohoSyncController::class);
+        $controller->ingestShopifyOrders($this->shop, $rawOrders);
+
+        $order = Order::where('shopify_order_id', 'like', '%7482130202777')->first();
+        $this->assertNotNull($order);
+        $this->assertNotNull($order->cancelled_at);
+        $this->assertEquals(0, Refund::where('order_id', $order->id)->count());
+    }
+
+    public function test_idempotent_backfill_zero_duplicates()
+    {
+        $rawOrders = [
+            [
+                'id' => '7482130202666',
+                'name' => '#1066',
+                'created_at' => '2026-08-19T10:00:00Z',
+                'currency' => 'USD',
+                'financial_status' => 'refunded',
+                'subtotal_price' => '100.00',
+                'total_price' => '100.00',
+                'refunds' => [
+                    [
+                        'id' => '998258704666',
+                        'created_at' => '2026-08-19T11:00:00Z',
+                        'total_refunded' => 100.00,
+                        'currency' => 'USD',
+                        'refund_line_items' => []
+                    ]
+                ]
+            ]
+        ];
+
+        $controller = app(\App\Http\Controllers\ZohoSyncController::class);
+
+        // Run ingestion twice
+        $controller->ingestShopifyOrders($this->shop, $rawOrders);
+        $controller->ingestShopifyOrders($this->shop, $rawOrders);
+
+        $order = Order::where('shopify_order_id', 'like', '%7482130202666')->first();
+        $this->assertNotNull($order);
+        $this->assertEquals(1, Refund::where('order_id', $order->id)->count());
+    }
+
+    public function test_refund_sync_status_pending_when_zoho_disconnected()
+    {
+        // Disconnect Zoho
+        ZohoConnection::where('shop_id', $this->shop->id)->delete();
+
+        $rawOrders = [
+            [
+                'id' => '7482130202555',
+                'name' => '#1055',
+                'created_at' => '2026-08-19T10:00:00Z',
+                'currency' => 'USD',
+                'financial_status' => 'refunded',
+                'subtotal_price' => '50.00',
+                'total_price' => '50.00',
+                'refunds' => [
+                    [
+                        'id' => '998258704555',
+                        'created_at' => '2026-08-19T11:00:00Z',
+                        'total_refunded' => 50.00,
+                        'currency' => 'USD',
+                        'refund_line_items' => []
+                    ]
+                ]
+            ]
+        ];
+
+        $controller = app(\App\Http\Controllers\ZohoSyncController::class);
+        $controller->ingestShopifyOrders($this->shop, $rawOrders);
+
+        $refund = Refund::where('shopify_refund_id', '998258704555')->first();
+        $this->assertNotNull($refund);
+        $this->assertEquals(Refund::SYNC_STATUS_PENDING, $refund->sync_status);
+        $this->assertNull($refund->zoho_creditnote_id);
+    }
 }

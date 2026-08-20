@@ -325,57 +325,30 @@ export default function Orders({
     };
 
     const getPaymentSummary = (order) => {
+        if (!order) {
+            return {
+                status: "pending",
+                label: "Pending / Unpaid",
+                tone: "warning",
+            };
+        }
+
+        const finStatus = (order.financial_status || order.payment_status || "pending").toLowerCase();
         const payments = order.payments || [];
-        const total = parseFloat(order.total_price || 0);
-        const invoice = order.invoice;
-        const isCancelled = order.financial_status === "cancelled" || order.financial_status === "voided" || !!order.cancelled_at;
-        const isRefunded =
-            order.financial_status === "refunded" ||
-            (order.refunds && order.refunds.length > 0) ||
-            payments.some((p) => p.status === "refunded");
+        const hasSyncedPayment = payments.some((p) => p.sync_status === "synced" || !!p.zoho_payment_id) || order.payment_sync_status === "synced";
+        const hasFailedPayment = payments.some((p) => p.sync_status === "failed") || order.payment_sync_status === "failed";
 
-        const hasPaidPayment = payments.some((p) => p.status === "success" || p.sync_status === "synced" || !!p.zoho_payment_id);
-        const hasFailed = payments.some((p) => p.sync_status === "failed");
-        const hasPending = payments.some((p) => p.sync_status === "pending" || p.sync_status === "processing");
-
-        const syncedPaidSum = payments.reduce((sum, p) => {
-            if (p.sync_status === "synced" && !!p.zoho_payment_id) {
-                return sum + parseFloat(p.amount || 0);
-            }
-            return sum;
-        }, 0);
-
-        const paidSum = payments
-            .filter((p) => p.status === "success" || p.sync_status === "synced" || !!p.zoho_payment_id)
-            .reduce((acc, p) => acc + parseFloat(p.amount || 0), 0);
-
-        const isInvoicePartiallyPaid = invoice && (invoice.status === "partially_paid" || parseFloat(invoice.balance || 0) > 0);
-
-        if (isCancelled && order.cancel_sync_status === "failed") {
+        // 1. Partially Refunded (Never map to Cancelled or Cancelled / Refunded)
+        if (finStatus === "partially_refunded") {
             return {
-                status: "cancel_failed",
-                label: "Cancel Sync Failed",
-                tone: "critical",
+                status: "partially_refunded",
+                label: "Partially Refunded",
+                tone: "warning",
             };
         }
 
-        if (isCancelled && isRefunded) {
-            return {
-                status: "cancelled_refunded",
-                label: "Cancelled / Refunded",
-                tone: "subdued",
-            };
-        }
-
-        if (isCancelled) {
-            return {
-                status: "cancelled",
-                label: "Cancelled",
-                tone: "subdued",
-            };
-        }
-
-        if (isRefunded) {
+        // 2. Fully Refunded
+        if (finStatus === "refunded") {
             return {
                 status: "refunded",
                 label: "Refunded",
@@ -383,62 +356,83 @@ export default function Orders({
             };
         }
 
-        if (hasFailed) {
+        // 3. Cancelled or Voided
+        if (finStatus === "cancelled" || finStatus === "voided" || (!!order.cancelled_at && finStatus !== "paid" && finStatus !== "partially_paid")) {
+            if (order.cancel_sync_status === "failed") {
+                return {
+                    status: "cancel_failed",
+                    label: "Cancel Sync Failed",
+                    tone: "critical",
+                };
+            }
+            return {
+                status: finStatus === "voided" ? "voided" : "cancelled",
+                label: finStatus === "voided" ? "Voided" : "Cancelled",
+                tone: "subdued",
+            };
+        }
+
+        // 4. Payment Sync Failed
+        if (hasFailedPayment) {
             return {
                 status: "failed",
-                label: "Sync Failed",
+                label: "Payment Sync Failed",
                 tone: "critical",
             };
         }
 
-        if (payments.length === 0) {
+        // 5. Paid
+        if (finStatus === "paid") {
+            if (hasSyncedPayment) {
+                return {
+                    status: "paid_synced",
+                    label: "Paid (Synced)",
+                    tone: "success",
+                };
+            }
+            if (connectedState) {
+                return {
+                    status: "paid_pending_sync",
+                    label: "Paid (Pending Sync)",
+                    tone: "info",
+                };
+            }
             return {
-                status: "pending",
-                label: "Unpaid",
-                tone: "warning",
-            };
-        }
-
-        if (syncedPaidSum >= total && total > 0 && !isInvoicePartiallyPaid) {
-            return {
-                status: "paid",
-                label: `Paid (${formatCurrency(total, order.currency)})`,
+                status: "paid_not_synced",
+                label: "Paid",
                 tone: "success",
             };
         }
 
-        if (paidSum >= total - 0.05) {
+        // 6. Partially Paid
+        if (finStatus === "partially_paid") {
+            if (hasSyncedPayment) {
+                return {
+                    status: "partially_paid_synced",
+                    label: "Partially Paid (Synced)",
+                    tone: "warning",
+                };
+            }
             return {
-                status: "paid",
-                label: `Paid (${formatCurrency(total, order.currency)})`,
-                tone: "success",
-            };
-        }
-
-        if (syncedPaidSum > 0 || isInvoicePartiallyPaid) {
-            const displaySum = isInvoicePartiallyPaid ? Math.min(syncedPaidSum, total) : syncedPaidSum;
-            return {
-                status: "partial",
-                label: `${formatCurrency(displaySum, order.currency)} / ${formatCurrency(total, order.currency)} Synced`,
+                status: "partially_paid",
+                label: "Partially Paid",
                 tone: "warning",
             };
         }
 
-        if (
-            order.financial_status === "paid" ||
-            payments.some((p) => p.status === "paid") ||
-            hasPending
-        ) {
+        // 7. Authorized
+        if (finStatus === "authorized") {
             return {
-                status: "paid_pending_sync",
-                label: "Sync Pending",
+                status: "authorized",
+                label: "Authorized",
                 tone: "info",
             };
         }
 
+        // 8. Pending / Unpaid
         return {
             status: "pending",
-            label: "Unpaid",
+            label: "Pending / Unpaid",
             tone: "warning",
         };
     };
@@ -598,9 +592,10 @@ export default function Orders({
                 <IndexTable.Cell>
                     <Text variant="bodyMd" fontWeight="bold" as="span">
                         <span style={{ color: "#005bd3" }}>
-                            {o.name ||
-                                (o.order_number
-                                    ? `#${o.order_number}`
+                            {o.name && String(o.name).startsWith('#')
+                                ? o.name
+                                : (o.order_number
+                                    ? (String(o.order_number).startsWith('#') ? o.order_number : `#${o.order_number}`)
                                     : `#${o.shopify_order_id}`)}
                         </span>
                     </Text>
@@ -1303,6 +1298,31 @@ export default function Orders({
                                     </BlockStack>
                                 </Card>
 
+                                <Card>
+                                    <BlockStack gap="200">
+                                        <InlineStack align="space-between">
+                                            <Text variant="bodyMd" fontWeight="semibold" as="span">Shopify Payment Status:</Text>
+                                            <Badge tone={getPaymentSummary(selectedOrderForPayment).tone}>
+                                                {getPaymentSummary(selectedOrderForPayment).label}
+                                            </Badge>
+                                        </InlineStack>
+                                        <InlineStack align="space-between">
+                                            <Text variant="bodyMd" tone="subdued" as="span">Local Transaction Record:</Text>
+                                            <Text variant="bodyMd" as="span">
+                                                {selectedOrderForPayment.payments && selectedOrderForPayment.payments.length > 0
+                                                    ? `Recorded (${selectedOrderForPayment.payments.length})`
+                                                    : "Not Recorded"}
+                                            </Text>
+                                        </InlineStack>
+                                        <InlineStack align="space-between">
+                                            <Text variant="bodyMd" tone="subdued" as="span">Zoho Payment Sync Status:</Text>
+                                            <Badge tone={selectedOrderForPayment.payment_sync_status === "synced" ? "success" : (selectedOrderForPayment.payment_sync_status === "failed" ? "critical" : "subdued")}>
+                                                {!connectedState ? "Not Synced (Zoho Disconnected)" : (selectedOrderForPayment.payment_sync_status || "not_synced").replace("_", " ").toUpperCase()}
+                                            </Badge>
+                                        </InlineStack>
+                                    </BlockStack>
+                                </Card>
+
                                 <Text variant="headingSm" as="h3">
                                     Payment Transactions (
                                     {selectedOrderForPayment.payments
@@ -1321,8 +1341,7 @@ export default function Orders({
                                         borderRadius="200"
                                     >
                                         <Text tone="subdued" as="p">
-                                            No payment transaction recorded
-                                            locally for this order.
+                                            Local Payment Transaction: Not Recorded (No payment transaction record stored locally yet).
                                         </Text>
                                         {selectedOrderForPayment.invoice && (
                                             <Box paddingTop="200">

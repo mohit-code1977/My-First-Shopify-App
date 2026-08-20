@@ -898,6 +898,20 @@ query fetchOrders($first: Int!) {
                     }
                 }
             }
+            refunds {
+                id
+                createdAt
+                note
+                totalRefundedSet { presentmentMoney { amount currencyCode } shopMoney { amount currencyCode } }
+                refundLineItems(first: 50) {
+                    nodes {
+                        lineItem { id title originalUnitPriceSet { presentmentMoney { amount currencyCode } shopMoney { amount currencyCode } } variant { id sku } }
+                        quantity
+                        restockType
+                        subtotalSet { presentmentMoney { amount currencyCode } shopMoney { amount currencyCode } }
+                    }
+                }
+            }
         }
     }
 }
@@ -982,6 +996,31 @@ GRAPHQL;
                 ];
             }
 
+            $refunds = [];
+            foreach ($node['refunds'] ?? [] as $ref) {
+                $refLineItems = [];
+                foreach ($ref['refundLineItems']['nodes'] ?? [] as $rli) {
+                    $liNode = $rli['lineItem'] ?? [];
+                    $refLineItems[] = [
+                        'line_item_id' => preg_replace('/[^0-9]/', '', $liNode['id'] ?? ''),
+                        'variant_id' => !empty($liNode['variant']['id']) ? preg_replace('/[^0-9]/', '', $liNode['variant']['id']) : null,
+                        'title' => $liNode['title'] ?? 'Refunded Item',
+                        'quantity' => (int) ($rli['quantity'] ?? 1),
+                        'price' => (float) ($rli['subtotalSet']['shopMoney']['amount'] ?? ($liNode['priceSet']['shopMoney']['amount'] ?? 0.00)),
+                        'restock_type' => $rli['restockType'] ?? null,
+                    ];
+                }
+                $refTotal = self::extractMoney($ref['totalRefundedSet'] ?? [], $node['currencyCode'] ?? 'USD');
+                $refunds[] = [
+                    'id' => preg_replace('/[^0-9]/', '', $ref['id'] ?? ''),
+                    'created_at' => $ref['createdAt'] ?? null,
+                    'note' => $ref['note'] ?? null,
+                    'total_refunded' => $refTotal['amount'],
+                    'currency' => $refTotal['currency'],
+                    'refund_line_items' => $refLineItems,
+                ];
+            }
+
             $orders[] = [
                 'id' => $numericId,
                 'name' => $node['name'] ?? "#{$numericId}",
@@ -999,6 +1038,7 @@ GRAPHQL;
                 'note' => $node['note'] ?? null,
                 'customer' => $customer,
                 'line_items' => $lineItems,
+                'refunds' => $refunds,
             ];
         }
 
@@ -1416,10 +1456,13 @@ GRAPHQL;
 
         foreach ($nodes as $node) {
             $numericId = preg_replace('/[^0-9]/', '', $node['id'] ?? '');
+            $gid = !empty($node['id']) && str_starts_with($node['id'], 'gid://')
+                ? $node['id']
+                : "gid://shopify/Customer/{$numericId}";
             $defaultAddr = $node['defaultAddress'] ?? [];
             $phone = !empty($node['phone']) ? $node['phone'] : ($defaultAddr['phone'] ?? null);
             $customers[] = [
-                'id' => $numericId,
+                'id' => $gid,
                 'first_name' => $node['firstName'] ?? '',
                 'last_name' => $node['lastName'] ?? '',
                 'email' => $node['email'] ?? '',
@@ -1441,6 +1484,19 @@ GRAPHQL;
             'CUSTOMERS_UPDATE',
             '/webhooks/customers',
             'Customer update'
+        );
+    }
+
+    /**
+     * Register customers/delete webhook.
+     */
+    public function registerCustomerDeleteWebhook(Shop $shop): array
+    {
+        return $this->registerWebhookSubscription(
+            $shop,
+            'CUSTOMERS_DELETE',
+            '/webhooks/customers/delete',
+            'Customer delete'
         );
     }
 
@@ -1524,6 +1580,7 @@ GRAPHQL;
         $productDeleteResult = $this->registerProductDeleteWebhook($shop);
         $inventoryResult = $this->registerInventoryLevelUpdateWebhook($shop);
         $customerResult = $this->registerCustomerUpdateWebhook($shop);
+        $customerDeleteResult = $this->registerCustomerDeleteWebhook($shop);
         $orderCreateResult = $this->registerOrderCreateWebhook($shop);
         $orderUpdateResult = $this->registerOrderUpdateWebhook($shop);
         $txnResult = $this->registerOrderTransactionCreateWebhook($shop);
@@ -1534,6 +1591,7 @@ GRAPHQL;
                 && ($productDeleteResult['success'] ?? false)
                 && ($inventoryResult['success'] ?? false)
                 && ($customerResult['success'] ?? false)
+                && ($customerDeleteResult['success'] ?? false)
                 && ($orderCreateResult['success'] ?? false)
                 && ($orderUpdateResult['success'] ?? false)
                 && ($txnResult['success'] ?? false)
@@ -1542,6 +1600,7 @@ GRAPHQL;
             'product_delete' => $productDeleteResult,
             'inventory' => $inventoryResult,
             'customer' => $customerResult,
+            'customer_delete' => $customerDeleteResult,
             'order_create' => $orderCreateResult,
             'order_update' => $orderUpdateResult,
             'transaction' => $txnResult,
