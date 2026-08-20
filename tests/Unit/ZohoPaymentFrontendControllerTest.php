@@ -44,7 +44,7 @@ class ZohoPaymentFrontendControllerTest extends TestCase
         ]);
     }
 
-    public function test_settings_data_returns_payment_gateway_settings_and_accounts(): void
+    public function test_settings_data_returns_tax_and_connection_settings(): void
     {
         $response = $this->actingAsShop()
             ->getJson('/api/zoho/settings');
@@ -57,16 +57,14 @@ class ZohoPaymentFrontendControllerTest extends TestCase
                 'success',
                 'shop',
                 'zohoConnection',
-                'paymentGatewaySettings',
-                'zohoAccounts',
+                'taxSettings',
+                'zohoTaxes',
             ]);
 
-        $gateways = $response->json('paymentGatewaySettings');
-        $this->assertNotEmpty($gateways);
-        $this->assertEquals('shopify_payments', $gateways[0]['shopify_gateway']);
+        $this->assertArrayNotHasKey('paymentGatewaySettings', $response->json());
     }
 
-    public function test_save_payment_settings_persists_gateway_mappings(): void
+    public function test_manual_save_payment_settings_route_is_absent(): void
     {
         $payload = [
             'gateways' => [
@@ -75,28 +73,15 @@ class ZohoPaymentFrontendControllerTest extends TestCase
                     'payment_mode' => 'creditcard',
                     'account_id' => 'acc_101',
                 ],
-                [
-                    'shopify_gateway' => 'stripe',
-                    'payment_mode' => 'creditcard',
-                    'account_id' => 'acc_102',
-                ],
             ],
         ];
 
         $response = $this->actingAsShop()
             ->postJson('/zoho/settings/payment-gateways', $payload);
 
-        $response->assertStatus(200)
-            ->assertJson([
-                'success' => true,
-            ]);
-        $this->assertStringContainsString('Payment gateway settings saved successfully', $response->json('message'));
-
-        $this->shop->refresh();
-        $this->assertIsArray($this->shop->payment_gateway_settings);
-        $this->assertEquals('creditcard', $this->shop->payment_gateway_settings['shopify_payments']['payment_mode']);
-        $this->assertEquals('acc_101', $this->shop->payment_gateway_settings['shopify_payments']['account_id']);
+        $response->assertStatus(404);
     }
+
 
     public function test_sync_payment_endpoint_returns_not_found_when_no_payment_or_order(): void
     {

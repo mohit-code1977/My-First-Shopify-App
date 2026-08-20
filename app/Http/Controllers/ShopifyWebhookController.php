@@ -5,10 +5,13 @@ namespace App\Http\Controllers;
 use App\Models\Customer;
 use App\Models\Order;
 use App\Models\Payment;
+use App\Models\PendingInventoryWebhook;
 use App\Models\Product;
 use App\Models\ProductVariant;
 use App\Models\Shop;
 use App\Models\ShopifyProcessedWebhook;
+use App\Models\SyncHistory;
+use App\Services\ShopifyService;
 use App\Services\ZohoService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -139,7 +142,15 @@ class ShopifyWebhookController extends Controller
 
         $imageUrl = $payload['image']['src'] ?? ($payload['images'][0]['src'] ?? ($payload['image_url'] ?? null));
 
-        if ($product) {
+        if (!$product) {
+            $product = Product::create([
+                'shop_id' => $shop->id,
+                'shopify_product_id' => $productGid ?? ($numericProductId ? "gid://shopify/Product/{$numericProductId}" : 'gid://shopify/Product/' . time()),
+                'title' => $payload['title'] ?? 'Untitled Product',
+                'handle' => $payload['handle'] ?? null,
+                'image_url' => $imageUrl,
+            ]);
+        } else {
             $updateData = [
                 'title' => $payload['title'] ?? $product->title,
                 'handle' => $payload['handle'] ?? $product->handle,
@@ -201,41 +212,73 @@ class ShopifyWebhookController extends Controller
                     $numericVariantId ? preg_replace('/^gid:\/\/shopify\/ProductVariant\//', '', $numericVariantId) : null,
                 ])));
 
-                $variant = ProductVariant::whereIn('shopify_variant_id', $variantIdCandidates)
-                    ->whereHas('product', function ($query) use ($shop) {
-                        $query->where('shop_id', $shop->id);
-                    })
-                    ->first();
+                $existingVariant = ProductVariant::whereIn('shopify_variant_id', $variantIdCandidates)->first();
 
-                if (!$variant) {
+                if ($existingVariant && $existingVariant->product->shop_id !== $shop->id) {
                     continue;
+                }
+
+                $isNewVariant = false;
+
+                if (!$existingVariant) {
+                    $rawInvId = !empty($vData['inventory_item_id']) ? (string) $vData['inventory_item_id'] : null;
+                    $formattedInvId = $rawInvId ? (str_starts_with($rawInvId, 'gid://') ? $rawInvId : "gid://shopify/InventoryItem/{$rawInvId}") : null;
+
+                    $variant = ProductVariant::create([
+                        'product_id' => $product->id,
+                        'shopify_variant_id' => $variantGid ?? ($numericVariantId ? "gid://shopify/ProductVariant/{$numericVariantId}" : 'gid://shopify/ProductVariant/' . time()),
+                        'shopify_inventory_item_id' => $formattedInvId,
+                        'title' => $vData['title'] ?? 'Default',
+                        'sku' => $vData['sku'] ?? null,
+                        'price' => $vData['price'] ?? 0.00,
+                        'inventory_quantity' => $vData['inventory_quantity'] ?? 0,
+                    ]);
+                    $isNewVariant = true;
+                } else {
+                    $variant = $existingVariant;
+                    $variantUpdateData = [
+                        'title' => $vData['title'] ?? $variant->title,
+                        'sku' => array_key_exists('sku', $vData) ? $vData['sku'] : $variant->sku,
+                        'price' => $vData['price'] ?? $variant->price,
+                        'inventory_quantity' => $vData['inventory_quantity'] ?? $variant->inventory_quantity,
+                    ];
+
+                    if (!empty($vData['inventory_item_id'])) {
+                        $rawInvId = (string) $vData['inventory_item_id'];
+                        $variantUpdateData['shopify_inventory_item_id'] = str_starts_with($rawInvId, 'gid://')
+                            ? $rawInvId
+                            : "gid://shopify/InventoryItem/{$rawInvId}";
+                    }
+
+                    $variant->update($variantUpdateData);
                 }
 
                 $summary['processed']++;
 
-                // Update local variant fields
-                $variantUpdateData = [
-                    'title' => $vData['title'] ?? $variant->title,
-                    'sku' => array_key_exists('sku', $vData) ? $vData['sku'] : $variant->sku,
-                    'price' => $vData['price'] ?? $variant->price,
-                    'inventory_quantity' => $vData['inventory_quantity'] ?? $variant->inventory_quantity,
-                ];
+                if ($isNewVariant) {
+                    $shopifyService = app(ShopifyService::class);
+                    if ($variant->shopify_inventory_item_id) {
+                        $liveQty = $shopifyService->fetchStorewideAvailableQuantity($shop, $variant->shopify_inventory_item_id);
+                        if ($liveQty !== null) {
+                            $variant->inventory_quantity = $liveQty;
+                            $variant->save();
+                        }
+                    }
 
-                if (!empty($vData['inventory_item_id'])) {
-                    $rawInvId = (string) $vData['inventory_item_id'];
-                    $variantUpdateData['shopify_inventory_item_id'] = str_starts_with($rawInvId, 'gid://')
-                        ? $rawInvId
-                        : "gid://shopify/InventoryItem/{$rawInvId}";
+                    if (!$variant->zoho_item_id && $zohoService) {
+                        try {
+                            $zohoService->createItem($variant, $variant->inventory_quantity);
+                        } catch (\Throwable $e) {
+                            Log::error("Zoho createItem failed for new variant ID {$variant->id}: " . $e->getMessage());
+                        }
+                    }
                 }
 
-                $variant->update($variantUpdateData);
-
-                // Zoho sync if zoho_item_id exists
+                // Zoho metadata update if zoho_item_id exists
                 if ($variant->zoho_item_id) {
-                    if ($zohoService) {
+                    if ($zohoService && !$isNewVariant) {
                         $metaSuccess = false;
 
-                        // 1. Update item metadata (name, rate, SKU)
                         try {
                             $zohoService->updateItem($variant);
                             $metaSuccess = true;
@@ -245,28 +288,20 @@ class ShopifyWebhookController extends Controller
                             $summary['metadata_failures']++;
                         }
 
-                        // 2. Synchronize inventory quantity (backward compatibility)
-                        if (array_key_exists('inventory_quantity', $vData)) {
-                            try {
-                                $zohoService->syncInventory($variant, (int) $vData['inventory_quantity']);
-                                $summary['inventory_synced']++;
-                            } catch (\Throwable $e) {
-                                Log::error("Zoho inventory sync failed for variant ID {$variant->id}: " . $e->getMessage());
-                                $summary['inventory_failures']++;
-                            }
-                        }
-
                         if ($metaSuccess) {
                             $summary['synced_to_zoho']++;
                         } else {
                             $summary['zoho_failures']++;
                         }
-                    } else {
-                        $summary['zoho_failures']++;
+                    } else if ($isNewVariant) {
+                        $summary['synced_to_zoho']++;
                     }
                 } else {
                     $summary['skipped_unmapped']++;
                 }
+
+                // Process any deferred pending inventory webhooks for this variant
+                $this->processPendingInventoryWebhooks($shop, $variant, $zohoService);
             }
         }
 
@@ -275,6 +310,316 @@ class ShopifyWebhookController extends Controller
             'summary' => $summary,
         ], 200);
     }
+
+    /**
+     * Handle Shopify products/delete webhook.
+     */
+    public function productsDelete(Request $request)
+    {
+        Log::info('Shopify products/delete webhook received', [
+            'shop' => $request->header('X-Shopify-Shop-Domain'),
+            'webhook_id' => $request->header('X-Shopify-Webhook-Id'),
+            'topic' => $request->header('X-Shopify-Topic'),
+            'payload' => $request->getContent(),
+        ]);
+
+        /*
+        |--------------------------------------------------------------------------
+        | 1. Verify HMAC Signature
+        |--------------------------------------------------------------------------
+        */
+
+        $hmacHeader = $request->header('X-Shopify-Hmac-SHA256');
+
+        if (empty($hmacHeader)) {
+            return response()->json(['error' => 'Missing HMAC signature.'], 401);
+        }
+
+        $secret = config('services.shopify.api_secret') ?? env('SHOPIFY_API_SECRET');
+
+        if (empty($secret)) {
+            return response()->json(['error' => 'Shopify API secret not configured.'], 500);
+        }
+
+        $calculatedHmac = base64_encode(hash_hmac('sha256', $request->getContent(), $secret, true));
+
+        if (!hash_equals($calculatedHmac, $hmacHeader)) {
+            return response()->json(['error' => 'Invalid HMAC signature.'], 401);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | 2. Validate Shop Domain & Resolve Tenant
+        |--------------------------------------------------------------------------
+        */
+
+        $shopDomain = $request->header('X-Shopify-Shop-Domain');
+
+        if (empty($shopDomain) || !is_string($shopDomain) || !preg_match('/^[a-zA-Z0-9][a-zA-Z0-9\-]*\.myshopify\.com$/', $shopDomain)) {
+            return response()->json(['error' => 'Invalid Shopify shop domain.'], 400);
+        }
+
+        $shop = Shop::where('shop_domain', $shopDomain)->first();
+
+        if (!$shop) {
+            return response()->json(['error' => 'Unknown shop domain.'], 404);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | 3. Check & Record Persistent Webhook Idempotency Status (Atomic Lock)
+        |--------------------------------------------------------------------------
+        */
+
+        $webhookId = $request->header('X-Shopify-Webhook-Id');
+        $processedWebhook = null;
+
+        if ($webhookId) {
+            $processedWebhook = ShopifyProcessedWebhook::where('webhook_id', $webhookId)->first();
+
+            if ($processedWebhook) {
+                $status = $processedWebhook->status ?? 'completed';
+
+                if ($status === 'completed') {
+                    return response()->json([
+                        'message' => 'Webhook already processed.',
+                        'webhook_id' => $webhookId,
+                    ], 200);
+                }
+
+                $isStale = ($status === 'processing') &&
+                    $processedWebhook->updated_at &&
+                    $processedWebhook->updated_at->lt(now()->subMinutes(5));
+
+                if ($status === 'processing' && !$isStale) {
+                    return response()->json([
+                        'error' => 'Webhook is currently processing.',
+                        'webhook_id' => $webhookId,
+                    ], 429);
+                }
+
+                // Atomic state claim: only 1 thread can update status from non-processing (or stale processing) to processing
+                $affected = ShopifyProcessedWebhook::where('id', $processedWebhook->id)
+                    ->where(function ($q) {
+                        $q->where('status', '!=', 'processing')
+                            ->orWhere('updated_at', '<', now()->subMinutes(5));
+                    })
+                    ->update([
+                        'status' => 'processing',
+                        'updated_at' => now(),
+                    ]);
+
+                if ($affected === 0) {
+                    return response()->json([
+                        'error' => 'Webhook is currently processing.',
+                        'webhook_id' => $webhookId,
+                    ], 429);
+                }
+
+                $processedWebhook->refresh();
+            } else {
+                try {
+                    $processedWebhook = ShopifyProcessedWebhook::create([
+                        'webhook_id' => $webhookId,
+                        'topic' => $request->header('X-Shopify-Topic', 'products/delete'),
+                        'shop_domain' => $shopDomain,
+                        'status' => 'processing',
+                    ]);
+                } catch (\Throwable $e) {
+                    // Unique constraint violation: another concurrent thread created the row first
+                    $processedWebhook = ShopifyProcessedWebhook::where('webhook_id', $webhookId)->first();
+                    if ($processedWebhook) {
+                        $st = $processedWebhook->status ?? 'completed';
+                        if ($st === 'completed') {
+                            return response()->json([
+                                'message' => 'Webhook already processed.',
+                                'webhook_id' => $webhookId,
+                            ], 200);
+                        }
+                        if ($st === 'processing') {
+                            return response()->json([
+                                'error' => 'Webhook is currently processing.',
+                                'webhook_id' => $webhookId,
+                            ], 429);
+                        }
+                    }
+                }
+            }
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | 4. Validate JSON Payload
+        |--------------------------------------------------------------------------
+        */
+
+        $payload = json_decode($request->getContent(), true);
+
+        if (!is_array($payload) || (empty($payload['id']) && empty($payload['admin_graphql_api_id']))) {
+            if ($processedWebhook) {
+                $processedWebhook->update(['status' => 'failed']);
+            }
+            return response()->json(['error' => 'Invalid product delete payload.'], 400);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | 5. Resolve Local Product & Variants
+        |--------------------------------------------------------------------------
+        */
+
+        $productGid = $payload['admin_graphql_api_id'] ?? null;
+        $numericProductId = isset($payload['id']) ? (string) $payload['id'] : null;
+
+        if (empty($productGid) && $numericProductId !== null) {
+            $productGid = str_starts_with($numericProductId, 'gid://shopify/Product/')
+                ? $numericProductId
+                : "gid://shopify/Product/{$numericProductId}";
+        }
+
+        $productIdCandidates = array_values(array_filter(array_unique([
+            $productGid,
+            $numericProductId ? (str_starts_with($numericProductId, 'gid://') ? $numericProductId : "gid://shopify/Product/{$numericProductId}") : null,
+            $numericProductId ? preg_replace('/^gid:\/\/shopify\/Product\//', '', $numericProductId) : null,
+        ])));
+
+        $product = Product::where('shop_id', $shop->id)
+            ->whereIn('shopify_product_id', $productIdCandidates)
+            ->with('variants')
+            ->first();
+
+        if (!$product) {
+            Log::info("productsDelete: Product not found locally for candidates: " . json_encode($productIdCandidates) . " on shop {$shopDomain}. Marking webhook processed.");
+            if ($processedWebhook) {
+                $processedWebhook->update(['status' => 'completed']);
+            }
+
+            return response()->json([
+                'message' => 'Product not found locally or already deleted.',
+            ], 200);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | 6. Initialize Zoho Service & Process Variants
+        |--------------------------------------------------------------------------
+        */
+
+        $zohoService = null;
+
+        if ($shop->zohoConnection) {
+            try {
+                $zohoService = new ZohoService($shop);
+            } catch (\Throwable $e) {
+                Log::warning('ZohoService initialization skipped for product delete on shop ' . $shopDomain . ': ' . $e->getMessage());
+            }
+        }
+
+        $variants = $product->variants;
+        $summary = [
+            'total_variants' => count($variants),
+            'zoho_deleted' => 0,
+            'zoho_inactivated' => 0,
+            'zoho_already_missing' => 0,
+            'skipped_unmapped' => 0,
+            'zoho_failures' => 0,
+            'cleaned_variants' => 0,
+        ];
+
+        $hasFailure = false;
+
+        foreach ($variants as $variant) {
+            $zohoItemId = $variant->zoho_item_id;
+
+            if (!$zohoItemId) {
+                $summary['skipped_unmapped']++;
+                $variant->delete();
+                $summary['cleaned_variants']++;
+                continue;
+            }
+
+            if (!$zohoService) {
+                Log::warning("productsDelete: Cannot delete Zoho item {$zohoItemId} for variant ID {$variant->id} because Zoho service is unavailable.");
+                $summary['zoho_failures']++;
+                $hasFailure = true;
+                continue;
+            }
+
+            $result = $zohoService->deleteItem($zohoItemId);
+
+            try {
+                SyncHistory::create([
+                    'shop_id' => $shop->id,
+                    'product_variant_id' => $variant->id,
+                    'action' => 'delete',
+                    'status' => $result['success'] ? 'success' : 'failed',
+                    'zoho_item_id' => $zohoItemId,
+                    'message' => "Product delete webhook: Zoho item {$zohoItemId} " . ($result['status'] ?? 'processed') . (!empty($result['error']) ? " ({$result['error']})" : ""),
+                    'synced_at' => now(),
+                ]);
+            } catch (\Throwable $shEx) {
+                Log::warning("productsDelete: Failed to create SyncHistory for variant ID {$variant->id}: " . $shEx->getMessage());
+            }
+
+            if ($result['success']) {
+                $status = $result['status'] ?? 'deleted';
+                if ($status === 'deleted') {
+                    $summary['zoho_deleted']++;
+                } elseif ($status === 'inactivated') {
+                    $summary['zoho_inactivated']++;
+                } elseif ($status === 'already_missing') {
+                    $summary['zoho_already_missing']++;
+                }
+
+                $variant->update([
+                    'zoho_item_id' => null,
+                    'zoho_sync_hash' => null,
+                    'zoho_synced_at' => null,
+                ]);
+                $variant->delete();
+                $summary['cleaned_variants']++;
+            } else {
+                $summary['zoho_failures']++;
+                $hasFailure = true;
+                Log::error("productsDelete: Zoho item deletion failed for variant ID {$variant->id} (Zoho Item ID: {$zohoItemId}): " . ($result['error'] ?? 'Unknown error'));
+            }
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | 7. Final Cleanup & Response
+        |--------------------------------------------------------------------------
+        */
+
+        $remainingVariantsCount = $product->variants()->count();
+
+        if (!$hasFailure && $remainingVariantsCount === 0) {
+            $product->delete();
+
+            if ($processedWebhook) {
+                $processedWebhook->update(['status' => 'completed']);
+            }
+
+            return response()->json([
+                'message' => 'Product delete webhook processed successfully.',
+                'summary' => $summary,
+            ], 200);
+        } else {
+            Log::warning("productsDelete: Partial failure during product deletion for product ID {$product->id} on shop {$shopDomain}.", $summary);
+
+            if ($processedWebhook) {
+                $processedWebhook->update(['status' => 'failed']);
+            }
+
+            return response()->json([
+                'error' => 'Product deletion partially failed. Some Zoho items could not be processed.',
+                'summary' => $summary,
+            ], 500);
+        }
+
+    }
+
 
     /**
      * Handle Shopify inventory_levels/update webhook.
@@ -402,11 +747,25 @@ class ShopifyWebhookController extends Controller
         ];
 
         if (!$variant) {
-            Log::info("inventoryLevelsUpdate: Variant not found for inventory item ID {$rawInventoryItemId} on shop {$shopDomain}.");
-            $summary['skipped_unmapped']++;
+            Log::info("inventoryLevelsUpdate: Variant not found for inventory item ID {$rawInventoryItemId} on shop {$shopDomain}. Deferring event to pending_inventory_webhooks.");
+
+            $formattedInvId = str_starts_with($rawInventoryItemId, 'gid://')
+                ? $rawInventoryItemId
+                : "gid://shopify/InventoryItem/{$numericInventoryItemId}";
+
+            PendingInventoryWebhook::create([
+                'shop_id' => $shop->id,
+                'shopify_inventory_item_id' => $formattedInvId,
+                'webhook_id' => $webhookId,
+                'available_quantity' => (int) ($payload['available'] ?? 0),
+                'status' => 'pending',
+                'payload' => $payload,
+            ]);
+
+            $summary['deferred_pending'] = 1;
 
             return response()->json([
-                'message' => 'Variant not found or unmapped for this inventory item.',
+                'message' => 'Inventory update deferred as pending for unmapped variant.',
                 'summary' => $summary,
             ], 200);
         }
@@ -707,7 +1066,7 @@ class ShopifyWebhookController extends Controller
             ? strtoupper(trim((string) $payload['presentment_currency']))
             : (!empty($payload['total_price_set']['presentment_money']['currency_code'])
                 ? strtoupper(trim((string) $payload['total_price_set']['presentment_money']['currency_code']))
-                : (!empty($payload['currency']) ? strtoupper(trim((string) $payload['currency'])) : 'USD'));
+                : (!empty($payload['currency']) ? strtoupper(trim((string) $payload['currency'])) : ($shop->currency ?? 'USD')));
 
         $resolvedTotal = \App\Services\ShopifyService::extractRestMoney($payload['total_price_set'] ?? null, $defaultCurrency, $payload['total_price'] ?? 0.00);
         $orderCurrency = $resolvedTotal['currency'];
@@ -1284,7 +1643,7 @@ class ShopifyWebhookController extends Controller
             $currency = $shopCurrency;
             $amount = $shopAmount ?? $rawAmount;
         } else {
-            $currency = $topCurrency ?? 'USD';
+            $currency = $topCurrency ?? $shop->currency ?? 'USD';
             $amount = $rawAmount;
         }
 
@@ -1299,7 +1658,7 @@ class ShopifyWebhookController extends Controller
                 'shopify_order_id' => $order->shopify_order_id,
                 'payment_reference' => $paymentReference,
                 'amount' => $amount,
-                'currency' => $currency ?: ($order->currency ?? 'USD'),
+                'currency' => $currency ?: ($order->currency ?? $shop->currency ?? 'USD'),
                 'payment_date' => $paymentDate,
                 'payment_method' => $gateway,
                 'status' => Payment::STATUS_PAID,
@@ -1429,7 +1788,7 @@ class ShopifyWebhookController extends Controller
                     'financial_status' => 'partially_refunded',
                     'fulfillment_status' => 'unfulfilled',
                     'order_date' => now(),
-                    'currency' => $payload['currency'] ?? 'USD',
+                    'currency' => $payload['currency'] ?? $shop->currency ?? 'USD',
                     'subtotal' => 0.00,
                     'total_price' => 0.00,
                     'line_items' => [],
@@ -1482,7 +1841,7 @@ class ShopifyWebhookController extends Controller
             }
         }
 
-        $currency = $order ? $order->currency : ($payload['currency'] ?? 'USD');
+        $currency = $order ? $order->currency : ($payload['currency'] ?? $shop->currency ?? 'USD');
 
         $refund = \App\Models\Refund::updateOrCreate(
             [
@@ -1685,7 +2044,7 @@ class ShopifyWebhookController extends Controller
                 'financial_status' => $orderData['financial_status'] ?? 'partially_refunded',
                 'fulfillment_status' => $orderData['fulfillment_status'] ?? 'unfulfilled',
                 'order_date' => !empty($orderData['created_at']) ? new \DateTime($orderData['created_at']) : now(),
-                'currency' => $orderData['currency'] ?? 'USD',
+                'currency' => $orderData['currency'] ?? $shop->currency ?? 'USD',
                 'subtotal' => (float) ($orderData['subtotal_price'] ?? 0.00),
                 'shipping_total' => $shippingTotal,
                 'shipping_method' => $shippingMethod,
@@ -1699,6 +2058,54 @@ class ShopifyWebhookController extends Controller
                 'line_items' => $lineItems,
             ]
         );
+    }
+
+    /**
+     * Process deferred pending inventory webhooks for a newly created/mapped variant.
+     */
+    private function processPendingInventoryWebhooks(Shop $shop, ProductVariant $variant, ?ZohoService $zohoService = null): void
+    {
+        if (empty($variant->shopify_inventory_item_id)) {
+            return;
+        }
+
+        $rawId = preg_replace('/^gid:\/\/shopify\/InventoryItem\//', '', $variant->shopify_inventory_item_id);
+        $candidateItemIds = array_values(array_filter(array_unique([
+            $variant->shopify_inventory_item_id,
+            "gid://shopify/InventoryItem/{$rawId}",
+            $rawId,
+        ])));
+
+        $pendingEvents = PendingInventoryWebhook::where('shop_id', $shop->id)
+            ->whereIn('shopify_inventory_item_id', $candidateItemIds)
+            ->where('status', 'pending')
+            ->get();
+
+        if ($pendingEvents->isEmpty()) {
+            return;
+        }
+
+        Log::info("Processing " . $pendingEvents->count() . " pending inventory webhooks for variant ID {$variant->id} (Inventory Item: {$variant->shopify_inventory_item_id})");
+
+        $shopifyService = app(ShopifyService::class);
+        $liveAggregateQty = $shopifyService->fetchStorewideAvailableQuantity($shop, $variant->shopify_inventory_item_id);
+
+        if ($liveAggregateQty !== null) {
+            $variant->inventory_quantity = $liveAggregateQty;
+            $variant->save();
+
+            if ($variant->zoho_item_id && $zohoService) {
+                try {
+                    $zohoService->syncInventory($variant, $liveAggregateQty, 'shopify');
+                } catch (\Throwable $e) {
+                    Log::error("Failed syncing inventory for variant ID {$variant->id} during pending webhook resolution: " . $e->getMessage());
+                }
+            }
+        }
+
+        foreach ($pendingEvents as $pending) {
+            $pending->update(['status' => 'processed']);
+        }
     }
 }
 

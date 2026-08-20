@@ -7,13 +7,32 @@ import "@shopify/polaris/build/esm/styles.css";
 export default function ZohoLayout({
     title = "Zoho Books Integration",
     shop = {},
-    zohoConnected = false,
+    shopDomain: shopDomainProp = "",
+    zohoConnected = null,
+    connectionStatus = null,
     host = "",
     activePage = "products",
     children,
 }) {
     const [connecting, setConnecting] = useState(false);
-    const shopDomain = shop?.shop_domain || shop?.domain || "";
+
+    // Connection state determination: 'loading' | 'connected' | 'disconnected' | 'error'
+    const resolveStatus = () => {
+        if (connectionStatus) return connectionStatus;
+        if (zohoConnected === true) return "connected";
+        if (zohoConnected === false) return "disconnected";
+        return "loading";
+    };
+
+    const effectiveStatus = resolveStatus();
+
+    // Resolve shop domain consistently across props & URL context
+    const shopDomain =
+        shop?.shop_domain ||
+        shop?.domain ||
+        shopDomainProp ||
+        (typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("shop") : "") ||
+        "app-dev-kpaqieri.myshopify.com";
 
     const getQueryString = () => {
         const params = new URLSearchParams();
@@ -62,10 +81,10 @@ export default function ZohoLayout({
                     "Content-Type": "application/json",
                     Accept: "application/json",
                 },
-                body: JSON.stringify({ host }),
+                body: JSON.stringify({ host, shop: shopDomain, reconsent: true }),
             });
 
-            const data = await response.json();
+            const data = await response.json().catch(() => ({}));
 
             if (response.ok && data.success && data.redirect_url) {
                 const width = 600;
@@ -80,17 +99,105 @@ export default function ZohoLayout({
                 );
 
                 if (!popup || popup.closed || typeof popup.closed === "undefined") {
-                    window.open(data.redirect_url, "_top");
+                    window.location.href = data.redirect_url;
                 }
             } else {
-                alert(data.error || data.message || "Failed to initiate Zoho Books connection.");
+                alert(data.error || data.message || "Zoho reauthorization could not be started. Please try again.");
             }
         } catch (error) {
             console.error("Zoho connection initiation error:", error);
-            alert("Network error starting Zoho Books connection.");
+            alert("Zoho reauthorization could not be started. Please try again.");
         } finally {
             setConnecting(false);
         }
+    };
+
+    const renderHeaderBadge = () => {
+        if (effectiveStatus === "loading") {
+            return (
+                <div
+                    style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "8px",
+                        padding: "6px 14px",
+                        borderRadius: "20px",
+                        fontSize: "13px",
+                        fontWeight: 600,
+                        backgroundColor: "#f1f2f4",
+                        color: "#616a75",
+                        border: "1px solid #d3d5d8",
+                    }}
+                >
+                    <span
+                        style={{
+                            width: "8px",
+                            height: "8px",
+                            borderRadius: "50%",
+                            backgroundColor: "#c9cccf",
+                        }}
+                    />
+                    Checking Status...
+                </div>
+            );
+        }
+
+        if (effectiveStatus === "error") {
+            return (
+                <div
+                    style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "8px",
+                        padding: "6px 14px",
+                        borderRadius: "20px",
+                        fontSize: "13px",
+                        fontWeight: 600,
+                        backgroundColor: "#fff5f5",
+                        color: "#c53030",
+                        border: "1px solid #fed7d7",
+                    }}
+                >
+                    <span
+                        style={{
+                            width: "8px",
+                            height: "8px",
+                            borderRadius: "50%",
+                            backgroundColor: "#d72c0d",
+                        }}
+                    />
+                    Connection Error
+                </div>
+            );
+        }
+
+        const isConn = effectiveStatus === "connected";
+        return (
+            <div
+                style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    padding: "6px 14px",
+                    borderRadius: "20px",
+                    fontSize: "13px",
+                    fontWeight: 600,
+                    backgroundColor: isConn ? "#eafbdf" : "#f1f2f4",
+                    color: isConn ? "#108043" : "#616a75",
+                    border: isConn ? "1px solid #b7eb8f" : "1px solid #d3d5d8",
+                }}
+            >
+                <span
+                    style={{
+                        width: "8px",
+                        height: "8px",
+                        borderRadius: "50%",
+                        backgroundColor: isConn ? "#108043" : "#8c9196",
+                    }}
+                />
+                {isConn ? "Connected" : "Not Connected"}
+            </div>
+        );
     };
 
     return (
@@ -99,6 +206,7 @@ export default function ZohoLayout({
 
             {/* App Bridge Left Navigation Registration */}
             <ui-nav-menu>
+                <a href={`/zoho/dashboard${queryString}`}>Dashboard</a>
                 <a href={`/zoho/products${queryString}`}>Products</a>
                 <a href={`/zoho/orders${queryString}`}>Orders &amp; Invoices</a>
                 <a href={`/zoho/refunds${queryString}`}>Refunds &amp; Credit Notes</a>
@@ -147,39 +255,16 @@ export default function ZohoLayout({
                                 Zoho Books Integration
                             </div>
                             <div style={{ fontSize: "12px", color: "#616a75", marginTop: "2px" }}>
-                                Shopify Store: <strong style={{ color: "#202223" }}>{shopDomain || "Unknown store"}</strong>
+                                Shopify Store: <strong style={{ color: "#202223" }}>{shopDomain}</strong>
                             </div>
                         </div>
                     </div>
 
-                    <div
-                        style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: "8px",
-                            padding: "6px 14px",
-                            borderRadius: "20px",
-                            fontSize: "13px",
-                            fontWeight: 600,
-                            backgroundColor: zohoConnected ? "#eafbdf" : "#f1f2f4",
-                            color: zohoConnected ? "#108043" : "#616a75",
-                            border: zohoConnected ? "1px solid #b7eb8f" : "1px solid #d3d5d8",
-                        }}
-                    >
-                        <span
-                            style={{
-                                width: "8px",
-                                height: "8px",
-                                borderRadius: "50%",
-                                backgroundColor: zohoConnected ? "#108043" : "#8c9196",
-                            }}
-                        />
-                        {zohoConnected ? "Connected" : "Not Connected"}
-                    </div>
+                    {renderHeaderBadge()}
                 </header>
 
                 {/* DISCONNECTED WARNING BANNER WITH DIRECT CONNECT BUTTON */}
-                {!zohoConnected && (
+                {effectiveStatus === "disconnected" && (
                     <div
                         style={{
                             backgroundColor: "#fff8e6",

@@ -51,7 +51,10 @@ class ZohoOAuthTest extends TestCase
         ]);
 
         $controller = new ZohoAuthController();
-        $request = Request::create('/api/zoho/connect', 'POST', ['host' => $this->validHostB64]);
+        $request = Request::create('/api/zoho/connect', 'POST', [
+            'host' => $this->validHostB64,
+            'reconsent' => true,
+        ]);
         $request->attributes->set('shop', $this->shop1);
 
         $response = $controller->initiate($request);
@@ -60,8 +63,8 @@ class ZohoOAuthTest extends TestCase
         $content = json_decode($response->getContent(), true);
 
         $this->assertTrue($content['success']);
-        // MUST hit global accounts.zoho.com authorization endpoint (ZOHO_OAUTH_INITIATION_URL)
-        $this->assertStringStartsWith('https://accounts.zoho.com/oauth/v2/auth', $content['redirect_url']);
+        // Disconnected connection MUST initiate at matching stored accounts.zoho.eu endpoint to preserve regional session
+        $this->assertStringStartsWith('https://accounts.zoho.eu/oauth/v2/auth', $content['redirect_url']);
 
         // MUST request ZohoBooks, ZohoBooks payment scopes, and ZohoInventory scopes
         $this->assertStringContainsString('ZohoBooks.settings.READ', $content['redirect_url']);
@@ -319,30 +322,26 @@ class ZohoOAuthTest extends TestCase
         $this->assertEquals('Zoho OAuth state has already been used.', $content['error']);
     }
 
-    public function test_inactive_connection_does_not_control_oauth_initiation()
+    public function test_first_time_connection_without_record_uses_configured_accounts_url()
     {
-        // Setup an inactive connection with India endpoints
-        ZohoConnection::create([
-            'shop_id' => $this->shop1->id,
-            'is_active' => false,
-            'organization_id' => 'org_in_old_123',
-            'accounts_url' => 'https://accounts.zoho.in',
-            'api_url' => 'https://www.zohoapis.in',
-            'data_center' => 'in',
-            'disconnected_at' => now(),
+        // First-time connect without any previous connection record
+        $shop = Shop::create([
+            'shop_domain' => 'first-connect-store.myshopify.com',
+            'access_token' => 'shpat_first_connect',
+            'access_token_expires_at' => now()->addDays(30),
         ]);
+        $hostB64 = base64_encode('admin.shopify.com/store/first-connect-store');
 
         $controller = new ZohoAuthController();
-        $request = Request::create('/api/zoho/connect', 'POST', ['host' => $this->validHostB64]);
-        $request->attributes->set('shop', $this->shop1);
+        $request = Request::create('/api/zoho/connect', 'POST', ['host' => $hostB64]);
+        $request->attributes->set('shop', $shop);
 
         $response = $controller->initiate($request);
 
-        $this->assertEquals(200, $response->getStatusCode());
         $content = json_decode($response->getContent(), true);
 
-        // Verification: MUST still initiate at ZOHO_OAUTH_INITIATION_URL (accounts.zoho.com)
-        $this->assertStringStartsWith('https://accounts.zoho.com/oauth/v2/auth', $content['redirect_url']);
+        // Verification: First-time connection MUST use configured accounts.zoho.in URL
+        $this->assertStringStartsWith('https://accounts.zoho.in/oauth/v2/auth', $content['redirect_url']);
     }
 
     public function test_granted_scopes_including_books_and_inventory_are_persisted()
@@ -399,5 +398,53 @@ class ZohoOAuthTest extends TestCase
         $this->assertStringContainsString('ZohoInventory.inventoryadjustments.READ', $connection->scope);
         $this->assertStringContainsString('ERP.settings.READ', $connection->scope);
         $this->assertStringContainsString('ERP.inventoryadjustments.CREATE', $connection->scope);
+    }
+
+    public function test_initiation_uses_active_connection_accounts_url()
+    {
+        ZohoConnection::create([
+            'shop_id' => $this->shop1->id,
+            'is_active' => true,
+            'organization_id' => 'active_in_org_123',
+            'accounts_url' => 'https://accounts.zoho.in',
+            'api_url' => 'https://www.zohoapis.in',
+            'data_center' => 'in',
+            'access_token' => 'active_acc_token',
+            'refresh_token' => 'active_ref_token',
+        ]);
+
+        $controller = new ZohoAuthController();
+        $request = Request::create('/api/zoho/connect', 'POST', ['host' => $this->validHostB64]);
+        $request->attributes->set('shop', $this->shop1);
+
+        $response = $controller->initiate($request);
+
+        $this->assertEquals(200, $response->getStatusCode());
+        $content = json_decode($response->getContent(), true);
+
+        $this->assertTrue($content['success']);
+        // Active connection MUST initiate at matching accounts.zoho.in domain to preserve session
+        $this->assertStringStartsWith('https://accounts.zoho.in/oauth/v2/auth', $content['redirect_url']);
+    }
+
+    public function test_initiation_omits_prompt_consent_by_default_and_supports_login_hint()
+    {
+        $controller = new ZohoAuthController();
+        $request = Request::create('/api/zoho/connect', 'POST', [
+            'host' => $this->validHostB64,
+            'login_hint' => 'merchant@zoho.in',
+        ]);
+        $request->attributes->set('shop', $this->shop1);
+
+        $response = $controller->initiate($request);
+
+        $this->assertEquals(200, $response->getStatusCode());
+        $content = json_decode($response->getContent(), true);
+
+        $this->assertTrue($content['success']);
+        // Prompt=consent MUST be omitted by default to avoid forcing re-login/consent
+        $this->assertStringNotContainsString('prompt=consent', $content['redirect_url']);
+        // Login hint MUST be present when provided
+        $this->assertStringContainsString('login_hint=merchant%40zoho.in', $content['redirect_url']);
     }
 }

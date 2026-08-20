@@ -86,4 +86,9 @@ class Order extends Model
     {
         return $this->hasMany(Refund::class);
     }
+
+    public function syncHistories(): HasMany
+    {
+        return $this->hasMany(SyncHistory::class);
+    }
 }

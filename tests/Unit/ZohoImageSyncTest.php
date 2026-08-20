@@ -38,6 +38,7 @@ class ZohoImageSyncTest extends TestCase
             'refresh_token' => 'valid_refresh_token',
             'accounts_url' => 'https://accounts.zoho.com',
             'api_url' => 'https://www.zohoapis.com',
+            'inventory_capability' => 'books_native',
             'expires_at' => now()->addHour(),
         ]);
     }
@@ -294,5 +295,140 @@ class ZohoImageSyncTest extends TestCase
         // Normal item update MUST succeed
         $this->assertTrue($result['updated']);
         $this->assertEquals('zoho_fail_img_202', $result['zoho_item_id']);
+    }
+
+    public function test_create_item_uploads_image_after_item_creation()
+    {
+        $imageUrl = 'https://example.com/new_product_image.jpg';
+
+        $product = Product::create([
+            'shop_id' => $this->shop->id,
+            'shopify_product_id' => 'gid://shopify/Product/301',
+            'title' => 'New Product With Image',
+            'handle' => 'new-product-with-image',
+            'image_url' => $imageUrl,
+        ]);
+
+        $variant = ProductVariant::create([
+            'product_id' => $product->id,
+            'shopify_variant_id' => 'gid://shopify/ProductVariant/401',
+            'title' => 'Default',
+            'sku' => 'NEW-IMG-SKU',
+            'price' => '49.99',
+            'inventory_quantity' => 12,
+            'zoho_item_id' => null,
+        ]);
+
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/settings/fields*' => Http::response([
+                'code' => 0,
+                'fields' => [
+                    [
+                        'field_id' => '5860785000000000101',
+                        'api_name' => 'cf_shopify_variant_id',
+                        'label' => 'Shopify Variant ID',
+                        'is_active' => true,
+                    ],
+                ],
+            ], 200),
+            'https://www.zohoapis.com/books/v3/items*' => function (\Illuminate\Http\Client\Request $request) {
+                if (str_contains($request->url(), 'custom_field_')) {
+                    return Http::response(['code' => 0, 'items' => []], 200);
+                }
+                if ($request->method() === 'POST' && !str_contains($request->url(), '/image')) {
+                    return Http::response([
+                        'code' => 0,
+                        'message' => 'The item has been added.',
+                        'item' => ['item_id' => 'zoho_created_item_301'],
+                    ], 201);
+                }
+                return Http::response(['code' => 0], 200);
+            },
+            'https://example.com/new_product_image.jpg' => Http::response('fake_new_image_bytes', 200, [
+                'Content-Type' => 'image/jpeg',
+            ]),
+            'https://www.zohoapis.com/books/v3/items/zoho_created_item_301/image*' => Http::response([
+                'code' => 0,
+                'message' => 'The item image has been attached.',
+            ], 200),
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->createItem($variant);
+
+        $this->assertTrue($result['created']);
+        $this->assertEquals('zoho_created_item_301', $result['zoho_item_id']);
+
+        // Verify the dedicated multipart image upload endpoint was called for the newly created item
+        Http::assertSent(function (\Illuminate\Http\Client\Request $request) {
+            return $request->method() === 'POST' &&
+                str_contains($request->url(), '/books/v3/items/zoho_created_item_301/image');
+        });
+    }
+
+    public function test_create_item_recovers_gracefully_from_zoho_code_1001_item_already_exists()
+    {
+        $product = Product::create([
+            'shop_id' => $this->shop->id,
+            'shopify_product_id' => 'gid://shopify/Product/999111',
+            'title' => 'Duplicate Name Product',
+            'handle' => 'duplicate-name-product',
+        ]);
+
+        $variant = ProductVariant::create([
+            'product_id' => $product->id,
+            'shopify_variant_id' => 'gid://shopify/ProductVariant/999222',
+            'title' => 'Black',
+            'sku' => '',
+            'price' => '25.00',
+            'inventory_quantity' => 5,
+            'zoho_item_id' => null,
+        ]);
+
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/settings/fields*' => Http::response([
+                'code' => 0,
+                'fields' => [
+                    [
+                        'field_id' => '5860785000000000101',
+                        'api_name' => 'cf_shopify_variant_id',
+                        'label' => 'Shopify Variant ID',
+                        'is_active' => true,
+                    ],
+                ],
+            ], 200),
+            'https://www.zohoapis.com/books/v3/items*' => function (\Illuminate\Http\Client\Request $request) {
+                if ($request->method() === 'POST') {
+                    // Simulate Zoho returning Error 1001: Item already exists
+                    return Http::response([
+                        'code' => 1001,
+                        'message' => 'Item "Duplicate Name Product - Black" already exists.',
+                    ], 400);
+                }
+                // GET request for search by name or list
+                return Http::response([
+                    'code' => 0,
+                    'items' => [
+                        [
+                            'item_id' => 'zoho_existing_1001_id',
+                            'name' => 'Duplicate Name Product - Black',
+                            'rate' => 25,
+                        ],
+                    ],
+                ], 200);
+            },
+            'https://www.zohoapis.com/books/v3/items/zoho_existing_1001_id' => Http::response([
+                'code' => 0,
+                'message' => 'Item details have been saved.',
+                'item' => ['item_id' => 'zoho_existing_1001_id'],
+            ], 200),
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->createItem($variant);
+
+        $this->assertTrue($result['updated']);
+        $this->assertEquals('zoho_existing_1001_id', $result['zoho_item_id']);
+        $this->assertEquals('zoho_existing_1001_id', $variant->fresh()->zoho_item_id);
     }
 }

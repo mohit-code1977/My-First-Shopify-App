@@ -51,11 +51,25 @@ class ZohoDatacenter
      */
     public static function getInitiationAccountsUrl(?\App\Models\Shop $shop = null): string
     {
-        $configured = config('services.zoho.oauth_initiation_url') ?: env('ZOHO_OAUTH_INITIATION_URL');
-        $validated = self::validateAccountsUrl($configured);
+        if ($shop) {
+            $connection = \App\Models\ZohoConnection::where('shop_id', $shop->id)->first();
 
-        if ($validated) {
-            return $validated;
+            if ($connection) {
+                $connectionAccountsUrl = self::resolveAccountsUrlForConnection($connection);
+                if ($connectionAccountsUrl) {
+                    return $connectionAccountsUrl;
+                }
+            }
+        }
+
+        $configuredAccountsUrl = self::validateAccountsUrl(config('services.zoho.accounts_url') ?: env('ZOHO_ACCOUNTS_URL'));
+        if ($configuredAccountsUrl) {
+            return $configuredAccountsUrl;
+        }
+
+        $configuredInitiation = self::validateAccountsUrl(config('services.zoho.oauth_initiation_url') ?: env('ZOHO_OAUTH_INITIATION_URL'));
+        if ($configuredInitiation) {
+            return $configuredInitiation;
         }
 
         return self::GLOBAL_ACCOUNTS_URL;

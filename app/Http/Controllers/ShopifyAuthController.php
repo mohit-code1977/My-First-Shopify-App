@@ -176,6 +176,16 @@ class ShopifyAuthController extends Controller
             ]
         );
 
+        // Fetch shop metadata (base currency, email, name)
+        try {
+            $this->shopifyService->fetchShopDetails($shopModel);
+        } catch (\Throwable $e) {
+            Log::warning('Shopify fetchShopDetails failed during OAuth callback', [
+                'shop' => $shop,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
         // Register all Shopify webhooks
         try {
             $this->shopifyService->registerAllWebhooks($shopModel);

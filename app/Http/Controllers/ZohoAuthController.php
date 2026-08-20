@@ -61,6 +61,11 @@ class ZohoAuthController extends Controller {
             'ZohoBooks.settings.READ',
             'ZohoBooks.settings.CREATE',
             'ZohoBooks.settings.UPDATE',
+            'ZohoBooks.settings.DELETE',
+            'ZohoBooks.fullaccess.READ',
+            'ZohoBooks.fullaccess.CREATE',
+            'ZohoBooks.fullaccess.UPDATE',
+            'ZohoBooks.fullaccess.DELETE',
             'ZohoBooks.contacts.READ',
             'ZohoBooks.contacts.CREATE',
             'ZohoBooks.contacts.UPDATE',
@@ -80,6 +85,7 @@ class ZohoAuthController extends Controller {
             'ZohoInventory.items.READ',
             'ZohoInventory.items.CREATE',
             'ZohoInventory.items.UPDATE',
+            'ZohoInventory.items.DELETE',
             'ZohoInventory.inventoryadjustments.READ',
             'ZohoInventory.inventoryadjustments.CREATE',
             'ZohoInventory.inventoryadjustments.UPDATE',
@@ -89,15 +95,27 @@ class ZohoAuthController extends Controller {
             'ERP.inventoryadjustments.UPDATE',
         ]);
 
-        $params = http_build_query([
+        $queryParams = [
             'client_id' => $clientId,
             'response_type' => 'code',
             'access_type' => 'offline',
-            'prompt' => 'consent',
             'scope' => implode(',', $scopes),
             'redirect_uri' => $redirectUri,
             'state' => $rawState,
-        ]);
+        ];
+
+        if ($request->has('prompt') && trim((string) $request->input('prompt')) !== '') {
+            $queryParams['prompt'] = trim((string) $request->input('prompt'));
+        } elseif ($request->boolean('reconsent')) {
+            $queryParams['prompt'] = 'consent';
+        }
+
+        $loginHint = $request->input('login_hint') ?: $request->query('login_hint');
+        if (!empty($loginHint)) {
+            $queryParams['login_hint'] = trim((string) $loginHint);
+        }
+
+        $params = http_build_query($queryParams);
 
         $accountsBaseUrl = ZohoDatacenter::getInitiationAccountsUrl($shop);
         $url = $accountsBaseUrl . '/oauth/v2/auth?' . $params;

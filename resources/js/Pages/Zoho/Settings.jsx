@@ -2,29 +2,25 @@ import React, { useEffect, useState } from "react";
 import { Banner, Badge, Button, InlineStack, Text } from "@shopify/polaris";
 import ZohoLayout from "@/Layouts/ZohoLayout";
 
-const ZOHO_PAYMENT_MODES = [
-    { value: "creditcard", label: "Credit Card" },
-    { value: "paypal", label: "PayPal" },
-    { value: "cash", label: "Cash" },
-    { value: "banktransfer", label: "Bank Transfer" },
-    { value: "bankremittance", label: "Bank Remittance" },
-    { value: "check", label: "Check" },
-    { value: "autotransaction", label: "Auto Transaction" },
-    { value: "others", label: "Others" },
-];
-
-export default function Settings({ shop, zohoConnection, host }) {
+export default function Settings({ shop, zohoConnection, zohoConnected, host }) {
     const [shopData, setShopData] = useState(shop || {});
-    const [zohoConn, setZohoConn] = useState(zohoConnection);
+    const [zohoConn, setZohoConn] = useState(zohoConnection || null);
     const [loading, setLoading] = useState(true);
+    const [loadError, setLoadError] = useState(null);
     const [disconnecting, setDisconnecting] = useState(false);
     const [showDisconnectModal, setShowDisconnectModal] = useState(false);
-
-    // Payment settings state
-    const [gatewaySettings, setGatewaySettings] = useState([]);
-    const [zohoAccounts, setZohoAccounts] = useState([]);
-    const [savingSettings, setSavingSettings] = useState(false);
     const [notification, setNotification] = useState(null);
+
+    // Explicit connection status: 'loading' | 'connected' | 'disconnected' | 'error'
+    const [connectionStatus, setConnectionStatus] = useState(() => {
+        if (zohoConnected === true || Boolean(zohoConnection)) {
+            return "connected";
+        }
+        if (zohoConnected === false && !zohoConnection) {
+            return "disconnected";
+        }
+        return "loading";
+    });
 
     // Tax settings state
     const [taxSettings, setTaxSettings] = useState({
@@ -37,10 +33,9 @@ export default function Settings({ shop, zohoConnection, host }) {
     const [zohoTaxes, setZohoTaxes] = useState([]);
     const [savingTaxSettings, setSavingTaxSettings] = useState(false);
 
-    const connected = Boolean(zohoConn);
-
     const loadData = async () => {
         setLoading(true);
+        setLoadError(null);
         try {
             const token = await window.shopify?.idToken();
             const headers = {
@@ -48,25 +43,30 @@ export default function Settings({ shop, zohoConnection, host }) {
                 Authorization: token ? `Bearer ${token}` : "",
             };
             const response = await fetch("/api/zoho/settings", { headers });
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: Failed to load settings.`);
+            }
             const data = await response.json();
-            if (response.ok && data.success) {
+            if (data.success) {
                 if (data.shop) setShopData(data.shop);
-                setZohoConn(data.zohoConnection);
-                if (data.paymentGatewaySettings) {
-                    setGatewaySettings(data.paymentGatewaySettings);
-                }
-                if (data.zohoAccounts) {
-                    setZohoAccounts(data.zohoAccounts);
-                }
+                setZohoConn(data.zohoConnection || null);
                 if (data.taxSettings) {
                     setTaxSettings(data.taxSettings);
                 }
                 if (data.zohoTaxes) {
                     setZohoTaxes(data.zohoTaxes);
                 }
+
+                const isConn = Boolean(data.zohoConnection);
+                setConnectionStatus(isConn ? "connected" : "disconnected");
+            } else {
+                throw new Error(data.message || "Failed to load settings data.");
             }
         } catch (error) {
             console.error("Failed to load settings data:", error);
+            setLoadError(error.message || "Unable to load Zoho connection status. Please refresh.");
+            // Do NOT mark as disconnected on API error!
+            setConnectionStatus("error");
         } finally {
             setLoading(false);
         }
@@ -75,12 +75,6 @@ export default function Settings({ shop, zohoConnection, host }) {
     useEffect(() => {
         loadData();
     }, []);
-
-    const handleGatewayChange = (index, field, value) => {
-        const updated = [...gatewaySettings];
-        updated[index] = { ...updated[index], [field]: value };
-        setGatewaySettings(updated);
-    };
 
     const handleTaxSettingChange = (field, value) => {
         setTaxSettings((prev) => ({ ...prev, [field]: value }));
@@ -111,51 +105,7 @@ export default function Settings({ shop, zohoConnection, host }) {
         setTaxSettings((prev) => ({ ...prev, tax_mappings: updated }));
     };
 
-    const savePaymentSettings = async () => {
-        setSavingSettings(true);
-        setNotification(null);
-        try {
-            const token = await window.shopify?.idToken();
-            const csrfToken =
-                document
-                    .querySelector('meta[name="csrf-token"]')
-                    ?.getAttribute("content") || "";
 
-            const response = await fetch("/zoho/settings/payment-gateways", {
-                method: "POST",
-                headers: {
-                    Authorization: token ? `Bearer ${token}` : "",
-                    "X-CSRF-TOKEN": csrfToken,
-                    Accept: "application/json",
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify({
-                    gateways: gatewaySettings,
-                }),
-            });
-
-            const data = await response.json();
-
-            if (response.ok && data.success) {
-                setNotification({
-                    type: "success",
-                    message: data.message || "Payment gateway settings saved successfully.",
-                });
-            } else {
-                setNotification({
-                    type: "error",
-                    message: data.message || "Failed to save payment gateway settings.",
-                });
-            }
-        } catch (error) {
-            setNotification({
-                type: "error",
-                message: "Network error saving payment settings.",
-            });
-        } finally {
-            setSavingSettings(false);
-        }
-    };
 
     const saveTaxSettingsApi = async () => {
         const mappings = taxSettings.tax_mappings || [];
@@ -292,7 +242,8 @@ export default function Settings({ shop, zohoConnection, host }) {
         <ZohoLayout
             title="Settings | Zoho Books Integration"
             shop={shopData}
-            zohoConnected={connected}
+            zohoConnected={connectionStatus === "connected"}
+            connectionStatus={connectionStatus}
             host={host}
             activePage="settings"
         >
@@ -337,7 +288,39 @@ export default function Settings({ shop, zohoConnection, host }) {
                         </div>
 
                         <div className="settings-body">
-                            {connected ? (
+                            {connectionStatus === "loading" ? (
+                                <div style={{ padding: "16px", color: "#616a75", fontSize: "13px" }}>
+                                    <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "6px" }}>
+                                        <span style={{ fontSize: "14px" }}>⏳</span>
+                                        <strong>Checking Zoho Books connection...</strong>
+                                    </div>
+                                    <p style={{ margin: 0, fontSize: "12px", color: "#8c9196" }}>
+                                        Fetching connection parameters and organization status.
+                                    </p>
+                                </div>
+                            ) : connectionStatus === "error" ? (
+                                <div style={{ padding: "14px", backgroundColor: "#fff5f5", border: "1px solid #fed7d7", borderRadius: "6px", color: "#c53030", fontSize: "13px" }}>
+                                    <strong>Unable to load Zoho connection status.</strong>
+                                    <p style={{ margin: "4px 0 8px 0", fontSize: "12px" }}>
+                                        {loadError || "Please check your network connection and try again."}
+                                    </p>
+                                    <button
+                                        type="button"
+                                        onClick={loadData}
+                                        style={{
+                                            padding: "4px 12px",
+                                            borderRadius: "4px",
+                                            border: "1px solid #c9cccf",
+                                            backgroundColor: "#ffffff",
+                                            fontSize: "12px",
+                                            fontWeight: 600,
+                                            cursor: "pointer",
+                                        }}
+                                    >
+                                        Retry
+                                    </button>
+                                </div>
+                            ) : connectionStatus === "connected" && zohoConn ? (
                                 <>
                                     <div className="setting-row">
                                         <div>
@@ -402,126 +385,7 @@ export default function Settings({ shop, zohoConnection, host }) {
                         </div>
                     </section>
 
-                    {/* PAYMENT CONFIGURATION CARD */}
 
-                    <section className="settings-card">
-                        <div className="settings-card-header">
-                            <div>
-                                <h2>Payment Configuration</h2>
-
-                                <p>
-                                    Map Shopify payment gateways to Zoho payment modes and deposit accounts.
-                                </p>
-                            </div>
-
-                            <div className="settings-card-icon">💳</div>
-                        </div>
-
-                        <div className="settings-body">
-                            {gatewaySettings.length === 0 ? (
-                                <div style={{ color: "#616a75", fontSize: "13px" }}>
-                                    Loading gateway settings...
-                                </div>
-                            ) : (
-                                <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-                                    {gatewaySettings.map((gw, idx) => (
-                                        <div
-                                            key={gw.shopify_gateway}
-                                            style={{
-                                                display: "grid",
-                                                gridTemplateColumns: "1.2fr 1fr 1fr",
-                                                gap: "12px",
-                                                alignItems: "center",
-                                                padding: "12px",
-                                                backgroundColor: "#f8f9fa",
-                                                borderRadius: "8px",
-                                                border: "1px solid #e1e3e5",
-                                            }}
-                                        >
-                                            <div>
-                                                <div style={{ fontWeight: 600, fontSize: "13px", color: "#1a1d20" }}>
-                                                    {gw.gateway_label || gw.shopify_gateway}
-                                                </div>
-                                                <div style={{ fontSize: "11px", color: "#616a75", fontFamily: "monospace" }}>
-                                                    {gw.shopify_gateway}
-                                                </div>
-                                            </div>
-
-                                            <div>
-                                                <label style={{ display: "block", fontSize: "11px", fontWeight: 600, color: "#616a75", marginBottom: "4px" }}>
-                                                    Zoho Payment Mode
-                                                </label>
-                                                <select
-                                                    value={gw.payment_mode || "creditcard"}
-                                                    onChange={(e) => handleGatewayChange(idx, "payment_mode", e.target.value)}
-                                                    style={{
-                                                        width: "100%",
-                                                        padding: "6px 10px",
-                                                        borderRadius: "6px",
-                                                        border: "1px solid #c9cccf",
-                                                        fontSize: "12px",
-                                                        backgroundColor: "#ffffff",
-                                                    }}
-                                                >
-                                                    {ZOHO_PAYMENT_MODES.map((mode) => (
-                                                        <option key={mode.value} value={mode.value}>
-                                                            {mode.label}
-                                                        </option>
-                                                    ))}
-                                                </select>
-                                            </div>
-
-                                            <div>
-                                                <label style={{ display: "block", fontSize: "11px", fontWeight: 600, color: "#616a75", marginBottom: "4px" }}>
-                                                    Zoho Account
-                                                </label>
-                                                <select
-                                                    value={gw.account_id || ""}
-                                                    onChange={(e) => handleGatewayChange(idx, "account_id", e.target.value)}
-                                                    style={{
-                                                        width: "100%",
-                                                        padding: "6px 10px",
-                                                        borderRadius: "6px",
-                                                        border: "1px solid #c9cccf",
-                                                        fontSize: "12px",
-                                                        backgroundColor: "#ffffff",
-                                                    }}
-                                                >
-                                                    <option value="">Default (Unassigned)</option>
-                                                    {zohoAccounts.map((acc) => (
-                                                        <option key={acc.account_id} value={acc.account_id}>
-                                                            {acc.account_name} ({acc.account_type})
-                                                        </option>
-                                                    ))}
-                                                </select>
-                                            </div>
-                                        </div>
-                                    ))}
-
-                                    <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "8px" }}>
-                                        <button
-                                            type="button"
-                                            className="primary-btn"
-                                            onClick={savePaymentSettings}
-                                            disabled={savingSettings}
-                                            style={{
-                                                padding: "8px 16px",
-                                                borderRadius: "6px",
-                                                border: "1px solid #005bd3",
-                                                backgroundColor: "#005bd3",
-                                                color: "#ffffff",
-                                                fontSize: "13px",
-                                                fontWeight: 600,
-                                                cursor: savingSettings ? "wait" : "pointer",
-                                            }}
-                                        >
-                                            {savingSettings ? "Saving Settings..." : "Save Payment Mappings"}
-                                        </button>
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-                    </section>
 
                     {/* TAX CONFIGURATION CARD */}
 
@@ -824,7 +688,15 @@ export default function Settings({ shop, zohoConnection, host }) {
                         </div>
 
                         <div className="settings-body">
-                            {connected ? (
+                            {connectionStatus === "loading" ? (
+                                <div style={{ padding: "12px", color: "#616a75", fontSize: "12px" }}>
+                                    Loading connection management options...
+                                </div>
+                            ) : connectionStatus === "error" ? (
+                                <div style={{ padding: "12px", color: "#c53030", fontSize: "12px" }}>
+                                    Actions unavailable during connection error.
+                                </div>
+                            ) : connectionStatus === "connected" ? (
                                 <div className="management-block">
                                     <div>
                                         <div className="setting-label">

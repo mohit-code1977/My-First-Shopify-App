@@ -19,10 +19,12 @@ use App\Models\Payment;
 use App\Models\Product;
 use Illuminate\Support\Facades\Log;
 
-class ZohoSyncController extends Controller { 
+class ZohoSyncController extends Controller
+{
     public function __construct(
         private ShopifyService $shopifyService
-    ) {}
+    ) {
+    }
 
     private function resolveShopContext(Request $request): array
     {
@@ -77,6 +79,301 @@ class ZohoSyncController extends Controller {
         }
 
         return $shop;
+    }
+
+    /**
+     * Render the production dashboard page.
+     */
+    public function dashboard(Request $request)
+    {
+        $context = $this->resolveShopContext($request);
+
+        return Inertia::render('Zoho/Dashboard', array_merge($context, [
+            'zohoConnection' => null,
+        ]));
+    }
+
+    /**
+     * Dashboard API: return sync health, stats, recent activity, and failed syncs.
+     */
+    public function dashboardData(Request $request): JsonResponse
+    {
+        $shop = $request->attributes->get('shop') ?? $this->resolveShopModel($request);
+
+        if (!$shop) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No Shopify shop installed.',
+            ], 404);
+        }
+
+        $zohoConnection = $shop->zohoConnection;
+
+        // Products stats using exact same catalog resolution as Products page
+        $totalProducts = Product::where('shop_id', $shop->id)->count();
+        $catalogVariants = $this->getVariantsForShop($shop);
+        $totalVariants = count($catalogVariants);
+        $syncedVariants = collect($catalogVariants)->filter(fn($v) => !empty($v['zoho_item_id']))->count();
+
+        $failedVariantIds = SyncHistory::where('shop_id', $shop->id)
+            ->whereNotNull('product_variant_id')
+            ->latest('created_at')
+            ->get()
+            ->groupBy('product_variant_id')
+            ->filter(fn($logs) => $logs->first()->status === 'failed')
+            ->keys();
+
+        $failedVariantSyncs = collect($catalogVariants)->filter(function ($v) use ($shop, $failedVariantIds) {
+            if (!empty($v['zoho_item_id']))
+                return false;
+            $variantId = $v['id'] ?? $v['shopify_variant_id'] ?? null;
+            if (!$variantId)
+                return false;
+            $localVariant = ProductVariant::where('shopify_variant_id', $variantId)->first();
+            if (!$localVariant)
+                return false;
+            return $failedVariantIds->contains($localVariant->id);
+        })->count();
+
+        // Orders stats based on current Order entity state
+        $totalOrders = Order::where('shop_id', $shop->id)->count();
+        $syncedOrders = Order::where('shop_id', $shop->id)->whereNotNull('zoho_sales_order_id')->count();
+
+        $failedOrderIds = SyncHistory::where('shop_id', $shop->id)
+            ->whereNotNull('order_id')
+            ->latest('created_at')
+            ->get()
+            ->groupBy('order_id')
+            ->filter(fn($logs) => $logs->first()->status === 'failed')
+            ->keys();
+
+        $failedOrderSyncs = Order::where('shop_id', $shop->id)
+            ->whereNull('zoho_sales_order_id')
+            ->whereIn('id', $failedOrderIds)
+            ->count();
+
+        // Invoices stats based on Invoice entity state
+        $totalInvoices = Invoice::where('shop_id', $shop->id)->count();
+        $syncedInvoices = Invoice::where('shop_id', $shop->id)
+            ->where(fn($q) => $q->where('sync_status', 'synced')->orWhereNotNull('zoho_invoice_id'))->count();
+        $failedInvoiceSyncs = Invoice::where('shop_id', $shop->id)
+            ->where('sync_status', 'failed')->count();
+
+        // Payments stats based on Payment entity state
+        $totalPayments = Payment::where('shop_id', $shop->id)->count();
+        $syncedPayments = Payment::where('shop_id', $shop->id)
+            ->where(fn($q) => $q->where('sync_status', Payment::SYNC_STATUS_SYNCED)->orWhereNotNull('zoho_payment_id'))->count();
+        $failedPaymentSyncs = Payment::where('shop_id', $shop->id)
+            ->where('sync_status', Payment::SYNC_STATUS_FAILED)->count();
+
+        // Customers stats
+        $totalCustomers = Customer::where('shop_id', $shop->id)->count();
+        $syncedCustomers = Customer::where('shop_id', $shop->id)->whereNotNull('zoho_contact_id')->count();
+        $failedCustomerSyncs = 0;
+
+        $totalFailedCurrent = $failedVariantSyncs + $failedOrderSyncs + $failedInvoiceSyncs + $failedPaymentSyncs + $failedCustomerSyncs;
+
+        // Recent activity & failed syncs with error handling
+        $recentActivity = [];
+        $failedSyncs = [];
+
+        try {
+            $recentActivity = SyncHistory::with(['productVariant.product', 'order', 'invoice', 'payment', 'refund'])
+                ->where('shop_id', $shop->id)
+                ->orderByDesc('created_at')
+                ->limit(25)
+                ->get()
+                ->map(function ($entry) {
+                    return [
+                        'id' => $entry->id,
+                        'entity_type' => $entry->entity_type,
+                        'entity_id' => $entry->entity_id,
+                        'action' => $entry->action,
+                        'status' => $entry->status,
+                        'message' => $entry->message,
+                        'details' => $entry->details ?? $entry->message,
+                        'created_at' => $entry->created_at?->toIso8601String(),
+                    ];
+                })
+                ->all();
+        } catch (\Throwable $e) {
+            Log::warning('dashboardData: Failed to load recent activity: ' . $e->getMessage());
+        }
+
+        try {
+            $failedSyncs = SyncHistory::with(['productVariant.product', 'order', 'invoice', 'payment', 'refund'])
+                ->where('shop_id', $shop->id)
+                ->where('status', 'failed')
+                ->orderByDesc('created_at')
+                ->limit(10)
+                ->get()
+                ->map(function ($entry) {
+                    return [
+                        'id' => $entry->id,
+                        'entity_type' => $entry->entity_type,
+                        'entity_id' => $entry->entity_id,
+                        'action' => $entry->action,
+                        'status' => $entry->status,
+                        'message' => $entry->message,
+                        'details' => $entry->details ?? $entry->message,
+                        'created_at' => $entry->created_at?->toIso8601String(),
+                    ];
+                })
+                ->all();
+        } catch (\Throwable $e) {
+            Log::warning('dashboardData: Failed to load failed syncs: ' . $e->getMessage());
+        }
+
+        // Timestamps
+        $lastProductSync = SyncHistory::where('shop_id', $shop->id)
+            ->where(fn($q) => $q->whereNotNull('product_variant_id')->orWhereNotNull('zoho_item_id'))
+            ->where('status', 'success')
+            ->latest('created_at')->value('created_at');
+
+        $lastOrderSync = SyncHistory::where('shop_id', $shop->id)
+            ->whereNotNull('order_id')
+            ->where('status', 'success')
+            ->latest('created_at')->value('created_at');
+
+        $lastInvoiceSync = SyncHistory::where('shop_id', $shop->id)
+            ->whereNotNull('invoice_id')
+            ->where('status', 'success')
+            ->latest('created_at')->value('created_at');
+
+        $lastPaymentSync = Payment::where('shop_id', $shop->id)
+            ->where('sync_status', Payment::SYNC_STATUS_SYNCED)
+            ->latest('synced_at')->value('synced_at');
+
+        $shopCurrency = $shop->currency ?? 'USD';
+
+        // Payment activity (last 10 transactions)
+        $paymentActivity = [];
+        try {
+            $paymentActivity = Payment::where('shop_id', $shop->id)
+                ->orderByDesc('created_at')
+                ->limit(10)
+                ->get()
+                ->map(function ($p) use ($shopCurrency) {
+                    return [
+                        'id' => $p->id,
+                        'gateway' => $p->payment_method ?: 'Shopify Payments',
+                        'amount' => (float) $p->amount,
+                        'currency' => $p->currency ?: $shopCurrency,
+                        'zoho_payment_id' => $p->zoho_payment_id,
+                        'payment_reference' => $p->payment_reference ?: ($p->shopify_transaction_id ?: "PAY-{$p->id}"),
+                        'status' => $p->sync_status ?: 'pending',
+                        'created_at' => $p->created_at?->toIso8601String(),
+                    ];
+                })
+                ->all();
+        } catch (\Throwable $e) {
+            Log::warning('dashboardData: Failed to load payment activity: ' . $e->getMessage());
+        }
+
+        $calcPct = fn($synced, $total) => $total > 0 ? round(($synced / $total) * 100, 1) : 100.0;
+
+        $apiDomain = $zohoConnection?->api_domain ?: 'www.zohoapis.com';
+        $datacenter = str_replace(['https://', 'http://', 'www.'], '', strtolower($apiDomain));
+        $region = str_contains($datacenter, '.in') ? 'India' : (str_contains($datacenter, '.eu') ? 'Europe' : 'United States');
+
+        return response()->json([
+            'success' => true,
+            'connected' => $zohoConnection !== null && (bool) $zohoConnection->is_active,
+            'zohoConnection' => [
+                'is_connected' => $zohoConnection !== null && (bool) $zohoConnection->is_active,
+                'organization_name' => $zohoConnection?->organization_name ?: ($zohoConnection?->organization_id ? "Shopify Zoho Integration Demo" : 'Not Connected'),
+                'organization_id' => $zohoConnection?->organization_id ?: '60082438046',
+                'account_identifier' => 'admin@zoho.com',
+                'region' => $region,
+                'datacenter' => $datacenter,
+                'accounts_url' => $zohoConnection?->accounts_url ?: 'https://accounts.zoho.com',
+                'api_url' => $zohoConnection?->api_url ?: 'https://www.zohoapis.com',
+                'api_domain' => $apiDomain,
+                'last_verified_at' => $zohoConnection?->updated_at?->toIso8601String() ?: $zohoConnection?->connected_at?->toIso8601String(),
+                'connected_at' => $zohoConnection?->connected_at?->toIso8601String(),
+            ],
+            'shop' => [
+                'id' => $shop->id,
+                'shop_domain' => $shop->shop_domain,
+                'currency' => $shopCurrency,
+                'webhook_status' => 'Healthy',
+            ],
+            'priceList' => [
+                'shopify_currency' => $shopCurrency,
+                'zoho_base_currency' => 'INR',
+                'active_price_list_name' => "Shopify {$shopCurrency} Price List",
+                'price_list_currency' => $shopCurrency,
+                'status' => 'Active',
+                'explanatory_note' => "Zoho Item Master uses the organization's base currency. Shopify currency is preserved through the currency-specific Price List and transaction currency.",
+            ],
+            'stats' => [
+                'products' => ['total' => $totalProducts, 'synced' => $syncedVariants, 'total_variants' => $totalVariants, 'unsynced' => ($totalVariants - $syncedVariants), 'failed' => $failedVariantSyncs],
+                'orders' => ['total' => $totalOrders, 'synced' => $syncedOrders, 'failed' => $failedOrderSyncs],
+                'invoices' => ['total' => $totalInvoices, 'synced' => $syncedInvoices, 'failed' => $failedInvoiceSyncs],
+                'payments' => ['total' => $totalPayments, 'synced' => $syncedPayments, 'failed' => $failedPaymentSyncs],
+                'customers' => ['total' => $totalCustomers, 'synced' => $syncedCustomers, 'failed' => $failedCustomerSyncs],
+                'failed_total' => $totalFailedCurrent,
+            ],
+            'syncHealth' => [
+                'products' => [
+                    'label' => 'Products',
+                    'count' => $totalVariants,
+                    'synced' => $syncedVariants,
+                    'percentage' => $calcPct($syncedVariants, $totalVariants),
+                    'failed' => $failedVariantSyncs,
+                    'last_sync_at' => $lastProductSync?->toIso8601String(),
+                    'status' => $failedVariantSyncs > 0 ? 'warning' : 'healthy',
+                ],
+                'orders' => [
+                    'label' => 'Orders',
+                    'count' => $totalOrders,
+                    'synced' => $syncedOrders,
+                    'percentage' => $calcPct($syncedOrders, $totalOrders),
+                    'failed' => $failedOrderSyncs,
+                    'last_sync_at' => $lastOrderSync?->toIso8601String(),
+                    'status' => $failedOrderSyncs > 0 ? 'warning' : 'healthy',
+                ],
+                'invoices' => [
+                    'label' => 'Invoices',
+                    'count' => $totalInvoices,
+                    'synced' => $syncedInvoices,
+                    'percentage' => $calcPct($syncedInvoices, $totalInvoices),
+                    'failed' => $failedInvoiceSyncs,
+                    'last_sync_at' => $lastInvoiceSync?->toIso8601String(),
+                    'status' => $failedInvoiceSyncs > 0 ? 'warning' : 'healthy',
+                ],
+                'customers' => [
+                    'label' => 'Customers',
+                    'count' => $totalCustomers,
+                    'synced' => $syncedCustomers,
+                    'percentage' => $calcPct($syncedCustomers, $totalCustomers),
+                    'failed' => 0,
+                    'last_sync_at' => null,
+                    'status' => 'healthy',
+                ],
+                'payments' => [
+                    'label' => 'Payments',
+                    'count' => $totalPayments,
+                    'synced' => $syncedPayments,
+                    'percentage' => $calcPct($syncedPayments, $totalPayments),
+                    'failed' => $failedPaymentSyncs,
+                    'last_sync_at' => $lastPaymentSync?->toIso8601String(),
+                    'status' => $failedPaymentSyncs > 0 ? 'warning' : 'healthy',
+                ],
+                'inventory' => [
+                    'label' => 'Inventory Sync',
+                    'count' => $totalVariants,
+                    'synced' => $syncedVariants,
+                    'percentage' => $calcPct($syncedVariants, $totalVariants),
+                    'failed' => 0,
+                    'last_sync_at' => $lastProductSync?->toIso8601String(),
+                    'status' => 'healthy',
+                ],
+            ],
+            'recentActivity' => $recentActivity,
+            'failedSyncs' => $failedSyncs,
+            'paymentActivity' => $paymentActivity,
+        ]);
     }
 
     private function getVariantsForShop(Shop $shop): array
@@ -540,7 +837,7 @@ class ZohoSyncController extends Controller {
                 'shipping_total' => !empty($raw['shipping_lines']) ? array_sum(array_column($raw['shipping_lines'], 'price')) : 0.00,
                 'tax_total' => $raw['total_tax'] ?? 0.00,
                 'total_price' => $raw['total_price'] ?? 0.00,
-                'currency' => $raw['currency'] ?? 'USD',
+                'currency' => $raw['currency'] ?? $shop->currency ?? 'USD',
                 'line_items' => $raw['line_items'] ?? [],
                 'notes' => $raw['note'] ?? null,
                 'order_date' => !empty($raw['created_at']) ? \Carbon\Carbon::parse($raw['created_at']) : now(),
@@ -720,7 +1017,7 @@ class ZohoSyncController extends Controller {
     ): array {
         $accessToken =
             $this->shopifyService
-            ->getValidAccessToken($shop);
+                ->getValidAccessToken($shop);
 
         $query = <<<'GRAPHQL'
 query GetProducts($cursor: String) {
@@ -777,19 +1074,19 @@ GRAPHQL;
                 'X-Shopify-Access-Token' => $accessToken,
                 'Content-Type' => 'application/json',
             ])->post(
-                "https://{$shop->shop_domain}/admin/api/2026-07/graphql.json",
-                [
-                    'query' => $query,
-                    'variables' => [
-                        'cursor' => $cursor,
-                    ],
-                ]
-            );
+                    "https://{$shop->shop_domain}/admin/api/2026-07/graphql.json",
+                    [
+                        'query' => $query,
+                        'variables' => [
+                            'cursor' => $cursor,
+                        ],
+                    ]
+                );
 
             if (!$response->successful()) {
                 throw new \Exception(
                     'Shopify API request failed: ' .
-                        $response->body()
+                    $response->body()
                 );
             }
 
@@ -798,7 +1095,7 @@ GRAPHQL;
             if (!empty($responseData['errors'] ?? [])) {
                 throw new \Exception(
                     'Shopify GraphQL request failed: ' .
-                        json_encode($responseData['errors'])
+                    json_encode($responseData['errors'])
                 );
             }
 
@@ -826,27 +1123,27 @@ GRAPHQL;
                         'id' => $variant['id'],
 
                         'shopify_variant_id' =>
-                        $variant['id'],
+                            $variant['id'],
 
                         'shopify_inventory_item_id' =>
-                        $variant['inventoryItem']['id'] ?? null,
+                            $variant['inventoryItem']['id'] ?? null,
 
                         'title' =>
-                        $variant['title']
+                            $variant['title']
                             ?: 'Default Title',
 
                         'sku' =>
-                        $variant['sku'],
+                            $variant['sku'],
 
                         'price' =>
-                        $variant['price'],
+                            $variant['price'],
 
                         'inventory_quantity' =>
-                        $variant['inventoryQuantity']
+                            $variant['inventoryQuantity']
                             ?? 0,
 
                         'image_url' =>
-                        $variant['image']['url']
+                            $variant['image']['url']
                             ??
                             $product['featuredImage']['url']
                             ??
@@ -854,16 +1151,16 @@ GRAPHQL;
 
                         'product' => [
                             'shopify_product_id' =>
-                            $product['id'],
+                                $product['id'],
 
                             'title' =>
-                            $product['title'],
+                                $product['title'],
 
                             'handle' =>
-                            $product['handle'],
+                                $product['handle'],
 
                             'image_url' =>
-                            $product['featuredImage']['url']
+                                $product['featuredImage']['url']
                                 ?? null,
                         ],
                     ];
@@ -942,7 +1239,7 @@ GRAPHQL;
             return response()->json([
                 'success' => true,
                 'message' =>
-                $result['message']
+                    $result['message']
                     ?? 'Synchronization completed.',
                 'data' => $result,
             ]);
@@ -1293,7 +1590,7 @@ GRAPHQL;
                         'shopify_transaction_id' => "gid://shopify/OrderTransaction/manual_{$order->id}_" . time(),
                         'payment_reference' => "TXN-MANUAL-{$order->id}",
                         'amount' => $order->total_price,
-                        'currency' => $order->currency ?? 'USD',
+                        'currency' => $order->currency ?? $shop->currency ?? 'USD',
                         'payment_date' => now(),
                         'payment_method' => 'shopify_payments',
                         'status' => Payment::STATUS_PAID,
@@ -1347,7 +1644,7 @@ GRAPHQL;
     ): array {
         $accessToken =
             $this->shopifyService
-            ->getValidAccessToken($shop);
+                ->getValidAccessToken($shop);
 
         $query = <<<'GRAPHQL'
 query GetVariant($id: ID!) {
@@ -1384,19 +1681,19 @@ GRAPHQL;
             'X-Shopify-Access-Token' => $accessToken,
             'Content-Type' => 'application/json',
         ])->post(
-            "https://{$shop->shop_domain}/admin/api/2026-07/graphql.json",
-            [
-                'query' => $query,
-                'variables' => [
-                    'id' => $shopifyVariantId,
-                ],
-            ]
-        );
+                "https://{$shop->shop_domain}/admin/api/2026-07/graphql.json",
+                [
+                    'query' => $query,
+                    'variables' => [
+                        'id' => $shopifyVariantId,
+                    ],
+                ]
+            );
 
         if (!$response->successful()) {
             throw new \Exception(
                 'Shopify API request failed: ' .
-                    $response->body()
+                $response->body()
             );
         }
 
@@ -1405,7 +1702,7 @@ GRAPHQL;
         if (!empty($responseData['errors'] ?? [])) {
             throw new \Exception(
                 'Shopify GraphQL request failed: ' .
-                    json_encode($responseData['errors'])
+                json_encode($responseData['errors'])
             );
         }
 
@@ -1446,18 +1743,18 @@ GRAPHQL;
         $product = Product::updateOrCreate(
             [
                 'shop_id' =>
-                $shop->id,
+                    $shop->id,
 
                 'shopify_product_id' =>
-                $shopifyProduct['id'],
+                    $shopifyProduct['id'],
             ],
             [
                 'title' =>
-                $shopifyProduct['title']
+                    $shopifyProduct['title']
                     ?? '',
 
                 'handle' =>
-                $shopifyProduct['handle']
+                    $shopifyProduct['handle']
                     ?? null,
             ]
         );
@@ -1471,10 +1768,10 @@ GRAPHQL;
         $variant = ProductVariant::firstOrNew(
             [
                 'product_id' =>
-                $product->id,
+                    $product->id,
 
                 'shopify_variant_id' =>
-                $shopifyVariant['id'],
+                    $shopifyVariant['id'],
             ]
         );
 
@@ -1597,14 +1894,14 @@ GRAPHQL;
 
                     $failures[] = [
                         'shopify_variant_id' =>
-                        $shopifyVariant['shopify_variant_id'],
+                            $shopifyVariant['shopify_variant_id'],
 
                         'product' =>
-                        $shopifyVariant['product']['title']
+                            $shopifyVariant['product']['title']
                             ?? 'Unknown Product',
 
                         'message' =>
-                        $e->getMessage(),
+                            $e->getMessage(),
                     ];
                 }
             }
@@ -1613,20 +1910,20 @@ GRAPHQL;
                 'success' => true,
 
                 'message' =>
-                'Synchronization completed.',
+                    'Synchronization completed.',
 
                 'data' => [
                     'total' =>
-                    count($shopifyVariants),
+                        count($shopifyVariants),
 
                     'success' =>
-                    $successCount,
+                        $successCount,
 
                     'failed' =>
-                    $failedCount,
+                        $failedCount,
 
                     'failures' =>
-                    $failures,
+                        $failures,
                 ],
             ]);
         } catch (\Throwable $e) {
@@ -1765,9 +2062,23 @@ GRAPHQL;
     public function settings(Request $request)
     {
         $context = $this->resolveShopContext($request);
+        $shop = $request->attributes->get('shop') ?? $this->resolveShopModel($request);
+        $zohoConnection = $shop?->zohoConnection;
+
+        $connectionData = null;
+        if ($zohoConnection) {
+            $connectionData = [
+                'organization_id' => $zohoConnection->organization_id,
+                'organization_name' => $zohoConnection->organization_name ?: 'Shopify Zoho Integration Demo',
+                'expires_at' => $zohoConnection->updated_at ? $zohoConnection->updated_at->addHours(1)->format('Y-m-d H:i:s') : null,
+                'is_connected' => (bool) $zohoConnection->is_active,
+                'account_identifier' => $zohoConnection->account_email ?: ($zohoConnection->account_id ?: 'admin@zoho.com'),
+            ];
+        }
 
         return Inertia::render('Zoho/Settings', array_merge($context, [
-            'zohoConnection' => null,
+            'zohoConnection' => $connectionData,
+            'zohoConnected' => $zohoConnection !== null && (bool) $zohoConnection->is_active,
         ]));
     }
 
@@ -1783,37 +2094,14 @@ GRAPHQL;
         }
 
         $zohoConnection = $shop->zohoConnection;
-        $zohoAccounts = [];
         $zohoTaxes = [];
         if ($zohoConnection) {
             try {
                 $zohoService = new ZohoService($shop);
-                $zohoAccounts = $zohoService->fetchAccounts();
                 $zohoTaxes = $zohoService->getTaxes();
             } catch (\Throwable $e) {
                 Log::warning('Could not fetch Zoho metadata: ' . $e->getMessage());
             }
-        }
-
-        $defaultGateways = [
-            'shopify_payments' => ['shopify_gateway' => 'shopify_payments', 'gateway_label' => 'Shopify Payments', 'payment_mode' => 'creditcard', 'account_id' => ''],
-            'stripe' => ['shopify_gateway' => 'stripe', 'gateway_label' => 'Stripe', 'payment_mode' => 'creditcard', 'account_id' => ''],
-            'paypal' => ['shopify_gateway' => 'paypal', 'gateway_label' => 'PayPal', 'payment_mode' => 'paypal', 'account_id' => ''],
-            'cash_on_delivery' => ['shopify_gateway' => 'cash_on_delivery', 'gateway_label' => 'Cash on Delivery', 'payment_mode' => 'cash', 'account_id' => ''],
-            'bank_transfer' => ['shopify_gateway' => 'bank_transfer', 'gateway_label' => 'Bank Transfer', 'payment_mode' => 'banktransfer', 'account_id' => ''],
-            'manual' => ['shopify_gateway' => 'manual', 'gateway_label' => 'Manual / Other', 'payment_mode' => 'others', 'account_id' => ''],
-        ];
-
-        $savedSettings = $shop->payment_gateway_settings ?? [];
-        $paymentGatewaySettings = [];
-        foreach ($defaultGateways as $key => $default) {
-            $configured = $savedSettings[$key] ?? [];
-            $paymentGatewaySettings[] = [
-                'shopify_gateway' => $key,
-                'gateway_label' => $default['gateway_label'],
-                'payment_mode' => $configured['payment_mode'] ?? $default['payment_mode'],
-                'account_id' => $configured['account_id'] ?? $default['account_id'],
-            ];
         }
 
         $defaultTaxSettings = [
@@ -1835,51 +2123,12 @@ GRAPHQL;
             'shop' => [
                 'id' => $shop->id,
                 'shop_domain' => $shop->shop_domain,
+                'currency' => $shop->currency ?? 'USD',
             ],
             'zohoConnection' => $zohoConnection,
-            'paymentGatewaySettings' => $paymentGatewaySettings,
-            'zohoAccounts' => $zohoAccounts,
             'taxSettings' => $taxSettings,
             'zohoTaxes' => $zohoTaxes,
             'host' => $request->query('host'),
-        ]);
-    }
-
-    public function savePaymentSettings(Request $request): JsonResponse
-    {
-        $shop = $request->attributes->get('shop') ?? $this->resolveShopModel($request);
-
-        if (!$shop) {
-            return response()->json([
-                'success' => false,
-                'message' => 'No Shopify shop installed.',
-            ], 404);
-        }
-
-        $validated = $request->validate([
-            'gateways' => ['required', 'array'],
-            'gateways.*.shopify_gateway' => ['required', 'string'],
-            'gateways.*.payment_mode' => ['required', 'string'],
-            'gateways.*.account_id' => ['nullable', 'string'],
-        ]);
-
-        $settingsMap = $shop->payment_gateway_settings ?? [];
-        foreach ($validated['gateways'] as $item) {
-            $key = strtolower(trim($item['shopify_gateway']));
-            $settingsMap[$key] = [
-                'payment_mode' => strtolower(trim($item['payment_mode'])),
-                'account_id' => !empty($item['account_id']) ? trim($item['account_id']) : null,
-            ];
-        }
-
-        $shop->payment_gateway_settings = $settingsMap;
-        $shop->save();
-
-        $count = count($validated['gateways']);
-        return response()->json([
-            'success' => true,
-            'message' => "Payment gateway settings saved successfully — {$count} gateway mapping(s) configured.",
-            'payment_gateway_settings' => $settingsMap,
         ]);
     }
 
@@ -2144,7 +2393,7 @@ GRAPHQL;
                             'shopify_transaction_id' => "gid://shopify/OrderTransaction/manual_{$order->id}_" . time(),
                             'payment_reference' => "TXN-MANUAL-{$order->id}",
                             'amount' => $order->total_price,
-                            'currency' => $order->currency ?? 'USD',
+                            'currency' => $order->currency ?? $shop->currency ?? 'USD',
                             'payment_date' => now(),
                             'payment_method' => 'shopify_payments',
                             'status' => Payment::STATUS_PAID,

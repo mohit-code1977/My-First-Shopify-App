@@ -11,6 +11,7 @@ class Shop extends Model
         'access_token',
         'refresh_token',
         'scope',
+        'currency',
         'payment_gateway_settings',
         'tax_settings',
         'access_token_expires_at',

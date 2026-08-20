@@ -211,6 +211,52 @@ class ShopifyService
     }
 
     /**
+     * Fetch shop metadata (including base currencyCode) from Shopify and update local Shop model.
+     */
+    public function fetchShopDetails(Shop $shop): array
+    {
+        $accessToken = $this->getValidAccessToken($shop);
+
+        $query = <<<'GRAPHQL'
+query GetShopMetadata {
+    shop {
+        name
+        email
+        currencyCode
+        myshopifyDomain
+    }
+}
+GRAPHQL;
+
+        try {
+            $response = Http::withHeaders([
+                'X-Shopify-Access-Token' => $accessToken,
+                'Content-Type' => 'application/json',
+            ])->post("https://{$shop->shop_domain}/admin/api/2026-07/graphql.json", [
+                'query' => $query,
+            ]);
+
+            if (!$response->successful()) {
+                throw new \Exception("Shopify GraphQL error: " . $response->body());
+            }
+
+            $data = $response->json();
+            $shopData = $data['data']['shop'] ?? [];
+            if (!empty($shopData['currencyCode'])) {
+                $currency = strtoupper(trim($shopData['currencyCode']));
+                $shop->update(['currency' => $currency]);
+            }
+            return $shopData;
+        } catch (\Throwable $e) {
+            Log::warning("fetchShopDetails failed for shop {$shop->shop_domain}: " . $e->getMessage());
+            return [
+                'currencyCode' => $shop->currency ?? 'USD',
+                'myshopifyDomain' => $shop->shop_domain,
+            ];
+        }
+    }
+
+    /**
      * Register products/update webhook.
      */
     public function registerProductUpdateWebhook(Shop $shop): array
@@ -220,6 +266,19 @@ class ShopifyService
             'PRODUCTS_UPDATE',
             '/webhooks/products',
             'Product update'
+        );
+    }
+
+    /**
+     * Register products/delete webhook.
+     */
+    public function registerProductDeleteWebhook(Shop $shop): array
+    {
+        return $this->registerWebhookSubscription(
+            $shop,
+            'PRODUCTS_DELETE',
+            '/webhooks/products/delete',
+            'Product delete'
         );
     }
 
@@ -579,6 +638,86 @@ GRAPHQL;
         }
 
         return null;
+    }
+
+    /**
+     * Retrieve aggregate store-wide available inventory quantity across ALL active fulfillment locations.
+     */
+    public function fetchStorewideAvailableQuantity(Shop $shop, string $inventoryItemId): ?int
+    {
+        $accessToken = $this->getValidAccessToken($shop);
+
+        $formattedInventoryItemId = str_starts_with($inventoryItemId, 'gid://')
+            ? $inventoryItemId
+            : "gid://shopify/InventoryItem/{$inventoryItemId}";
+
+        $query = <<<'GRAPHQL'
+query GetStorewideInventoryQuantity($id: ID!) {
+    inventoryItem(id: $id) {
+        id
+        inventoryLevels(first: 50) {
+            nodes {
+                location {
+                    id
+                    isActive
+                }
+                quantities(names: ["available"]) {
+                    name
+                    quantity
+                }
+            }
+        }
+    }
+}
+GRAPHQL;
+
+        $response = Http::withHeaders([
+            'X-Shopify-Access-Token' => $accessToken,
+            'Content-Type' => 'application/json',
+        ])->post(
+            "https://{$shop->shop_domain}/admin/api/2026-07/graphql.json",
+            [
+                'query' => $query,
+                'variables' => [
+                    'id' => $formattedInventoryItemId,
+                ],
+            ]
+        );
+
+        if (!$response->successful()) {
+            Log::error("fetchStorewideAvailableQuantity: HTTP request failed: " . $response->body());
+            return null;
+        }
+
+        $data = $response->json();
+        if (!empty($data['errors'])) {
+            Log::error("fetchStorewideAvailableQuantity: GraphQL error: " . json_encode($data['errors']));
+            return null;
+        }
+
+        $nodes = $data['data']['inventoryItem']['inventoryLevels']['nodes'] ?? [];
+        if (empty($nodes)) {
+            return null;
+        }
+
+        $totalAvailable = 0;
+        $foundAvailable = false;
+
+        foreach ($nodes as $node) {
+            $isActive = $node['location']['isActive'] ?? true;
+            if (!$isActive) {
+                continue;
+            }
+
+            foreach ($node['quantities'] ?? [] as $q) {
+                if (($q['name'] ?? '') === 'available' && isset($q['quantity'])) {
+                    $totalAvailable += (int) $q['quantity'];
+                    $foundAvailable = true;
+                }
+            }
+        }
+
+        return $foundAvailable ? $totalAvailable : null;
     }
 
     /**
@@ -1382,6 +1521,7 @@ GRAPHQL;
     public function registerAllWebhooks(Shop $shop): array
     {
         $productResult = $this->registerProductUpdateWebhook($shop);
+        $productDeleteResult = $this->registerProductDeleteWebhook($shop);
         $inventoryResult = $this->registerInventoryLevelUpdateWebhook($shop);
         $customerResult = $this->registerCustomerUpdateWebhook($shop);
         $orderCreateResult = $this->registerOrderCreateWebhook($shop);
@@ -1391,6 +1531,7 @@ GRAPHQL;
 
         return [
             'success' => ($productResult['success'] ?? false)
+                && ($productDeleteResult['success'] ?? false)
                 && ($inventoryResult['success'] ?? false)
                 && ($customerResult['success'] ?? false)
                 && ($orderCreateResult['success'] ?? false)
@@ -1398,6 +1539,7 @@ GRAPHQL;
                 && ($txnResult['success'] ?? false)
                 && ($refundResult['success'] ?? false),
             'product' => $productResult,
+            'product_delete' => $productDeleteResult,
             'inventory' => $inventoryResult,
             'customer' => $customerResult,
             'order_create' => $orderCreateResult,

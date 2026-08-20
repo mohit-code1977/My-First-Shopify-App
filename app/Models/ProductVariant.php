@@ -13,12 +13,18 @@ class ProductVariant extends Model {
         'sku',
         'price',
         'inventory_quantity',
+        'last_synced_quantity',
+        'last_sync_source',
+        'inventory_sync_version',
         'zoho_item_id',
         'zoho_sync_hash',
         'zoho_synced_at',
     ];
 
     protected $casts = [
+        'inventory_quantity' => 'integer',
+        'last_synced_quantity' => 'integer',
+        'inventory_sync_version' => 'integer',
         'zoho_synced_at' => 'datetime',
     ];
 

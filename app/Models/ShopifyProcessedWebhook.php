@@ -9,5 +9,7 @@ class ShopifyProcessedWebhook extends Model {
         'webhook_id',
         'topic',
         'shop_domain',
+        'status',
     ];
+
 }

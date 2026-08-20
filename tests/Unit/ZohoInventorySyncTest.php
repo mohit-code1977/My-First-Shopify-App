@@ -510,10 +510,10 @@ class ZohoInventorySyncTest extends TestCase {
 
         $response->assertStatus(200);
         $response->assertJson([
-            'message' => 'Variant not found or unmapped for this inventory item.',
+            'message' => 'Inventory update deferred as pending for unmapped variant.',
             'summary' => [
                 'processed' => 0,
-                'skipped_unmapped' => 1,
+                'deferred_pending' => 1,
             ],
         ]);
     }

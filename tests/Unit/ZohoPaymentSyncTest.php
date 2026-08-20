@@ -244,10 +244,17 @@ class ZohoPaymentSyncTest extends TestCase
         });
     }
 
-    // 6. Unknown gateway fails
-    public function test_unknown_gateway_fails_without_zoho_post()
+    // 6. Unknown gateway resolves safely to 'others'
+    public function test_unknown_gateway_resolves_safely_to_others_payment_mode()
     {
-        Http::fake();
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/customerpayments*' => function (Request $request) {
+                if ($request->method() === 'GET') {
+                    return Http::response(['code' => 0, 'customerpayments' => []], 200);
+                }
+                return Http::response(['code' => 0, 'payment' => ['payment_id' => 'zoho_pay_unk_106']], 201);
+            },
+        ]);
 
         $payment = Payment::create([
             'shop_id' => $this->shop->id,
@@ -261,28 +268,26 @@ class ZohoPaymentSyncTest extends TestCase
             'payment_method' => 'unsupported_gateway_xyz',
         ]);
 
-        try {
-            $zohoService = new ZohoService($this->shop);
-            $zohoService->syncPayment($payment);
-            $this->fail("Expected exception was not thrown.");
-        } catch (\Throwable $e) {
-            $payment->refresh();
-            $this->assertEquals(Payment::SYNC_STATUS_FAILED, $payment->sync_status);
-            $this->assertStringContainsString("Unmapped payment gateway 'unsupported_gateway_xyz'", $payment->error_message);
-            Http::assertNothingSent();
-        }
+        $zohoService = new ZohoService($this->shop);
+        $res = $zohoService->syncPayment($payment);
+
+        $this->assertTrue($res['success']);
+        Http::assertSent(function (Request $request) {
+            return $request->method() === 'POST' && $request->data()['payment_mode'] === 'others';
+        });
     }
 
-    // 7. Missing required account ID fails
-    public function test_missing_required_account_id_fails()
+    // 7. Missing account ID defaults to null and syncs successfully
+    public function test_missing_account_id_defaults_to_null_and_syncs_successfully()
     {
-        config(['services.zoho.payment_gateways.custom_req' => [
-            'payment_mode' => 'banktransfer',
-            'account_id' => null,
-            'require_account_id' => true,
-        ]]);
-
-        Http::fake();
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/customerpayments*' => function (Request $request) {
+                if ($request->method() === 'GET') {
+                    return Http::response(['code' => 0, 'customerpayments' => []], 200);
+                }
+                return Http::response(['code' => 0, 'payment' => ['payment_id' => 'zoho_pay_no_acc_107']], 201);
+            },
+        ]);
 
         $payment = Payment::create([
             'shop_id' => $this->shop->id,
@@ -290,23 +295,21 @@ class ZohoPaymentSyncTest extends TestCase
             'invoice_id' => $this->invoice->id,
             'shopify_order_id' => $this->order->shopify_order_id,
             'shopify_transaction_id' => 'gid://shopify/OrderTransaction/107',
-            'payment_reference' => 'TXN-REQ-ACC-107',
+            'payment_reference' => 'TXN-NO-ACC-107',
             'amount' => 100.00,
             'currency' => 'USD',
-            'payment_method' => 'custom_req',
+            'payment_method' => 'stripe',
         ]);
 
-        try {
-            $zohoService = new ZohoService($this->shop);
-            $zohoService->syncPayment($payment);
-            $this->fail("Expected exception for missing account_id was not thrown.");
-        } catch (\Throwable $e) {
-            $payment->refresh();
-            $this->assertEquals(Payment::SYNC_STATUS_FAILED, $payment->sync_status);
-            $this->assertStringContainsString("Payment account ID is required", $payment->error_message);
-            Http::assertNothingSent();
-        }
+        $zohoService = new ZohoService($this->shop);
+        $res = $zohoService->syncPayment($payment);
+
+        $this->assertTrue($res['success']);
+        Http::assertSent(function (Request $request) {
+            return $request->method() === 'POST' && !array_key_exists('account_id', $request->data());
+        });
     }
+
 
     // 8. Correct invoice allocation
     public function test_correct_invoice_allocation_sent()
@@ -474,14 +477,9 @@ class ZohoPaymentSyncTest extends TestCase
         });
     }
 
-    // 13. Correct account_id sent
-    public function test_correct_account_id_sent_when_provided()
+    // 13. Default account_id behavior via PaymentResolverService
+    public function test_payment_resolver_omits_account_id_when_null_letting_zoho_use_default()
     {
-        config(['services.zoho.payment_gateways.bank_transfer' => [
-            'payment_mode' => 'banktransfer',
-            'account_id' => '9876543210001',
-        ]]);
-
         Http::fake([
             'https://www.zohoapis.com/books/v3/customerpayments*' => function (Request $request) {
                 if ($request->method() === 'GET') {
@@ -507,9 +505,10 @@ class ZohoPaymentSyncTest extends TestCase
         $zohoService->syncPayment($payment);
 
         Http::assertSent(function (Request $request) {
-            return $request->method() === 'POST' && $request->data()['account_id'] === '9876543210001';
+            return $request->method() === 'POST' && !array_key_exists('account_id', $request->data());
         });
     }
+
 
     // 14. Non-USD currency preserved
     public function test_non_usd_currency_preserved()
@@ -878,18 +877,8 @@ class ZohoPaymentSyncTest extends TestCase
         $this->assertEquals(19.29, (float) $postedPayload['invoices'][0]['amount_applied']);
     }
 
-    public function test_invalid_non_numeric_account_id_is_stripped_and_uses_default_deposit_account(): void
+    public function test_automatic_payment_resolver_omits_account_id_when_not_provided(): void
     {
-        // Set non-numeric string placeholder in shop settings
-        $this->shop->update([
-            'payment_gateway_settings' => [
-                'shopify_payments' => [
-                    'account_id' => 'primary_bank_account',
-                    'payment_mode' => 'creditcard',
-                ],
-            ],
-        ]);
-
         $postedPayload = null;
         Http::fake([
             'https://www.zohoapis.com/books/v3/customerpayments*' => function (Request $request) use (&$postedPayload) {
@@ -918,51 +907,10 @@ class ZohoPaymentSyncTest extends TestCase
 
         $this->assertTrue($result['success']);
         $this->assertNotNull($postedPayload);
-        // Assert non-numeric account_id is omitted from payload so Zoho defaults to Undeposited Funds / Petty Cash
+        // Assert account_id is omitted from payload so Zoho defaults to Undeposited Funds / Petty Cash
         $this->assertArrayNotHasKey('account_id', $postedPayload);
     }
 
-    public function test_valid_numeric_account_id_is_sent_to_zoho(): void
-    {
-        $this->shop->update([
-            'payment_gateway_settings' => [
-                'shopify_payments' => [
-                    'account_id' => '4081216000000000355',
-                    'payment_mode' => 'creditcard',
-                ],
-            ],
-        ]);
-
-        $postedPayload = null;
-        Http::fake([
-            'https://www.zohoapis.com/books/v3/customerpayments*' => function (Request $request) use (&$postedPayload) {
-                if ($request->method() === 'GET') {
-                    return Http::response(['code' => 0, 'customerpayments' => []], 200);
-                }
-                $postedPayload = $request->data();
-                return Http::response(['code' => 0, 'payment' => ['payment_id' => 'zoho_pay_valid_acc_id']], 201);
-            },
-        ]);
-
-        $payment = Payment::create([
-            'shop_id' => $this->shop->id,
-            'order_id' => $this->order->id,
-            'invoice_id' => $this->invoice->id,
-            'shopify_order_id' => $this->order->shopify_order_id,
-            'shopify_transaction_id' => 'gid://shopify/OrderTransaction/valid_acc_1',
-            'payment_reference' => 'TXN-VALID-ACC-1',
-            'amount' => 100.00,
-            'currency' => 'USD',
-            'payment_method' => 'shopify_payments',
-        ]);
-
-        $zohoService = new ZohoService($this->shop);
-        $result = $zohoService->syncPayment($payment);
-
-        $this->assertTrue($result['success']);
-        $this->assertNotNull($postedPayload);
-        $this->assertEquals('4081216000000000355', $postedPayload['account_id']);
-    }
 
     public function test_payment_sync_for_refunded_order_fails_with_clear_error(): void
     {

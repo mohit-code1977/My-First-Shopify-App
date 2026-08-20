@@ -37,4 +37,9 @@ class Customer extends Model
         $name = trim(($this->first_name ?? '') . ' ' . ($this->last_name ?? ''));
         return $name !== '' ? $name : ($this->email ?? 'Shopify Customer');
     }
+
+    public function syncHistories()
+    {
+        return $this->hasMany(SyncHistory::class);
+    }
 }

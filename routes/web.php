@@ -12,12 +12,15 @@ use App\Http\Controllers\ShopifyWebhookController;
 
 
 Route::get('/', function (Illuminate\Http\Request $request) {
-    return redirect()->route('zoho.products', $request->query());
+    return redirect()->route('zoho.dashboard', $request->query());
 });
 
 Route::get('/dashboard', function () {
     return Inertia::render('Dashboard');
 })->middleware(['auth', 'verified'])->name('dashboard');
+
+Route::get('/zoho/dashboard', [ZohoSyncController::class, 'dashboard'])
+    ->name('zoho.dashboard');
 
 
 Route::middleware('auth')->group(function () {
@@ -63,6 +66,7 @@ Route::middleware(['shopify.auth'])->group(function () {
     Route::get('/api/zoho/customers', [ZohoSyncController::class, 'customersData']);
     Route::get('/api/zoho/sync/history', [ZohoSyncController::class, 'historyData']);
     Route::get('/api/zoho/settings', [ZohoSyncController::class, 'settingsData']);
+    Route::get('/api/zoho/dashboard', [ZohoSyncController::class, 'dashboardData']);
 
     Route::get('/shopify/products', [ShopifyProductController::class, 'products']);
 
@@ -102,8 +106,7 @@ Route::middleware(['shopify.auth'])->group(function () {
     Route::post('/zoho/bulk-sync-refunds', [ZohoSyncController::class, 'bulkSyncRefunds'])
         ->name('zoho.bulk-sync-refunds');
 
-    Route::post('/zoho/settings/payment-gateways', [ZohoSyncController::class, 'savePaymentSettings'])
-        ->name('zoho.settings.payment-gateways');
+
 
     Route::post('/zoho/settings/tax', [ZohoSyncController::class, 'saveTaxSettings'])
         ->name('zoho.settings.tax');
@@ -116,6 +119,9 @@ use App\Http\Controllers\ZohoWebhookController;
 
 Route::post('/webhooks/products', [ShopifyWebhookController::class, 'productsUpdate'])
     ->name('shopify.webhooks.products');
+
+Route::post('/webhooks/products/delete', [ShopifyWebhookController::class, 'productsDelete'])
+    ->name('shopify.webhooks.products_delete');
 
 Route::post('/webhooks/inventory-levels', [ShopifyWebhookController::class, 'inventoryLevelsUpdate'])
     ->name('shopify.webhooks.inventory_levels');
