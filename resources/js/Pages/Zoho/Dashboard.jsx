@@ -365,7 +365,8 @@ export default function Dashboard({
                             <strong style={{ color: "#1a1d20" }}>
                                 {connection.datacenter || "zohoapis.in"}
                             </strong>
-                            {" | "}
+                        </div>
+                        <div>
                             Currency:{" "}
                             <strong style={{ color: "#1a1d20" }}>
                                 {priceList.shopify_currency || shopInfo.currency || "USD"}

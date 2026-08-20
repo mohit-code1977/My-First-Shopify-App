@@ -13,7 +13,8 @@ use App\Models\SyncHistory;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
-class ZohoService {
+class ZohoService
+{
     private const SHOPIFY_VARIANT_FIELD_API_NAME = 'cf_shopify_variant_id';
 
     public const CAPABILITY_ZOHO_INVENTORY = 'zoho_inventory';
@@ -1282,9 +1283,9 @@ class ZohoService {
             // Detect via content-type header or content inspection.
             $contentType = strtolower(trim($imageResponse->header('Content-Type') ?? ''));
             $isSvg = str_contains($contentType, 'image/svg') ||
-                     str_starts_with(trim($imageBytes), '<?xml') ||
-                     str_starts_with(trim($imageBytes), '<svg') ||
-                     str_contains(strtolower(substr($imageBytes, 0, 500)), '<svg');
+                str_starts_with(trim($imageBytes), '<?xml') ||
+                str_starts_with(trim($imageBytes), '<svg') ||
+                str_contains(strtolower(substr($imageBytes, 0, 500)), '<svg');
 
             if ($isSvg) {
                 Log::info("uploadItemImage: SVG image detected for Zoho item {$zohoItemId}. Attempting rasterization.");
@@ -1330,12 +1331,12 @@ class ZohoService {
             $response = Http::withHeaders([
                 'Authorization' => 'Zoho-oauthtoken ' . $token,
             ])->attach(
-                'image',
-                $imageBytes,
-                $filename
-            )->post(
-                $apiUrl . '/books/v3/items/' . $zohoItemId . '/image?organization_id=' . $connection->organization_id
-            );
+                    'image',
+                    $imageBytes,
+                    $filename
+                )->post(
+                    $apiUrl . '/books/v3/items/' . $zohoItemId . '/image?organization_id=' . $connection->organization_id
+                );
 
             if (!$response->successful()) {
                 Log::warning("Zoho image upload failed for item {$zohoItemId}: " . $response->body());
@@ -1444,7 +1445,8 @@ class ZohoService {
 
 
 
-    public function syncItem(ProductVariant $variant): array {
+    public function syncItem(ProductVariant $variant): array
+    {
         /*
         |--------------------------------------------------------------------------
         | 1. Reconcile local mapping with Zoho
@@ -3424,7 +3426,7 @@ class ZohoService {
 
         return [
             'payment_mode' => $resolved['payment_mode'],
-            'account_id'   => $resolved['account_id'],
+            'account_id' => $resolved['account_id'],
         ];
     }
 
@@ -3695,7 +3697,7 @@ class ZohoService {
                 'synced_at' => now(),
             ]);
 
-                $payRef = $zohoPaymentId ? "Payment #{$zohoPaymentId}" : ($payment->payment_reference ?: "Payment #{$payment->id}");
+            $payRef = $zohoPaymentId ? "Payment #{$zohoPaymentId}" : ($payment->payment_reference ?: "Payment #{$payment->id}");
             $orderRef = $order->order_number ? "#{$order->order_number}" : "Order #{$order->id}";
             $invRef = $invoice->invoice_number ?: ($invoice->zoho_invoice_id ? "INV-{$invoice->zoho_invoice_id}" : '');
             $msgAction = $created ? 'created' : 'reconciled';
@@ -4016,8 +4018,8 @@ class ZohoService {
                         : "gid://shopify/ProductVariant/{$variantId}";
 
                     $variant = ProductVariant::whereHas('product', function ($q) {
-                            $q->where('shop_id', $this->shop->id);
-                        })
+                        $q->where('shop_id', $this->shop->id);
+                    })
                         ->where(function ($q) use ($numericVariantId, $gidVariantId) {
                             $q->where('shopify_variant_id', $numericVariantId)
                                 ->orWhere('shopify_variant_id', $gidVariantId);
