@@ -239,6 +239,7 @@ class ZohoDatacenterTest extends TestCase
             'code' => 'code_xyz',
             'state' => $rawState,
         ]);
+        $request->headers->set('Accept', 'application/json');
 
         $response = $controller->callback($request);
 
@@ -268,6 +269,7 @@ class ZohoDatacenterTest extends TestCase
             'state' => $rawState,
             'accounts-server' => 'https://attacker-controlled-server.com',
         ]);
+        $request->headers->set('Accept', 'application/json');
 
         $response = $controller->callback($request);
 

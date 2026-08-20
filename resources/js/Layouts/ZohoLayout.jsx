@@ -15,6 +15,7 @@ export default function ZohoLayout({
     children,
 }) {
     const [connecting, setConnecting] = useState(false);
+    const [noticeMessage, setNoticeMessage] = useState(null);
 
     // Connection state determination: 'loading' | 'connected' | 'disconnected' | 'error'
     const resolveStatus = () => {
@@ -56,6 +57,10 @@ export default function ZohoLayout({
         const handleMessage = (event) => {
             if (event.data?.type === "ZOHO_CONNECTED_SUCCESS") {
                 window.location.reload();
+            } else if (event.data?.type === "ZOHO_AUTH_CANCELLED") {
+                if (event.data?.message) {
+                    setNoticeMessage(event.data.message);
+                }
             }
         };
         window.addEventListener("message", handleMessage);
@@ -300,6 +305,41 @@ export default function ZohoLayout({
                             }}
                         >
                             {connecting ? "Connecting..." : "Connect Now"}
+                        </button>
+                    </div>
+                )}
+
+                {/* USER NOTICE BANNER (e.g. OAUTH REJECTION / CANCELLATION) */}
+                {noticeMessage && (
+                    <div
+                        style={{
+                            backgroundColor: "#f4f6f8",
+                            borderBottom: "1px solid #c9cccf",
+                            padding: "10px 24px",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            fontSize: "13px",
+                            color: "#202223",
+                        }}
+                    >
+                        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                            <span style={{ fontSize: "16px" }}>ℹ️</span>
+                            <span>{noticeMessage}</span>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => setNoticeMessage(null)}
+                            style={{
+                                background: "none",
+                                border: "none",
+                                cursor: "pointer",
+                                color: "#616a75",
+                                fontWeight: "bold",
+                                fontSize: "14px",
+                            }}
+                        >
+                            ✕
                         </button>
                     </div>
                 )}

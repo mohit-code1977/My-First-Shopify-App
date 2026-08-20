@@ -248,6 +248,7 @@ class ZohoOAuthTest extends TestCase
             'state' => $rawState,
             'accounts-server' => 'https://malicious-zoho-server.com',
         ]);
+        $request->headers->set('Accept', 'application/json');
 
         $response = $controller->callback($request);
 
@@ -263,6 +264,7 @@ class ZohoOAuthTest extends TestCase
             'code' => 'auth_code_xyz',
             'state' => 'non_existent_state',
         ]);
+        $request->headers->set('Accept', 'application/json');
 
         $response = $controller->callback($request);
 
@@ -288,6 +290,7 @@ class ZohoOAuthTest extends TestCase
             'code' => 'auth_code_xyz',
             'state' => $rawState,
         ]);
+        $request->headers->set('Accept', 'application/json');
 
         $response = $controller->callback($request);
 
@@ -314,12 +317,96 @@ class ZohoOAuthTest extends TestCase
             'code' => 'auth_code_xyz',
             'state' => $rawState,
         ]);
+        $request->headers->set('Accept', 'application/json');
 
         $response = $controller->callback($request);
 
         $this->assertEquals(403, $response->getStatusCode());
         $content = json_decode($response->getContent(), true);
         $this->assertEquals('Zoho OAuth state has already been used.', $content['error']);
+    }
+
+    public function test_first_time_oauth_rejection_does_not_create_connection_and_returns_friendly_html()
+    {
+        $rawState = 'first_reject_raw_state_123';
+        $stateHash = hash('sha256', $rawState);
+
+        ZohoOauthState::create([
+            'state' => $stateHash,
+            'shop_id' => $this->shop1->id,
+            'host' => $this->validHostB64,
+            'expires_at' => now()->addMinutes(10),
+        ]);
+
+        $controller = new ZohoAuthController();
+        $request = Request::create('/zoho/callback', 'GET', [
+            'error' => 'access_denied',
+            'state' => $rawState,
+        ]);
+
+        $response = $controller->callback($request);
+
+        $this->assertEquals(200, $response->getStatusCode());
+        $this->assertStringContainsString('text/html', $response->headers->get('Content-Type'));
+        $content = $response->getContent();
+
+        $this->assertStringContainsString('Authorization Cancelled', $content);
+        $this->assertStringContainsString('Zoho authorization was cancelled.', $content);
+        $this->assertStringContainsString('ZOHO_AUTH_CANCELLED', $content);
+
+        // Verify NO ZohoConnection was created
+        $this->assertEquals(0, ZohoConnection::where('shop_id', $this->shop1->id)->count());
+    }
+
+    public function test_reauthorization_oauth_rejection_preserves_existing_connection_and_tokens()
+    {
+        // Existing active connection
+        $existingConnection = ZohoConnection::create([
+            'shop_id' => $this->shop1->id,
+            'is_active' => true,
+            'organization_id' => 'existing_org_1001',
+            'organization_name' => 'Original Merchant Org',
+            'access_token' => 'original_access_token_123',
+            'refresh_token' => 'original_refresh_token_123',
+            'accounts_url' => 'https://accounts.zoho.in',
+            'api_url' => 'https://www.zohoapis.in',
+            'api_domain' => 'www.zohoapis.in',
+            'data_center' => 'www.zohoapis.in',
+            'connected_at' => now()->subDays(5),
+        ]);
+
+        $rawState = 'reauth_reject_raw_state_456';
+        $stateHash = hash('sha256', $rawState);
+
+        ZohoOauthState::create([
+            'state' => $stateHash,
+            'shop_id' => $this->shop1->id,
+            'host' => $this->validHostB64,
+            'expires_at' => now()->addMinutes(10),
+        ]);
+
+        $controller = new ZohoAuthController();
+        $request = Request::create('/zoho/callback', 'GET', [
+            'error' => 'access_denied',
+            'state' => $rawState,
+        ]);
+
+        $response = $controller->callback($request);
+
+        $this->assertEquals(200, $response->getStatusCode());
+        $content = $response->getContent();
+
+        $this->assertStringContainsString('Reauthorization Cancelled', $content);
+        $this->assertStringContainsString('Zoho reauthorization was cancelled. Your existing connection is still active.', $content);
+        $this->assertStringContainsString('ZOHO_AUTH_CANCELLED', $content);
+
+        // Verify existing connection is 100% UNTOUCHED
+        $freshConnection = ZohoConnection::find($existingConnection->id);
+        $this->assertNotNull($freshConnection);
+        $this->assertTrue($freshConnection->is_active);
+        $this->assertEquals('existing_org_1001', $freshConnection->organization_id);
+        $this->assertEquals('original_access_token_123', $freshConnection->access_token);
+        $this->assertEquals('original_refresh_token_123', $freshConnection->refresh_token);
     }
 
     public function test_first_time_connection_without_record_uses_configured_accounts_url()
