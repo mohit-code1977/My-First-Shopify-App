@@ -10,6 +10,7 @@ class Product extends Model{
         'shopify_product_id',
         'title',
         'handle',
+        'description',
         'image_url',
     ];
 

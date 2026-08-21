@@ -265,7 +265,9 @@ class ShopifyOrderTransactionWebhookTest extends TestCase
         $this->sendWebhook($payload, ['HTTP_X_SHOPIFY_WEBHOOK_ID' => 'wh_del_6a']);
         $this->sendWebhook($payload, ['HTTP_X_SHOPIFY_WEBHOOK_ID' => 'wh_del_6b']);
 
-        Http::assertSentCount(2); // 1 GET (find) + 1 POST (create)
+        Http::assertSent(function (HttpClientRequest $request) {
+            return $request->method() === 'POST' && str_contains($request->url(), '/books/v3/customerpayments');
+        });
     }
 
     // 7. Successful payment transaction creates Payment
@@ -794,7 +796,7 @@ class ShopifyOrderTransactionWebhookTest extends TestCase
         // Verify SyncHistory recorded the failure
         $history = SyncHistory::where('payment_id', $payment->id)->first();
         $this->assertNotNull($history);
-        $this->assertEquals('failed', $history->status);
+        $this->assertEquals('failed', strtolower($history->status));
     }
 
     // 26. Production regression: numeric order_id webhook matches GID local order

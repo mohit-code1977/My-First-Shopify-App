@@ -327,6 +327,14 @@ export default function Products({ shop, variants = [], failedCount = 0, zohoCon
                                     const isSyncing = syncingVariantId === v.shopify_variant_id;
                                     const isLinked = !!v.zoho_item_id;
 
+                                    const rawProductId = v.product?.shopify_product_id || v.product?.id || v.shopify_product_id;
+                                    const numProductId = rawProductId ? String(rawProductId).replace(/[^0-9]/g, "") : null;
+                                    const shopDomainClean = (shopData?.shop_domain || shop?.shop_domain || "").replace(/^https?:\/\//, "").replace(/\/$/, "");
+                                    const productAdminUrl = (shopDomainClean && numProductId)
+                                        ? `https://${shopDomainClean}/admin/products/${numProductId}`
+                                        : null;
+                                    const productTitle = v.product?.title || "Untitled Product";
+
                                     return (
                                         <tr key={v.shopify_variant_id} style={{ borderBottom: "1px solid #f1f2f4", backgroundColor: isSelected ? "#f4f8ff" : "transparent" }}>
                                             <td style={{ padding: "12px 16px" }}>
@@ -341,7 +349,7 @@ export default function Products({ shop, variants = [], failedCount = 0, zohoCon
                                                     {v.product?.image_url ? (
                                                         <img
                                                             src={v.product.image_url}
-                                                            alt={v.product.title}
+                                                            alt={productTitle}
                                                             style={{ width: "36px", height: "36px", borderRadius: "6px", objectFit: "cover", border: "1px solid #e1e3e5" }}
                                                         />
                                                     ) : (
@@ -350,13 +358,49 @@ export default function Products({ shop, variants = [], failedCount = 0, zohoCon
                                                         </div>
                                                     )}
                                                     <div>
-                                                        <div style={{ fontWeight: 600, color: "#1a1d20" }}>
-                                                            {v.product?.title || "Untitled Product"}
-                                                        </div>
-                                                        {v.title && v.title !== "Default Title" && (
-                                                            <div style={{ fontSize: "12px", color: "#616a75", marginTop: "2px" }}>
-                                                                {v.title}
+                                                        {productAdminUrl ? (
+                                                            <a
+                                                                href={productAdminUrl}
+                                                                target="_blank"
+                                                                rel="noopener noreferrer"
+                                                                style={{
+                                                                    fontWeight: 600,
+                                                                    color: "#005bd3",
+                                                                    textDecoration: "none",
+                                                                }}
+                                                                onMouseEnter={(e) => (e.currentTarget.style.textDecoration = "underline")}
+                                                                onMouseLeave={(e) => (e.currentTarget.style.textDecoration = "none")}
+                                                            >
+                                                                {productTitle}
+                                                            </a>
+                                                        ) : (
+                                                            <div style={{ fontWeight: 600, color: "#1a1d20" }}>
+                                                                {productTitle}
                                                             </div>
+                                                        )}
+                                                        {v.title && v.title !== "Default Title" && (
+                                                            productAdminUrl ? (
+                                                                <a
+                                                                    href={productAdminUrl}
+                                                                    target="_blank"
+                                                                    rel="noopener noreferrer"
+                                                                    style={{
+                                                                        fontSize: "12px",
+                                                                        color: "#005bd3",
+                                                                        marginTop: "2px",
+                                                                        display: "block",
+                                                                        textDecoration: "none",
+                                                                    }}
+                                                                    onMouseEnter={(e) => (e.currentTarget.style.textDecoration = "underline")}
+                                                                    onMouseLeave={(e) => (e.currentTarget.style.textDecoration = "none")}
+                                                                >
+                                                                    {v.title}
+                                                                </a>
+                                                            ) : (
+                                                                <div style={{ fontSize: "12px", color: "#616a75", marginTop: "2px" }}>
+                                                                    {v.title}
+                                                                </div>
+                                                            )
                                                         )}
                                                     </div>
                                                 </div>

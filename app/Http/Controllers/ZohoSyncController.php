@@ -1191,6 +1191,7 @@ query GetProducts($cursor: String) {
                 id
                 title
                 handle
+                description
 
                 featuredImage {
                     url
@@ -1315,6 +1316,9 @@ GRAPHQL;
                             'handle' =>
                                 $product['handle'],
 
+                            'description' =>
+                                $product['description'] ?? null,
+
                             'image_url' =>
                                 $product['featuredImage']['url']
                                 ?? null,
@@ -1390,7 +1394,7 @@ GRAPHQL;
 
             $zohoService = new ZohoService($shop);
 
-            $result = $zohoService->syncItem($variant);
+            $result = $zohoService->syncItem($variant, ['trigger' => 'manual']);
 
             return response()->json([
                 'success' => true,
@@ -1525,7 +1529,7 @@ GRAPHQL;
 
         try {
             $zohoService = new ZohoService($shop);
-            $result = $zohoService->syncCustomer($customer);
+            $result = $zohoService->syncCustomer($customer, ['trigger' => 'manual']);
 
             return response()->json([
                 'success' => true,
@@ -1675,7 +1679,7 @@ GRAPHQL;
 
         try {
             $zohoService = new ZohoService($shop);
-            $result = $zohoService->syncInvoice($order);
+            $result = $zohoService->syncInvoice($order, ['trigger' => 'manual']);
 
             return response()->json([
                 'success' => true,
@@ -1775,7 +1779,7 @@ GRAPHQL;
             $payment->refresh();
 
             $zohoService = new ZohoService($shop);
-            $result = $zohoService->syncPayment($payment);
+            $result = $zohoService->syncPayment($payment, ['trigger' => 'manual']);
 
             return response()->json([
                 'success' => true,
@@ -1823,6 +1827,7 @@ query GetVariant($id: ID!) {
             id
             title
             handle
+            description
 
             featuredImage {
                 url
@@ -1907,6 +1912,9 @@ GRAPHQL;
 
         $targetProdId = $existingProduct ? $existingProduct->shopify_product_id : $canonicalProdId;
 
+        $imageUrl = $shopifyVariant['image']['url'] ?? ($shopifyProduct['featuredImage']['url'] ?? null);
+        $description = $shopifyProduct['description'] ?? null;
+
         $product = Product::updateOrCreate(
             [
                 'shop_id' => $shop->id,
@@ -1915,6 +1923,8 @@ GRAPHQL;
             [
                 'title' => $shopifyProduct['title'] ?? '',
                 'handle' => $shopifyProduct['handle'] ?? null,
+                'description' => $description,
+                'image_url' => $imageUrl,
             ]
         );
 
@@ -2050,7 +2060,8 @@ GRAPHQL;
                 */
 
                     $zohoService->syncItem(
-                        $localVariant
+                        $localVariant,
+                        ['trigger' => 'bulk']
                     );
 
                     $successCount++;
@@ -2112,7 +2123,7 @@ GRAPHQL;
     {
         $context = $this->resolveShopContext($request);
 
-        return Inertia::render('Zoho/History', array_merge($context, [
+        return Inertia::render('Zoho/Sync', array_merge($context, [
             'histories' => [
                 'data' => [],
                 'total' => 0,
@@ -2120,10 +2131,12 @@ GRAPHQL;
                 'last_page' => 1,
                 'links' => [],
             ],
-            'pendingProducts' => 0,
             'filters' => [
                 'search' => (string) $request->query('search', ''),
                 'status' => (string) $request->query('status', 'all'),
+                'entity' => (string) $request->query('entity', 'all'),
+                'trigger' => (string) $request->query('trigger', 'all'),
+                'trigger_subtype' => (string) $request->query('trigger_subtype', 'all'),
             ],
         ]));
     }
@@ -2140,70 +2153,104 @@ GRAPHQL;
         }
 
         $search = trim((string) $request->query('search', ''));
-        $status = $request->query('status', 'all');
+        $status = strtolower(trim((string) $request->query('status', 'all')));
+        $entity = strtolower(trim((string) $request->query('entity', 'all')));
+        $trigger = strtolower(trim((string) $request->query('trigger', 'all')));
+        $triggerSubtype = strtolower(trim((string) $request->query('trigger_subtype', 'all')));
+        $perPage = max(1, min(100, (int) $request->query('per_page', 20)));
 
-        $histories = SyncHistory::with([
+        $baseQuery = SyncHistory::with([
             'productVariant.product',
             'order.customer',
             'invoice',
             'payment',
-        ])
-            ->where('shop_id', $shop->id)
-            ->when($search !== '', function ($query) use ($search) {
-                $query->where(function ($q) use ($search) {
-                    $q->where('action', 'like', "%{$search}%")
-                        ->orWhere('status', 'like', "%{$search}%")
-                        ->orWhere('message', 'like', "%{$search}%")
-                        ->orWhere('zoho_item_id', 'like', "%{$search}%")
-                        ->orWhere('zoho_invoice_id', 'like', "%{$search}%")
-                        ->orWhere('zoho_payment_id', 'like', "%{$search}%")
-                        ->orWhereHas('productVariant', function ($variantQuery) use ($search) {
-                            $variantQuery->where('title', 'like', "%{$search}%")
-                                ->orWhere('sku', 'like', "%{$search}%");
-                        })
-                        ->orWhereHas('productVariant.product', function ($productQuery) use ($search) {
-                            $productQuery->where('title', 'like', "%{$search}%");
-                        })
-                        ->orWhereHas('order', function ($orderQuery) use ($search) {
-                            $orderQuery->where('order_number', 'like', "%{$search}%");
-                        })
-                        ->orWhereHas('payment', function ($paymentQuery) use ($search) {
-                            $paymentQuery->where('payment_reference', 'like', "%{$search}%")
-                                ->orWhere('shopify_transaction_id', 'like', "%{$search}%")
-                                ->orWhere('zoho_payment_id', 'like', "%{$search}%");
-                        });
-                });
-            })
-            ->when($status !== 'all', fn($query) => $query->where('status', $status))
-            ->latest('id')
-            ->paginate(20)
-            ->withQueryString();
+            'refund',
+        ])->where('shop_id', $shop->id);
 
-        $pendingProducts = 0;
-
-        try {
-            $shopifyVariants = $this->fetchShopifyCatalog($shop);
-
-            $variantIds = collect($shopifyVariants)
-                ->pluck('shopify_variant_id')
-                ->filter()
-                ->values();
-
-            $syncedVariantIds = ProductVariant::query()
-                ->whereIn('shopify_variant_id', $variantIds)
-                ->whereHas('product', function ($query) use ($shop) {
-                    $query->where('shop_id', $shop->id);
-                })
-                ->whereNotNull('zoho_item_id')
-                ->pluck('shopify_variant_id');
-
-            $pendingProducts = $variantIds->diff($syncedVariantIds)->count();
-        } catch (\Throwable $e) {
-            Log::error('Failed to calculate pending Shopify products.', [
-                'shop_id' => $shop->id,
-                'message' => $e->getMessage(),
-            ]);
+        if ($status !== 'all') {
+            $baseQuery->where(function ($q) use ($status) {
+                $q->where('status', strtoupper($status))
+                  ->orWhere('status', strtolower($status));
+            });
         }
+
+        if ($entity !== 'all') {
+            $baseQuery->where(function ($q) use ($entity) {
+                if ($entity === 'product' || $entity === 'products') {
+                    $q->whereIn('entity', ['product', 'product_variant'])
+                      ->orWhereNotNull('product_variant_id')
+                      ->orWhereNotNull('zoho_item_id');
+                } elseif ($entity === 'order' || $entity === 'orders') {
+                    $q->where('entity', 'order')->orWhereNotNull('order_id');
+                } elseif ($entity === 'invoice' || $entity === 'invoices') {
+                    $q->where('entity', 'invoice')->orWhereNotNull('invoice_id')->orWhereNotNull('zoho_invoice_id');
+                } elseif ($entity === 'payment' || $entity === 'payments') {
+                    $q->where('entity', 'payment')->orWhereNotNull('payment_id')->orWhereNotNull('zoho_payment_id');
+                } elseif ($entity === 'refund' || $entity === 'refunds' || $entity === 'credit_note' || $entity === 'credit_notes') {
+                    $q->whereIn('entity', ['refund', 'credit_note'])->orWhereNotNull('refund_id')->orWhereNotNull('zoho_creditnote_id');
+                } elseif ($entity === 'customer' || $entity === 'customers') {
+                    $q->where('entity', 'customer');
+                } elseif ($entity === 'inventory') {
+                    $q->where('entity', 'inventory');
+                } else {
+                    $q->where('entity', $entity);
+                }
+            });
+        }
+
+        if ($trigger !== 'all') {
+            $baseQuery->where('trigger', strtolower($trigger));
+        }
+
+        if ($triggerSubtype !== 'all') {
+            $baseQuery->where('trigger_subtype', strtolower($triggerSubtype));
+        }
+
+        if ($search !== '') {
+            $baseQuery->where(function ($q) use ($search) {
+                $q->where('action', 'like', "%{$search}%")
+                    ->orWhere('status', 'like', "%{$search}%")
+                    ->orWhere('message', 'like', "%{$search}%")
+                    ->orWhere('error_code', 'like', "%{$search}%")
+                    ->orWhere('error_message', 'like', "%{$search}%")
+                    ->orWhere('shopify_id', 'like', "%{$search}%")
+                    ->orWhere('zoho_id', 'like', "%{$search}%")
+                    ->orWhere('zoho_item_id', 'like', "%{$search}%")
+                    ->orWhere('zoho_invoice_id', 'like', "%{$search}%")
+                    ->orWhere('zoho_payment_id', 'like', "%{$search}%")
+                    ->orWhere('zoho_creditnote_id', 'like', "%{$search}%")
+                    ->orWhereHas('productVariant', function ($variantQuery) use ($search) {
+                        $variantQuery->where('title', 'like', "%{$search}%")
+                            ->orWhere('sku', 'like', "%{$search}%");
+                    })
+                    ->orWhereHas('productVariant.product', function ($productQuery) use ($search) {
+                        $productQuery->where('title', 'like', "%{$search}%");
+                    })
+                    ->orWhereHas('order', function ($orderQuery) use ($search) {
+                        $orderQuery->where('order_number', 'like', "%{$search}%");
+                    })
+                    ->orWhereHas('payment', function ($paymentQuery) use ($search) {
+                        $paymentQuery->where('payment_reference', 'like', "%{$search}%")
+                            ->orWhere('shopify_transaction_id', 'like', "%{$search}%")
+                            ->orWhere('zoho_payment_id', 'like', "%{$search}%");
+                    });
+            });
+        }
+
+        // Summary Counts (computed for shop)
+        $shopHistoryQuery = SyncHistory::where('shop_id', $shop->id);
+        $totalCount = (clone $shopHistoryQuery)->count();
+        $successCount = (clone $shopHistoryQuery)->whereIn('status', ['SUCCESS', 'success', 'synced'])->count();
+        $failedCount = (clone $shopHistoryQuery)->whereIn('status', ['FAILED', 'failed', 'error'])->count();
+        $pendingCount = (clone $shopHistoryQuery)->whereIn('status', ['PENDING', 'pending'])->count();
+        $reconciledCount = (clone $shopHistoryQuery)->whereIn('status', ['RECONCILED', 'reconciled'])->count();
+
+        $connectedProductsCount = ProductVariant::query()
+            ->whereHas('product', fn($q) => $q->where('shop_id', $shop->id))
+            ->whereNotNull('zoho_item_id')
+            ->count();
+
+        $histories = $baseQuery->latest('id')->paginate($perPage)->withQueryString();
 
         return response()->json([
             'success' => true,
@@ -2211,12 +2258,22 @@ GRAPHQL;
                 'id' => $shop->id,
                 'shop_domain' => $shop->shop_domain,
             ],
+            'summary' => [
+                'connected_products' => $connectedProductsCount,
+                'total' => $totalCount,
+                'success' => $successCount,
+                'failed' => $failedCount,
+                'pending' => $pendingCount,
+                'reconciled' => $reconciledCount,
+            ],
             'histories' => $histories,
-            'pendingProducts' => $pendingProducts,
             'zohoConnected' => $shop->zohoConnection !== null,
             'filters' => [
                 'search' => $search,
                 'status' => $status,
+                'entity' => $entity,
+                'trigger' => $trigger,
+                'trigger_subtype' => $triggerSubtype,
             ],
         ]);
     }
@@ -2484,7 +2541,7 @@ GRAPHQL;
             }
 
             $zohoService = new ZohoService($shop);
-            $result = $zohoService->syncRefund($refund);
+            $result = $zohoService->syncRefund($refund, ['trigger' => 'manual']);
 
             return response()->json($result);
         } catch (\Throwable $e) {

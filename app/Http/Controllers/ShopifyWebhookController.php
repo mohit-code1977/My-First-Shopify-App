@@ -1270,12 +1270,19 @@ class ShopifyWebhookController extends Controller
 
         if ($shop->zohoConnection) {
             try {
-                $zohoService = new ZohoService($shop);
-                $result = $zohoService->syncOrder($order);
+                $isWebhook = $request->hasHeader('X-Shopify-Topic');
+                $orderTriggerOpts = $isWebhook
+                    ? ['trigger' => 'webhook', 'trigger_subtype' => 'order_sync']
+                    : ['trigger' => 'automatic', 'trigger_subtype' => 'order_sync'];
+
+                $result = $zohoService->syncOrder($order, $orderTriggerOpts);
                 $synced = true;
 
                 try {
-                    $zohoService->syncInvoice($order);
+                    $invTriggerOpts = $isWebhook
+                        ? ['trigger' => 'webhook', 'trigger_subtype' => 'invoice_sync']
+                        : ['trigger' => 'automatic', 'trigger_subtype' => 'invoice_sync'];
+                    $zohoService->syncInvoice($order, $invTriggerOpts);
                 } catch (\Throwable $invEx) {
                     Log::warning("ordersUpdate: Zoho invoice auto-sync warning for order ID {$order->id}: " . $invEx->getMessage());
                 }

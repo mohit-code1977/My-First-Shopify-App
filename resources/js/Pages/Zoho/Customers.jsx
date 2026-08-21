@@ -255,6 +255,18 @@ export default function Customers({
         const isSynced = !!c.zoho_contact_id;
         const isMenuOpen = openActionMenuId === c.id;
 
+        const shopDomainClean = (shopData?.shop_domain || shop?.shop_domain || "").replace(/^https?:\/\//, "").replace(/\/$/, "");
+
+        const rawCustomerId = c.shopify_customer_id || c.id;
+        const numCustomerId = rawCustomerId ? String(rawCustomerId).replace(/[^0-9]/g, "") : null;
+        const customerAdminUrl = (shopDomainClean && numCustomerId)
+            ? `https://${shopDomainClean}/admin/customers/${numCustomerId}`
+            : null;
+
+        const customerDisplayName = c.first_name || c.last_name
+            ? `${c.first_name || ""} ${c.last_name || ""}`.trim()
+            : "No Name";
+
         return (
             <IndexTable.Row
                 id={c.id}
@@ -263,11 +275,28 @@ export default function Customers({
                 position={index}
             >
                 <IndexTable.Cell>
-                    <Text variant="bodyMd" fontWeight="semibold" as="span">
-                        {c.first_name || c.last_name
-                            ? `${c.first_name || ""} ${c.last_name || ""}`.trim()
-                            : "No Name"}
-                    </Text>
+                    {customerAdminUrl ? (
+                        <a
+                            href={customerAdminUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            style={{
+                                color: "#005bd3",
+                                fontWeight: 600,
+                                fontSize: "14px",
+                                textDecoration: "none",
+                            }}
+                            onMouseEnter={(e) => (e.currentTarget.style.textDecoration = "underline")}
+                            onMouseLeave={(e) => (e.currentTarget.style.textDecoration = "none")}
+                        >
+                            {customerDisplayName}
+                        </a>
+                    ) : (
+                        <Text variant="bodyMd" fontWeight="semibold" as="span">
+                            {customerDisplayName}
+                        </Text>
+                    )}
                 </IndexTable.Cell>
                 <IndexTable.Cell>
                     <Text variant="bodySm" tone="subdued" as="span">

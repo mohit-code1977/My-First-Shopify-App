@@ -499,6 +499,20 @@ class ZohoService
     }
 
     /**
+     * Get the base currency code of the connected Zoho Books organization (e.g. 'INR').
+     */
+    public function getBaseCurrencyCode(): string
+    {
+        $currencies = $this->getCurrencies();
+        foreach ($currencies as $currency) {
+            if (!empty($currency['is_base_currency'])) {
+                return strtoupper(trim($currency['currency_code'] ?? 'INR'));
+            }
+        }
+        return 'INR';
+    }
+
+    /**
      * Format shipping/billing address object payload for Zoho API to respect character constraints.
      */
     public function formatZohoAddressObject(array $shipAddress, ?Customer $contact = null): array
@@ -973,25 +987,28 @@ class ZohoService
         // Build the Zoho item data
         $shopifyVariantFieldId = $this->getShopifyVariantFieldId();
 
+        $product = $variant->product;
+
         $data = [
             'name' => $itemName,
-
-            'rate' =>
-                (float) $variant->price,
-
-            'product_type' =>
-                'goods',
-
+            'rate' => (float) $variant->price,
+            'sales_rate' => (float) $variant->price,
+            'can_be_sold' => true,
+            'unit' => 'pcs',
+            'product_type' => 'goods',
+            'description' => $product?->description ?? '',
             'custom_fields' => [
                 [
-                    'customfield_id' =>
-                        $shopifyVariantFieldId,
-
-                    'value' =>
-                        $variant->shopify_variant_id,
+                    'customfield_id' => $shopifyVariantFieldId,
+                    'value' => $variant->shopify_variant_id,
                 ],
             ],
         ];
+
+        if (isset($variant->unit_cost) && (float) $variant->unit_cost > 0) {
+            $data['purchase_rate'] = (float) $variant->unit_cost;
+            $data['can_be_purchased'] = true;
+        }
 
         // Configure inventory tracking if enabled
         $isTracked = true;
@@ -1015,6 +1032,8 @@ class ZohoService
         if (!empty($variant->sku)) {
             $data['sku'] = $variant->sku;
         }
+
+        Log::info("ZohoService createItem normalized payload for variant ID {$variant->id}:", $data);
 
         // Create the item in Zoho Books (with fallback for duplicate item name error 1001)
         try {
@@ -1153,10 +1172,23 @@ class ZohoService
 
         // Build the updated Zoho item data
         $data = [
-            'name' => $product->title . ' - ' . $variant->title,
+            'name' => ($product?->title ? $product->title . ' - ' : '') . $variant->title,
             'rate' => (float) $variant->price,
+            'sales_rate' => (float) $variant->price,
+            'can_be_sold' => true,
+            'unit' => 'pcs',
             'product_type' => 'goods',
+            'description' => $product?->description ?? '',
         ];
+
+        if (empty($product?->title) || $variant->title === 'Default Title') {
+            $data['name'] = $product?->title ?: $variant->title;
+        }
+
+        if (isset($variant->unit_cost) && (float) $variant->unit_cost > 0) {
+            $data['purchase_rate'] = (float) $variant->unit_cost;
+            $data['can_be_purchased'] = true;
+        }
 
         // Include custom field for Shopify Variant ID if configured
         try {
@@ -1178,6 +1210,8 @@ class ZohoService
             $data['sku'] = $variant->sku;
         }
 
+        Log::info("ZohoService updateItem normalized payload for variant ID {$variant->id}:", $data);
+
         try {
             // Update the existing item in Zoho Books
             $result = $this->makeRequest(
@@ -1186,7 +1220,13 @@ class ZohoService
                 $data
             );
         } catch (\Throwable $e) {
-            if ($this->isItemNotFoundException($e)) {
+            $code = $e->getCode();
+            $msg = strtolower($e->getMessage());
+            $isInvoicedLocked = ($code == 36023 || str_contains($msg, 'marked as invoiced') || str_contains($msg, 'not allowed to update or delete'));
+
+            if ($isInvoicedLocked) {
+                Log::info("updateItem: Zoho item {$variant->zoho_item_id} for variant ID {$variant->id} is marked as invoiced in Zoho Books. Master fields are locked; updating price list and image.");
+            } elseif ($this->isItemNotFoundException($e)) {
                 // Code 1002 detected: clear stale local mapping
                 $variant->update([
                     'zoho_item_id' => null,
@@ -1204,9 +1244,9 @@ class ZohoService
                 }
 
                 return $this->createItem($variant);
+            } else {
+                throw $e;
             }
-
-            throw $e;
         }
 
         // Sync variant price to currency-specific Price List (failure does not rollback item update)
@@ -1418,7 +1458,8 @@ class ZohoService
                 str_contains($errMsg, 'used in') ||
                 str_contains($errMsg, 'referenced') ||
                 str_contains($errMsg, 'transaction') ||
-                in_array($code, [1000, 1005, 1008, 1013, 10005], true);
+                str_contains($errMsg, 'marked as invoiced') ||
+                in_array($code, [1000, 1005, 1008, 1013, 10005, 36023], true);
 
             if ($isReferencedError) {
                 Log::info("deleteItem: Zoho item {$zohoItemId} is referenced by accounting transactions. Falling back to markItemInactive.");
@@ -1445,8 +1486,15 @@ class ZohoService
 
 
 
-    public function syncItem(ProductVariant $variant): array
+    public function syncVariant(ProductVariant $variant, array $options = []): array
     {
+        return $this->syncItem($variant, $options);
+    }
+
+    public function syncItem(ProductVariant $variant, array $options = []): array
+    {
+        $trigger = $options['trigger'] ?? 'automatic';
+        $triggerSubtype = $options['trigger_subtype'] ?? ($trigger === 'automatic' ? 'product_sync' : null);
         /*
         |--------------------------------------------------------------------------
         | 1. Reconcile local mapping with Zoho
@@ -1525,162 +1573,107 @@ class ZohoService
             $variant->zoho_item_id &&
             $variant->zoho_sync_hash === $currentHash
         ) {
-            SyncHistory::create([
-                'shop_id' =>
-                    $this->shop->id,
-
-                'product_variant_id' =>
-                    $variant->id,
-
-                'action' =>
-                    'skip',
-
-                'status' =>
-                    'skipped',
-
-                'zoho_item_id' =>
-                    $variant->zoho_item_id,
-
-                'message' =>
-                    'Variant is already synchronized. No changes detected.',
-
-                'synced_at' =>
-                    now(),
+            SyncLogger::record([
+                'shop_id' => $this->shop->id,
+                'product_variant_id' => $variant->id,
+                'entity' => 'product_variant',
+                'action' => 'SKIP',
+                'trigger' => $trigger,
+                'trigger_subtype' => $triggerSubtype,
+                'status' => 'SKIPPED',
+                'shopify_id' => $variant->shopify_variant_id,
+                'zoho_id' => $variant->zoho_item_id,
+                'zoho_item_id' => $variant->zoho_item_id,
+                'message' => 'Variant is already synchronized. No changes detected.',
+                'metadata' => [
+                    'product_name' => $variant->product->title ?? null,
+                    'sku' => $variant->sku,
+                ],
             ]);
 
             return [
-                'message' =>
-                    'Zoho item is already up to date.',
-
-                'zoho_item_id' =>
-                    $variant->zoho_item_id,
-
-                'created' =>
-                    false,
-
-                'updated' =>
-                    false,
-
-                'skipped' =>
-                    true,
+                'message' => 'Zoho item is already up to date.',
+                'zoho_item_id' => $variant->zoho_item_id,
+                'created' => false,
+                'updated' => false,
+                'skipped' => true,
             ];
         }
 
         try {
-            /*
-        |--------------------------------------------------------------------------
-        | 5. Create if Zoho item does not exist
-        |--------------------------------------------------------------------------
-        */
-
             if (!$variant->zoho_item_id) {
-                $result =
-                    $this->createItem($variant);
+                $result = $this->createItem($variant);
 
                 $variant->update([
-                    'zoho_sync_hash' =>
-                        $currentHash,
-
-                    'zoho_synced_at' =>
-                        now(),
+                    'zoho_sync_hash' => $currentHash,
+                    'zoho_synced_at' => now(),
                 ]);
 
-                SyncHistory::create([
-                    'shop_id' =>
-                        $this->shop->id,
-
-                    'product_variant_id' =>
-                        $variant->id,
-
-                    'action' =>
-                        'create',
-
-                    'status' =>
-                        'success',
-
-                    'zoho_item_id' =>
-                        $variant->zoho_item_id,
-
-                    'message' =>
-                        $result['message']
-                        ??
-                        'Zoho item created successfully.',
-
-                    'synced_at' =>
-                        now(),
+                SyncLogger::record([
+                    'shop_id' => $this->shop->id,
+                    'product_variant_id' => $variant->id,
+                    'entity' => 'product_variant',
+                    'action' => 'CREATE',
+                    'trigger' => $trigger,
+                    'trigger_subtype' => $triggerSubtype,
+                    'status' => 'SUCCESS',
+                    'shopify_id' => $variant->shopify_variant_id,
+                    'zoho_id' => $variant->zoho_item_id,
+                    'zoho_item_id' => $variant->zoho_item_id,
+                    'message' => $result['message'] ?? 'Zoho item created successfully.',
+                    'metadata' => [
+                        'product_name' => $variant->product->title ?? null,
+                        'sku' => $variant->sku,
+                    ],
                 ]);
 
                 return $result;
             }
 
-            /*
-        |--------------------------------------------------------------------------
-        | 6. Update existing Zoho item
-        |--------------------------------------------------------------------------
-        */
-
-            $result =
-                $this->updateItem($variant);
+            $result = $this->updateItem($variant);
 
             $variant->update([
-                'zoho_sync_hash' =>
-                    $currentHash,
-
-                'zoho_synced_at' =>
-                    now(),
+                'zoho_sync_hash' => $currentHash,
+                'zoho_synced_at' => now(),
             ]);
 
-            SyncHistory::create([
-                'shop_id' =>
-                    $this->shop->id,
-
-                'product_variant_id' =>
-                    $variant->id,
-
-                'action' =>
-                    'update',
-
-                'status' =>
-                    'success',
-
-                'zoho_item_id' =>
-                    $variant->zoho_item_id,
-
-                'message' =>
-                    $result['message']
-                    ??
-                    'Zoho item updated successfully.',
-
-                'synced_at' =>
-                    now(),
+            SyncLogger::record([
+                'shop_id' => $this->shop->id,
+                'product_variant_id' => $variant->id,
+                'entity' => 'product_variant',
+                'action' => 'UPDATE',
+                'trigger' => $trigger,
+                'trigger_subtype' => $triggerSubtype,
+                'status' => 'SUCCESS',
+                'shopify_id' => $variant->shopify_variant_id,
+                'zoho_id' => $variant->zoho_item_id,
+                'zoho_item_id' => $variant->zoho_item_id,
+                'message' => $result['message'] ?? 'Zoho item updated successfully.',
+                'metadata' => [
+                    'product_name' => $variant->product->title ?? null,
+                    'sku' => $variant->sku,
+                ],
             ]);
 
             return $result;
         } catch (\Throwable $e) {
-
-            SyncHistory::create([
-                'shop_id' =>
-                    $this->shop->id,
-
-                'product_variant_id' =>
-                    $variant->id,
-
-                'action' =>
-                    $variant->zoho_item_id
-                    ? 'update'
-                    : 'create',
-
-                'status' =>
-                    'failed',
-
-                'zoho_item_id' =>
-                    $variant->zoho_item_id,
-
-                'message' =>
-                    $e->getMessage(),
-
-                'synced_at' =>
-                    now(),
+            SyncLogger::record([
+                'shop_id' => $this->shop->id,
+                'product_variant_id' => $variant->id,
+                'entity' => 'product_variant',
+                'action' => $variant->zoho_item_id ? 'UPDATE' : 'CREATE',
+                'trigger' => $trigger,
+                'trigger_subtype' => $triggerSubtype,
+                'status' => 'FAILED',
+                'shopify_id' => $variant->shopify_variant_id,
+                'zoho_id' => $variant->zoho_item_id,
+                'zoho_item_id' => $variant->zoho_item_id,
+                'error_message' => $e->getMessage(),
+                'message' => 'Zoho item sync failed: ' . $e->getMessage(),
+                'metadata' => [
+                    'product_name' => $variant->product->title ?? null,
+                    'sku' => $variant->sku,
+                ],
             ]);
 
             throw $e;
@@ -2348,6 +2341,17 @@ class ZohoService
             ],
         ];
 
+        $currencyCode = strtoupper(trim($this->shop->currency ?? 'USD'));
+        try {
+            $priceListService = new ZohoPriceListService($this, $this->shop);
+            $currencyId = $priceListService->resolveCurrencyId($currencyCode);
+            if ($currencyId) {
+                $payload['currency_id'] = $currencyId;
+            }
+        } catch (\Throwable $e) {
+            Log::warning("syncCustomer: Could not resolve currency_id for {$currencyCode}: " . $e->getMessage());
+        }
+
         $billing = $customer->billing_address;
         if (!empty($billing) && is_array($billing)) {
             $payload['billing_address'] = $this->formatZohoAddressObject($billing, $customer);
@@ -2669,10 +2673,153 @@ class ZohoService
     }
 
     /**
+     * Search Zoho Books for an Item by Name.
+     */
+    public function findZohoItemByName(string $name): ?array
+    {
+        try {
+            $response = $this->makeRequest('GET', '/books/v3/items', [
+                'name' => $name,
+            ]);
+            $items = $response['items'] ?? [];
+            return $items[0] ?? null;
+        } catch (\Throwable $e) {
+            Log::warning("findZohoItemByName: Search failed for '{$name}': " . $e->getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Resolve or sync a Zoho Item ID for an order line item.
+     * Uses Variant ID as primary key, SKU as secondary key, and auto-syncs/creates if missing.
+     */
+    public function resolveOrSyncZohoItemIdForLineItem(array $item, Order $order): string
+    {
+        $shopifyVariantId = $item['variant_id'] ?? null;
+        $shopifyProductId = $item['product_id'] ?? null;
+        $sku = !empty($item['sku']) ? trim((string) $item['sku']) : null;
+        $title = $item['name'] ?? $item['title'] ?? 'Product Item';
+        $price = (float) ($item['price'] ?? $item['unit_price'] ?? 0.00);
+
+        $variant = null;
+
+        // 1. Primary lookup by Shopify Variant ID
+        if ($shopifyVariantId) {
+            $formattedVariantId = str_starts_with((string) $shopifyVariantId, 'gid://')
+                ? (string) $shopifyVariantId
+                : "gid://shopify/ProductVariant/{$shopifyVariantId}";
+
+            $variant = \App\Models\ProductVariant::where('shopify_variant_id', $formattedVariantId)
+                ->whereHas('product', function ($q) {
+                    $q->where('shop_id', $this->shop->id);
+                })
+                ->first();
+        }
+
+        // 2. Secondary lookup by SKU if variant not found
+        if (!$variant && !empty($sku)) {
+            $variant = \App\Models\ProductVariant::where('sku', $sku)
+                ->whereHas('product', function ($q) {
+                    $q->where('shop_id', $this->shop->id);
+                })
+                ->first();
+        }
+
+        // 3. If local ProductVariant exists and zoho_item_id exists -> return it
+        if ($variant && !empty($variant->zoho_item_id)) {
+            return (string) $variant->zoho_item_id;
+        }
+
+        // 4. Search Zoho API by SKU
+        if (!empty($sku)) {
+            $zohoItem = $this->findZohoItemBySku($sku);
+            if ($zohoItem && !empty($zohoItem['item_id'])) {
+                if ($variant) {
+                    $variant->update(['zoho_item_id' => (string) $zohoItem['item_id']]);
+                }
+                return (string) $zohoItem['item_id'];
+            }
+        }
+
+        // 5. Search Zoho API by Name
+        $zohoItemByName = $this->findZohoItemByName($title);
+        if ($zohoItemByName && !empty($zohoItemByName['item_id'])) {
+            if ($variant) {
+                $variant->update(['zoho_item_id' => (string) $zohoItemByName['item_id']]);
+            }
+            return (string) $zohoItemByName['item_id'];
+        }
+
+        // 6. If not found in Zoho API, create/sync local ProductVariant and sync to Zoho
+        if (!$variant) {
+            Log::info("resolveOrSyncZohoItemIdForLineItem: Creating missing local product/variant for '{$title}' (Variant ID {$shopifyVariantId}, SKU '{$sku}') for order #{$order->order_number}.");
+
+            $formattedProdId = $shopifyProductId
+                ? (str_starts_with((string) $shopifyProductId, 'gid://') ? (string) $shopifyProductId : "gid://shopify/Product/{$shopifyProductId}")
+                : "gid://shopify/Product/generated_" . md5($title);
+
+            $formattedVarId = $shopifyVariantId
+                ? (str_starts_with((string) $shopifyVariantId, 'gid://') ? (string) $shopifyVariantId : "gid://shopify/ProductVariant/{$shopifyVariantId}")
+                : "gid://shopify/ProductVariant/generated_" . md5($title . ($sku ?: ''));
+
+            $product = \App\Models\Product::updateOrCreate(
+                [
+                    'shop_id' => $this->shop->id,
+                    'shopify_product_id' => $formattedProdId,
+                ],
+                [
+                    'title' => $title,
+                    'status' => 'active',
+                ]
+            );
+
+            $variant = \App\Models\ProductVariant::updateOrCreate(
+                [
+                    'product_id' => $product->id,
+                    'shopify_variant_id' => $formattedVarId,
+                ],
+                [
+                    'title' => $item['variant_title'] ?? 'Default Title',
+                    'sku' => $sku,
+                    'price' => $price,
+                    'inventory_quantity' => 0,
+                ]
+            );
+        }
+
+        Log::info("resolveOrSyncZohoItemIdForLineItem: Syncing variant ID {$variant->id} to Zoho for order #{$order->order_number}.");
+        try {
+            if (!empty($variant->zoho_item_id)) {
+                $this->updateItem($variant);
+            } else {
+                $this->createItem($variant);
+            }
+        } catch (\Throwable $e) {
+            if (str_contains(strtolower($e->getMessage()), 'already exists') || $e->getCode() == 1001) {
+                $existingItem = $this->findZohoItemByName($title);
+                if ($existingItem && !empty($existingItem['item_id'])) {
+                    $variant->update(['zoho_item_id' => (string) $existingItem['item_id']]);
+                    return (string) $existingItem['item_id'];
+                }
+            }
+            throw new \Exception("Unmapped Shopify product variant/SKU '{$sku}' for order #{$order->order_number}: " . $e->getMessage());
+        }
+
+        $variant->refresh();
+        if (!empty($variant->zoho_item_id)) {
+            return (string) $variant->zoho_item_id;
+        }
+
+        throw new \Exception("Unmapped Shopify product variant/SKU '{$sku}' for order #{$order->order_number}. Could not resolve or create Zoho Item for product '{$title}'.");
+    }
+
+    /**
      * Synchronize a Shopify order to Zoho Books as a Sales Order.
      */
-    public function syncOrder(Order $order): array
+    public function syncOrder(Order $order, array $options = []): array
     {
+        $trigger = $options['trigger'] ?? 'automatic';
+        $triggerSubtype = $options['trigger_subtype'] ?? ($trigger === 'automatic' ? 'order_sync' : null);
         $financialStatus = strtolower(trim((string) ($order->financial_status ?? '')));
         $isCancelled = in_array($financialStatus, ['voided', 'cancelled'], true);
 
@@ -2757,39 +2904,7 @@ class ZohoService
             $qty = (int) ($item['quantity'] ?? 1);
             $price = (float) ($item['price'] ?? $item['unit_price'] ?? 0.00);
 
-            $zohoItemId = null;
-
-            // Preferred lookup 1: ProductVariant by shopify_variant_id
-            if ($shopifyVariantId) {
-                $formattedVariantId = str_starts_with((string) $shopifyVariantId, 'gid://')
-                    ? (string) $shopifyVariantId
-                    : "gid://shopify/ProductVariant/{$shopifyVariantId}";
-
-                $variant = ProductVariant::where('shopify_variant_id', $formattedVariantId)->first();
-                if ($variant && $variant->zoho_item_id) {
-                    $zohoItemId = $variant->zoho_item_id;
-                }
-            }
-
-            // Preferred lookup 2: ProductVariant by SKU
-            if (!$zohoItemId && !empty($sku)) {
-                $variant = ProductVariant::where('sku', $sku)->first();
-                if ($variant && $variant->zoho_item_id) {
-                    $zohoItemId = $variant->zoho_item_id;
-                }
-            }
-
-            // Preferred lookup 3: Zoho Item API search by SKU
-            if (!$zohoItemId && !empty($sku)) {
-                $zohoItem = $this->findZohoItemBySku($sku);
-                if ($zohoItem && !empty($zohoItem['item_id'])) {
-                    $zohoItemId = (string) $zohoItem['item_id'];
-                }
-            }
-
-            if (!$zohoItemId) {
-                throw new \Exception("Cannot sync order ID {$order->id}: Unmapped Shopify product variant/SKU '{$sku}' for item '{$name}'.");
-            }
+            $zohoItemId = $this->resolveOrSyncZohoItemIdForLineItem($item, $order);
 
             $taxId = $this->resolveZohoTaxId($item['tax_lines'] ?? [], $order);
 
@@ -2965,13 +3080,24 @@ class ZohoService
             $this->markSalesOrderAsFulfilled($zohoSalesOrderId);
         }
 
-        SyncHistory::create([
+        SyncLogger::record([
             'shop_id' => $this->shop->id,
-            'action' => $created ? 'created' : ($updated ? 'updated' : 'synced'),
-            'status' => 'success',
-            'zoho_item_id' => $zohoSalesOrderId,
+            'order_id' => $order->id,
+            'entity' => 'order',
+            'action' => $created ? 'CREATE' : ($updated ? 'UPDATE' : 'SYNC'),
+            'trigger' => $trigger,
+            'trigger_subtype' => $triggerSubtype,
+            'status' => 'SUCCESS',
+            'shopify_id' => $order->shopify_order_id,
+            'zoho_id' => $zohoSalesOrderId,
             'message' => $created ? 'Sales Order created in Zoho Books.' : 'Sales Order updated in Zoho Books.',
-            'synced_at' => now(),
+            'metadata' => [
+                'order_number' => $order->order_number ? "#{$order->order_number}" : null,
+                'amount' => (float) $order->total_price,
+                'currency' => $order->currency ?? 'USD',
+                'zoho_sales_order_id' => $zohoSalesOrderId,
+                'zoho_sales_order_number' => $order->zoho_sales_order_number,
+            ],
         ]);
 
         $soRef = $order->zoho_sales_order_number ?: ($zohoSalesOrderId ? "SO-{$zohoSalesOrderId}" : '');
@@ -3084,8 +3210,10 @@ class ZohoService
     /**
      * Synchronize a Shopify Order as a Zoho Invoice.
      */
-    public function syncInvoice(Order $order): array
+    public function syncInvoice(Order $order, array $options = []): array
     {
+        $trigger = $options['trigger'] ?? 'automatic';
+        $triggerSubtype = $options['trigger_subtype'] ?? ($trigger === 'automatic' ? 'invoice_sync' : null);
         if ($order->shop_id !== $this->shop->id) {
             throw new \Exception("Order #{$order->id} does not belong to shop {$this->shop->shop_domain}");
         }
@@ -3187,56 +3315,7 @@ class ZohoService
         foreach ($rawLineItems as $item) {
             $shopifyVariantId = $item['variant_id'] ?? null;
             $sku = $item['sku'] ?? null;
-            $zohoItemId = null;
-
-            if ($shopifyVariantId) {
-                $formattedVariantId = str_starts_with((string) $shopifyVariantId, 'gid://')
-                    ? $shopifyVariantId
-                    : "gid://shopify/ProductVariant/{$shopifyVariantId}";
-
-                $variant = ProductVariant::where('shopify_variant_id', $formattedVariantId)
-                    ->whereHas('product', function ($q) {
-                        $q->where('shop_id', $this->shop->id);
-                    })
-                    ->first();
-
-                if ($variant && !empty($variant->zoho_item_id)) {
-                    $zohoItemId = $variant->zoho_item_id;
-                }
-            }
-
-            if (!$zohoItemId && !empty($sku)) {
-                $variantBySku = ProductVariant::where('sku', $sku)
-                    ->whereHas('product', function ($q) {
-                        $q->where('shop_id', $this->shop->id);
-                    })
-                    ->first();
-
-                if ($variantBySku && !empty($variantBySku->zoho_item_id)) {
-                    $zohoItemId = $variantBySku->zoho_item_id;
-                } else {
-                    $zohoItem = $this->findZohoItemBySku($sku);
-                    if ($zohoItem && !empty($zohoItem['item_id'])) {
-                        $zohoItemId = $zohoItem['item_id'];
-                    }
-                }
-            }
-
-            if (!$zohoItemId) {
-                $identifier = $sku ? "SKU '{$sku}'" : "variant ID '{$shopifyVariantId}'";
-                $errMsg = "Unmapped Shopify product variant/SKU '{$sku}' for order #{$order->order_number}. Invoice creation aborted.";
-
-                SyncHistory::create([
-                    'shop_id' => $this->shop->id,
-                    'order_id' => $order->id,
-                    'action' => 'create',
-                    'status' => 'failed',
-                    'message' => $errMsg,
-                    'synced_at' => now(),
-                ]);
-
-                throw new \Exception($errMsg);
-            }
+            $zohoItemId = $this->resolveOrSyncZohoItemIdForLineItem($item, $order);
 
             $taxId = $this->resolveZohoTaxId($item['tax_lines'] ?? [], $order);
 
@@ -3363,9 +3442,40 @@ class ZohoService
                 $zohoData = $this->updateInvoice($localInvoice, $order, $invoicePayload);
                 $updated = true;
             } else {
-                $zohoData = $this->createInvoiceFromSalesOrder($order->zoho_sales_order_id);
-                $zohoInvoiceId = $zohoData['invoice_id'] ?? null;
-                $created = true;
+                try {
+                    $zohoData = $this->createInvoiceFromSalesOrder($order->zoho_sales_order_id);
+                    $zohoInvoiceId = $zohoData['invoice_id'] ?? null;
+                    $created = true;
+                } catch (\Throwable $invEx) {
+                    $invCode = $invEx->getCode();
+                    $invMsg = strtolower($invEx->getMessage());
+
+                    // Zoho code 36026 or "no items in this sales order to be invoiced" means the Sales Order is already invoiced in Zoho Books
+                    if ($invCode == 36026 || str_contains($invMsg, 'no items in this sales order to be invoiced') || str_contains($invMsg, 'already invoiced')) {
+                        Log::info("syncInvoice: Sales Order {$order->zoho_sales_order_id} is already invoiced in Zoho. Reconciling existing invoice for order #{$order->order_number}.");
+                        $existingZohoInv = $this->findZohoInvoiceByReferenceNumber($order->order_number);
+                        if (!$existingZohoInv && !empty($order->zoho_sales_order_id)) {
+                            try {
+                                $invListRes = $this->makeRequest('GET', "/books/v3/invoices?salesorder_id={$order->zoho_sales_order_id}");
+                                $invList = $invListRes['invoices'] ?? [];
+                                if (!empty($invList[0]['invoice_id'])) {
+                                    $existingZohoInv = $invList[0];
+                                }
+                            } catch (\Throwable $e) {
+                                Log::warning("syncInvoice: Failed to query invoices by salesorder_id: " . $e->getMessage());
+                            }
+                        }
+
+                        if ($existingZohoInv && !empty($existingZohoInv['invoice_id'])) {
+                            $zohoInvoiceId = (string) $existingZohoInv['invoice_id'];
+                            $zohoData = $existingZohoInv;
+                        } else {
+                            throw $invEx;
+                        }
+                    } else {
+                        throw $invEx;
+                    }
+                }
             }
         } catch (\Throwable $e) {
             SyncHistory::create([
@@ -3406,15 +3516,26 @@ class ZohoService
         );
 
         // 6. Record Sync History
-        SyncHistory::create([
+        SyncLogger::record([
             'shop_id' => $this->shop->id,
             'order_id' => $order->id,
             'invoice_id' => $invoice->id,
-            'action' => $created ? 'create' : 'update',
-            'status' => 'success',
+            'entity' => 'invoice',
+            'action' => $created ? 'CREATE' : 'UPDATE',
+            'trigger' => $trigger,
+            'trigger_subtype' => $triggerSubtype,
+            'status' => 'SUCCESS',
+            'shopify_id' => $order->shopify_order_id,
+            'zoho_id' => $zohoInvoiceId,
             'zoho_invoice_id' => $zohoInvoiceId,
             'message' => $created ? 'Invoice created in Zoho Books.' : 'Invoice updated in Zoho Books.',
-            'synced_at' => now(),
+            'metadata' => [
+                'order_number' => $order->order_number ? "#{$order->order_number}" : null,
+                'invoice_number' => $invoice->invoice_number,
+                'amount' => (float) $invoice->amount,
+                'currency' => $invoice->currency ?? 'USD',
+                'zoho_invoice_id' => $zohoInvoiceId,
+            ],
         ]);
 
         $invRef = $invoice->invoice_number ?: ($zohoInvoiceId ? "INV-{$zohoInvoiceId}" : '');
@@ -3543,17 +3664,86 @@ class ZohoService
     }
 
     /**
+     * Search Zoho Books for an existing Customer Payment matching an Invoice and Order.
+     */
+    public function findZohoCustomerPaymentForInvoice(Invoice $invoice, Payment $payment): ?array
+    {
+        $order = $payment->order;
+        $refNumber = $payment->payment_reference
+            ?? $payment->shopify_transaction_id
+            ?? "PAY-ORD-{$order->id}-{$payment->id}";
+
+        try {
+            // 1. Try finding by reference number first
+            $byRef = $this->findZohoCustomerPaymentByReferenceNumber($refNumber);
+            if ($byRef && !empty($byRef['payment_id'])) {
+                return $byRef;
+            }
+
+            // 2. Fetch customer payments and filter strictly by invoice number or invoice ID
+            $response = $this->makeRequest('GET', '/books/v3/customerpayments');
+            $payments = $response['customerpayments'] ?? ($response['payments'] ?? []);
+
+            foreach ($payments as $p) {
+                $payId = (string) ($p['payment_id'] ?? '');
+                if (empty($payId)) {
+                    continue;
+                }
+
+                // Check invoice_numbers string matching invoice_number
+                $invNumbers = (string) ($p['invoice_numbers'] ?? '');
+                if (!empty($invoice->invoice_number) && str_contains($invNumbers, $invoice->invoice_number)) {
+                    return $p;
+                }
+
+                // Check reference_number
+                $pRef = (string) ($p['reference_number'] ?? '');
+                if (!empty($pRef) && ($pRef === $refNumber || $pRef === $payment->shopify_transaction_id)) {
+                    return $p;
+                }
+            }
+
+            // 3. Fallback: Detailed lookup per payment if invoice_numbers wasn't populated
+            foreach ($payments as $p) {
+                $payId = (string) ($p['payment_id'] ?? '');
+                if (empty($payId) || empty($invoice->zoho_invoice_id)) {
+                    continue;
+                }
+
+                try {
+                    $detail = $this->makeRequest('GET', "/books/v3/customerpayments/{$payId}");
+                    $appliedInvoices = $detail['payment']['invoices'] ?? [];
+                    foreach ($appliedInvoices as $inv) {
+                        if (($inv['invoice_id'] ?? '') === $invoice->zoho_invoice_id || (!empty($invoice->invoice_number) && ($inv['invoice_number'] ?? '') === $invoice->invoice_number)) {
+                            return $detail['payment'];
+                        }
+                    }
+                } catch (\Throwable $e) {
+                    // Continue checking next candidate
+                }
+            }
+
+            return null;
+        } catch (\Throwable $e) {
+            Log::warning("findZohoCustomerPaymentForInvoice failed for invoice {$invoice->id}: " . $e->getMessage());
+            return null;
+        }
+    }
+
+    /**
      * Synchronize a local Payment to Zoho Books as a Customer Payment.
      */
-    public function syncPayment(Payment $payment): array
+    public function syncPayment(Payment $payment, array $options = []): array
     {
+        $trigger = $options['trigger'] ?? 'automatic';
+        $triggerSubtype = $options['trigger_subtype'] ?? ($trigger === 'automatic' ? 'payment_sync' : null);
         if ($payment->shop_id !== $this->shop->id) {
             throw new \Exception("Payment #{$payment->id} does not belong to shop {$this->shop->shop_domain}");
         }
 
         $payment->unsetRelations();
         $payment->refresh();
-        if ($payment->sync_status === Payment::SYNC_STATUS_SYNCED && !empty($payment->zoho_payment_id)) {
+        if ($payment->sync_status === Payment::SYNC_STATUS_SYNCED && !empty($payment->zoho_payment_id) && !str_contains($payment->zoho_payment_id, '-ORD-') && !str_contains($payment->zoho_payment_id, '-DUP-') && !str_contains($payment->zoho_payment_id, 'SYNCD-')) {
             return [
                 'success' => true,
                 'created' => false,
@@ -3590,16 +3780,31 @@ class ZohoService
                 ->first() ?? $order->invoice;
 
             if (!$invoice || empty($invoice->zoho_invoice_id)) {
-                $this->syncInvoice($order);
-                $order->unsetRelations();
-                $order->refresh();
-                $invoice = Invoice::where('shop_id', $this->shop->id)
-                    ->where('order_id', $order->id)
-                    ->first() ?? $order->invoice;
+                try {
+                    $this->syncInvoice($order);
+                    $order->unsetRelations();
+                    $order->refresh();
+                    $invoice = Invoice::where('shop_id', $this->shop->id)
+                        ->where('order_id', $order->id)
+                        ->first() ?? $order->invoice;
+                } catch (\Throwable $invEx) {
+                    Log::warning("syncPayment: Auto invoice sync failed for payment #{$payment->id}: " . $invEx->getMessage());
+                }
             }
 
             if (!$invoice || empty($invoice->zoho_invoice_id)) {
-                throw new \Exception("Cannot sync payment #{$payment->id} for order #{$order->order_number}: Zoho Invoice ID is missing.");
+                $payment->update([
+                    'sync_status' => Payment::SYNC_STATUS_FAILED,
+                    'error_message' => "Cannot sync payment #{$payment->id} for order #{$order->order_number}: Zoho Invoice ID is missing.",
+                ]);
+                return [
+                    'success' => false,
+                    'created' => false,
+                    'updated' => false,
+                    'sync_status' => Payment::SYNC_STATUS_FAILED,
+                    'payment_id' => $payment->id,
+                    'message' => "Cannot sync payment #{$payment->id} for order #{$order->order_number}: Zoho Invoice ID is missing.",
+                ];
             }
 
             // 3 & 4. Set payment.invoice_id and payment.zoho_invoice_id from Invoice & persist
@@ -3633,94 +3838,128 @@ class ZohoService
                 throw new \Exception("Cannot sync payment #{$payment->id} for order #{$order->order_number}: Customer sync to Zoho failed.");
             }
 
-            // 4. Validate Amount & Currency
-            $amount = (float) $payment->amount;
-            if ($amount <= 0.00) {
-                throw new \Exception("Cannot sync payment #{$payment->id}: Invalid payment amount ({$amount}). Amount must be greater than 0.");
+            // 3. Ensure Invoice is created & reconciled in Zoho Books first
+            $invoice = Invoice::where('shop_id', $this->shop->id)
+                ->where('order_id', $order->id)
+                ->first();
+
+            if (!$invoice || empty($invoice->zoho_invoice_id)) {
+                $syncRes = $this->syncInvoice($order);
+                $invoice = Invoice::where('shop_id', $this->shop->id)
+                    ->where('order_id', $order->id)
+                    ->first();
             }
 
-            if (!empty($payment->currency) && !empty($invoice->currency)) {
-                if (strcasecmp(trim($payment->currency), trim($invoice->currency)) !== 0) {
-                    throw new \Exception("Cannot sync payment #{$payment->id}: Currency mismatch (Payment: {$payment->currency}, Invoice: {$invoice->currency}).");
+        if (!$invoice || empty($invoice->zoho_invoice_id)) {
+            throw new \Exception("Cannot sync payment #{$payment->id}: Invoice missing for order #{$order->order_number}.");
+        }
+
+        // 4. Strictly Validate Payment Currency against Invoice Currency
+        if (!empty($payment->currency) && !empty($invoice->currency)) {
+            if (strcasecmp(trim($payment->currency), trim($invoice->currency)) !== 0) {
+                throw new \Exception("Cannot sync payment #{$payment->id}: Currency mismatch (Payment: {$payment->currency}, Invoice: {$invoice->currency}).");
+            }
+        }
+
+        // 5. Over-Allocation & Currency Conversion Rounding Tolerance
+        $alreadyAppliedAmount = (float) Payment::where('invoice_id', $invoice->id)
+            ->where('sync_status', Payment::SYNC_STATUS_SYNCED)
+            ->where('id', '!=', $payment->id)
+            ->sum('amount');
+        $invoiceTotal = (float) $invoice->amount;
+        $remainingBalance = max(0.00, $invoiceTotal - $alreadyAppliedAmount);
+
+        $amount = (float) $payment->amount;
+        $amountApplied = $amount;
+        $overAmount = round($amount - $remainingBalance, 4);
+
+        if ($overAmount > 0.02) {
+            throw new \Exception("Cannot sync payment #{$payment->id}: Payment amount ({$amount}) exceeds remaining invoice balance ({$remainingBalance}). Over-allocation is not supported.");
+        }
+
+        // Fetch live Zoho invoice to get exact balance due if available
+        if (!empty($invoice->zoho_invoice_id)) {
+            try {
+                $zohoInvDetail = $this->makeRequest('GET', "/books/v3/invoices/{$invoice->zoho_invoice_id}");
+                if (is_array($zohoInvDetail)) {
+                    $zohoInvObj = $zohoInvDetail['invoice'] ?? [];
+                    if (isset($zohoInvObj['balance'])) {
+                        $remainingBalance = (float) $zohoInvObj['balance'];
+                    }
                 }
+            } catch (\Throwable $e) {
+                Log::warning("syncPayment: Could not fetch live Zoho invoice balance for {$invoice->zoho_invoice_id}: " . $e->getMessage());
             }
+        }
 
-            // 5. Over-Allocation & Currency Conversion Rounding Tolerance
-            $alreadyAppliedAmount = (float) Payment::where('invoice_id', $invoice->id)
-                ->where('sync_status', Payment::SYNC_STATUS_SYNCED)
-                ->where('id', '!=', $payment->id)
-                ->sum('amount');
-            $invoiceTotal = (float) $invoice->amount;
-            $remainingBalance = max(0.00, $invoiceTotal - $alreadyAppliedAmount);
+        if ($overAmount > 0.00) {
+            $currencyCode = strtoupper(trim((string) ($invoice->currency ?: 'USD')));
+            Log::info("syncPayment: Payment #{$payment->id} amount ({$amount}) exceeds remaining invoice balance ({$remainingBalance}) by {$overAmount} {$currencyCode}. Clamping amount_applied to {$remainingBalance}.");
+            $amountApplied = $remainingBalance;
+        }
 
-            $amountApplied = $amount;
-            $overAmount = round($amount - $remainingBalance, 4);
+        // 6. Resolve Payment Gateway Mapping & Account
+        $gatewayMapping = $this->getPaymentGatewayMapping($payment->payment_method);
+        $paymentMode = $gatewayMapping['payment_mode'];
+        $accountId = $gatewayMapping['account_id'] ?? null;
 
-            if ($overAmount > 0.00) {
-                // Currency-aware rounding precision limit: up to 0.02 units (e.g. $0.01 / $0.02 gateway exchange rate rounding)
-                if ($overAmount <= 0.02) {
-                    $currencyCode = strtoupper(trim((string) ($invoice->currency ?: 'USD')));
-                    Log::info("syncPayment: Payment #{$payment->id} amount ({$amount}) exceeds remaining invoice balance ({$remainingBalance}) by {$overAmount} {$currencyCode} due to gateway currency conversion rounding. Clamping amount_applied to {$remainingBalance}.");
-                    $amountApplied = $remainingBalance;
-                } else {
-                    throw new \Exception("Cannot sync payment #{$payment->id}: Payment amount ({$amount}) exceeds remaining invoice balance ({$remainingBalance}). Over-allocation is not supported.");
-                }
+        // 7. Resolve Payment Reference (Deterministic & Clamped to 100 chars)
+        $refNumber = $payment->payment_reference
+            ?? $payment->shopify_transaction_id
+            ?? "PAY-ORD-{$order->id}-{$payment->id}";
+
+        $refNumber = substr(trim((string) $refNumber), 0, 100);
+
+        if (empty($payment->payment_reference)) {
+            $payment->payment_reference = $refNumber;
+        }
+
+        // 8. Idempotency & Crash Recovery: Check existing local or Zoho payment
+        $zohoPaymentId = $payment->zoho_payment_id;
+
+        // Strip any legacy synthetic value if present
+        if (!empty($zohoPaymentId) && (str_contains($zohoPaymentId, '-ORD-') || str_contains($zohoPaymentId, '-DUP-') || str_contains($zohoPaymentId, 'SYNCD-'))) {
+            $zohoPaymentId = null;
+            $payment->update(['zoho_payment_id' => null]);
+        }
+
+        $created = false;
+        $updated = false;
+
+        if (empty($zohoPaymentId)) {
+            $existingZohoPayment = $this->findZohoCustomerPaymentForInvoice($invoice, $payment);
+            if ($existingZohoPayment && !empty($existingZohoPayment['payment_id'])) {
+                $zohoPaymentId = (string) $existingZohoPayment['payment_id'];
+                $updated = true;
+                Log::info("syncPayment: Recovered existing Zoho payment ID {$zohoPaymentId} for payment #{$payment->id} (Order #{$order->order_number}).");
             }
+        }
 
-            // 6. Resolve Payment Gateway Mapping & Account
-            $gatewayMapping = $this->getPaymentGatewayMapping($payment->payment_method);
-            $paymentMode = $gatewayMapping['payment_mode'];
-            $accountId = $gatewayMapping['account_id'] ?? null;
+        // 9. Create Customer Payment in Zoho if not already present
+        if (empty($zohoPaymentId)) {
+            $paymentDateStr = $payment->payment_date
+                ? $payment->payment_date->format('Y-m-d')
+                : date('Y-m-d');
 
-            // 7. Resolve Payment Reference (Deterministic & Clamped to 100 chars)
-            $refNumber = $payment->payment_reference
-                ?? $payment->shopify_transaction_id
-                ?? "PAY-ORD-{$order->id}-{$payment->id}";
-
-            $refNumber = substr(trim((string) $refNumber), 0, 100);
-
-            if (empty($payment->payment_reference)) {
-                $payment->payment_reference = $refNumber;
-            }
-
-            // 8. Idempotency & Crash Recovery: Check existing local or Zoho payment
-            $zohoPaymentId = $payment->zoho_payment_id;
-            $created = false;
-            $updated = false;
-
-            if (empty($zohoPaymentId)) {
-                $existingZohoPayment = $this->findZohoCustomerPaymentByReferenceNumber($refNumber);
-                if ($existingZohoPayment && !empty($existingZohoPayment['payment_id'])) {
-                    $zohoPaymentId = (string) $existingZohoPayment['payment_id'];
-                    $updated = true;
-                    Log::info("syncPayment: Recovered existing Zoho payment ID {$zohoPaymentId} for payment #{$payment->id} via ref {$refNumber}.");
-                }
-            }
-
-            // 9. Create Customer Payment in Zoho if not already present
-            if (empty($zohoPaymentId)) {
-                $paymentDateStr = $payment->payment_date
-                    ? $payment->payment_date->format('Y-m-d')
-                    : date('Y-m-d');
-
-                $payload = [
-                    'customer_id' => $customer->zoho_contact_id,
-                    'payment_mode' => $paymentMode,
-                    'amount' => $amount,
-                    'date' => $paymentDateStr,
-                    'reference_number' => $refNumber,
-                    'invoices' => [
-                        [
-                            'invoice_id' => $invoice->zoho_invoice_id,
-                            'amount_applied' => $amountApplied,
-                        ],
+            $payload = [
+                'customer_id' => $customer->zoho_contact_id,
+                'payment_mode' => $paymentMode,
+                'amount' => $amount,
+                'date' => $paymentDateStr,
+                'reference_number' => $refNumber,
+                'invoices' => [
+                    [
+                        'invoice_id' => $invoice->zoho_invoice_id,
+                        'amount_applied' => $amountApplied,
                     ],
-                ];
+                ],
+            ];
 
-                if (!empty($accountId)) {
-                    $payload['account_id'] = $accountId;
-                }
+            if (!empty($accountId)) {
+                $payload['account_id'] = $accountId;
+            }
 
+            try {
                 $zohoResponse = $this->createCustomerPayment($payload);
                 $zohoPaymentId = (string) ($zohoResponse['payment_id'] ?? $zohoResponse['customerpayment_id'] ?? null);
 
@@ -3729,9 +3968,48 @@ class ZohoService
                 }
 
                 $created = true;
-            }
+            } catch (\Throwable $payEx) {
+                $payCode = $payEx->getCode();
+                $payMsg = strtolower($payEx->getMessage());
 
-            // 10. Persist Local Payment State
+                if ($payCode == 24016 || str_contains($payMsg, 'more than the balance due') || str_contains($payMsg, 'balance due')) {
+                    Log::info("syncPayment: Invoice {$invoice->zoho_invoice_id} is already paid or has 0 balance due. Searching for matching existing payment in Zoho.");
+                    $existingZohoPayment = $this->findZohoCustomerPaymentForInvoice($invoice, $payment);
+                    if ($existingZohoPayment && !empty($existingZohoPayment['payment_id'])) {
+                        $zohoPaymentId = (string) $existingZohoPayment['payment_id'];
+                        $updated = true;
+                    } else {
+                        throw $payEx;
+                    }
+                } else {
+                    throw $payEx;
+                }
+            }
+        }
+
+        // 10. Persist Local Payment State (Strict REAL Zoho Payment ID only)
+        $existingOwner = Payment::where('shop_id', $this->shop->id)
+            ->where('zoho_payment_id', $zohoPaymentId)
+            ->first();
+
+        if ($existingOwner && $existingOwner->id !== $payment->id) {
+            if ($existingOwner->order_id === $order->id) {
+                // Reconcile duplicate local payment row for SAME order
+                $existingOwner->update([
+                    'invoice_id' => $invoice->id,
+                    'zoho_invoice_id' => $invoice->zoho_invoice_id,
+                    'payment_reference' => $refNumber,
+                    'sync_status' => Payment::SYNC_STATUS_SYNCED,
+                    'synced_at' => now(),
+                    'error_message' => null,
+                ]);
+                $payment->delete();
+                $payment = $existingOwner;
+            } else {
+                // Different order in local DB has this payment ID.
+                throw new \Exception("Zoho Payment ID {$zohoPaymentId} belongs to a different order (#{$existingOwner->order_id}) in local database.");
+            }
+        } else {
             $payment->update([
                 'invoice_id' => $invoice->id,
                 'zoho_payment_id' => $zohoPaymentId,
@@ -3741,19 +4019,31 @@ class ZohoService
                 'synced_at' => now(),
                 'error_message' => null,
             ]);
+        }
 
             // 11. Record Sync History
-            SyncHistory::create([
+            SyncLogger::record([
                 'shop_id' => $this->shop->id,
                 'order_id' => $order->id,
                 'invoice_id' => $invoice->id,
                 'payment_id' => $payment->id,
-                'action' => $created ? 'create' : 'synced',
-                'status' => 'success',
+                'entity' => 'payment',
+                'action' => $created ? 'CREATE' : 'SYNC',
+                'trigger' => $trigger,
+                'trigger_subtype' => $triggerSubtype,
+                'status' => 'SUCCESS',
+                'shopify_id' => $payment->shopify_transaction_id,
+                'zoho_id' => $zohoPaymentId,
                 'zoho_payment_id' => $zohoPaymentId,
                 'zoho_invoice_id' => $invoice->zoho_invoice_id,
                 'message' => $created ? 'Customer payment created in Zoho Books.' : 'Customer payment synced/reconciled with Zoho Books.',
-                'synced_at' => now(),
+                'metadata' => [
+                    'order_number' => $order->order_number ? "#{$order->order_number}" : null,
+                    'payment_reference' => $payment->payment_reference,
+                    'amount' => (float) $payment->amount,
+                    'currency' => $payment->currency ?? $order->currency ?? 'USD',
+                    'zoho_payment_id' => $zohoPaymentId,
+                ],
             ]);
 
             $payRef = $zohoPaymentId ? "Payment #{$zohoPaymentId}" : ($payment->payment_reference ?: "Payment #{$payment->id}");
@@ -3780,16 +4070,20 @@ class ZohoService
                 'error_message' => $e->getMessage(),
             ]);
 
-            SyncHistory::create([
+            SyncLogger::record([
                 'shop_id' => $this->shop->id,
                 'order_id' => $payment->order_id ?? null,
                 'invoice_id' => $payment->invoice_id ?? null,
                 'payment_id' => $payment->id,
-                'action' => 'create',
-                'status' => 'failed',
-                'zoho_payment_id' => $payment->zoho_payment_id ?? null,
+                'entity' => 'payment',
+                'action' => 'CREATE',
+                'trigger' => $trigger,
+                'trigger_subtype' => $triggerSubtype,
+                'status' => 'FAILED',
+                'shopify_id' => $payment->shopify_transaction_id,
+                'zoho_id' => $payment->zoho_payment_id ?? null,
+                'error_message' => $e->getMessage(),
                 'message' => 'Zoho Payment sync failed: ' . $e->getMessage(),
-                'synced_at' => now(),
             ]);
 
             throw $e;

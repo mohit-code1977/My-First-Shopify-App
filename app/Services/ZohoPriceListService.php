@@ -60,8 +60,7 @@ class ZohoPriceListService
      * Find an integration-managed price list by currency code.
      * Returns null if not found.
      */
-    public function findManagedPriceList(string $currencyCode): ?array
-    {
+    public function findManagedPriceList(string $currencyCode): ?array {
         $expectedName = $this->getPriceListName($currencyCode);
         $priceLists = $this->getPriceLists();
 
@@ -81,7 +80,7 @@ class ZohoPriceListService
      *
      * @return array The price list record (with pricebook_id)
      */
-    public function getOrCreatePriceList(string $currencyCode): array
+    public function getOrCreatePriceList(string $currencyCode, ?string $initialItemId = null, ?float $initialRate = null): array
     {
         $currencyCode = strtoupper(trim($currencyCode));
 
@@ -104,9 +103,34 @@ class ZohoPriceListService
             'name' => $name,
             'currency_id' => $currencyId,
             'description' => "Managed by Shopify integration. Prices in {$currencyCode}.",
-            'pricebook_type' => 'sales',
+            'pricebook_type' => 'per_item',
+            'sales_or_purchase_type' => 'sales',
             'rounding_type' => 'no_rounding',
         ];
+
+        if ($initialItemId && $initialRate !== null) {
+            $payload['pricebook_items'] = [
+                [
+                    'item_id' => $initialItemId,
+                    'pricebook_rate' => (float) $initialRate,
+                ],
+            ];
+        } else {
+            try {
+                $itemsResponse = $this->zohoService->makeRequest('GET', '/books/v3/items', ['per_page' => 1]);
+                $firstItem = $itemsResponse['items'][0] ?? null;
+                if ($firstItem && !empty($firstItem['item_id'])) {
+                    $payload['pricebook_items'] = [
+                        [
+                            'item_id' => (string) $firstItem['item_id'],
+                            'pricebook_rate' => (float) ($firstItem['rate'] ?? 0.00),
+                        ],
+                    ];
+                }
+            } catch (\Throwable $ex) {
+                Log::warning("ZohoPriceListService: Could not fetch initial item for pricebook creation: " . $ex->getMessage());
+            }
+        }
 
         try {
             $response = $this->zohoService->makeRequest('POST', '/books/v3/pricebooks', $payload);

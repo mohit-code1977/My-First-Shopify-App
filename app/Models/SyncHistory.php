@@ -4,7 +4,8 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 
-class SyncHistory extends Model {
+class SyncHistory extends Model
+{
     protected $fillable = [
         'shop_id',
         'product_variant_id',
@@ -12,17 +13,31 @@ class SyncHistory extends Model {
         'invoice_id',
         'payment_id',
         'refund_id',
+        'entity',
         'action',
+        'trigger',
+        'trigger_subtype',
         'status',
+        'shopify_id',
+        'zoho_id',
         'zoho_item_id',
         'zoho_invoice_id',
         'zoho_payment_id',
         'zoho_creditnote_id',
+        'error_code',
+        'error_message',
+        'duration_ms',
+        'metadata',
         'message',
+        'started_at',
+        'completed_at',
         'synced_at',
     ];
 
     protected $casts = [
+        'metadata' => 'array',
+        'started_at' => 'datetime',
+        'completed_at' => 'datetime',
         'synced_at' => 'datetime',
     ];
 
@@ -30,13 +45,19 @@ class SyncHistory extends Model {
         'entity_type',
         'entity_id',
         'details',
+        'trigger_label',
+        'formatted_duration',
     ];
 
     /**
-     * Virtual accessor for entity_type.
+     * Virtual accessor for entity_type (backward compatibility + normalized entity).
      */
     public function getEntityTypeAttribute(): string
     {
+        if (!empty($this->entity)) {
+            return strtolower($this->entity);
+        }
+
         if ($this->refund_id || !empty($this->zoho_creditnote_id)) {
             return 'refund';
         }
@@ -74,10 +95,47 @@ class SyncHistory extends Model {
     }
 
     /**
+     * Accessor for formatted trigger display (e.g. "Automatic → Order Sync" or "Manual").
+     */
+    public function getTriggerLabelAttribute(): string
+    {
+        $trig = ucfirst(strtolower((string) ($this->trigger ?? 'automatic')));
+
+        if (!empty($this->trigger_subtype)) {
+            $sub = str_replace('_', ' ', strtolower((string) $this->trigger_subtype));
+            $subWords = ucwords($sub);
+            return "{$trig} → {$subWords}";
+        }
+
+        return $trig;
+    }
+
+    /**
+     * Accessor for formatted duration (e.g. "342 ms" or "1.45 s").
+     */
+    public function getFormattedDurationAttribute(): string
+    {
+        if ($this->duration_ms === null || $this->duration_ms === 0) {
+            return '—';
+        }
+
+        if ($this->duration_ms < 1000) {
+            return "{$this->duration_ms} ms";
+        }
+
+        $seconds = round($this->duration_ms / 1000, 2);
+        return "{$seconds} s";
+    }
+
+    /**
      * Virtual accessor for entity_id.
      */
     public function getEntityIdAttribute(): ?string
     {
+        if (!empty($this->shopify_id)) {
+            return $this->shopify_id;
+        }
+
         if ($this->relationLoaded('productVariant') && $this->productVariant) {
             return $this->productVariant->sku ?: (string) $this->productVariant->id;
         }
@@ -112,30 +170,36 @@ class SyncHistory extends Model {
      */
     public function getDetailsAttribute(): ?string
     {
-        return $this->message;
+        return $this->error_message ?: $this->message;
     }
 
-    public function shop() {
+    public function shop()
+    {
         return $this->belongsTo(Shop::class);
     }
 
-    public function productVariant() {
+    public function productVariant()
+    {
         return $this->belongsTo(ProductVariant::class);
     }
 
-    public function order() {
+    public function order()
+    {
         return $this->belongsTo(Order::class);
     }
 
-    public function invoice() {
+    public function invoice()
+    {
         return $this->belongsTo(Invoice::class);
     }
 
-    public function payment() {
+    public function payment()
+    {
         return $this->belongsTo(Payment::class);
     }
 
-    public function refund() {
+    public function refund()
+    {
         return $this->belongsTo(Refund::class);
     }
 }

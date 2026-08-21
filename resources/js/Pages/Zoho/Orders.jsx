@@ -582,6 +582,26 @@ export default function Orders({
         const paySummary = getPaymentSummary(o);
         const isMenuOpen = openActionMenuId === o.id;
 
+        const shopDomainClean = (shopData?.shop_domain || shop?.shop_domain || "").replace(/^https?:\/\//, "").replace(/\/$/, "");
+
+        const rawOrderId = o.shopify_order_id || o.id;
+        const numOrderId = rawOrderId ? String(rawOrderId).replace(/[^0-9]/g, "") : null;
+        const orderAdminUrl = (shopDomainClean && numOrderId)
+            ? `https://${shopDomainClean}/admin/orders/${numOrderId}`
+            : null;
+
+        const orderDisplayName = o.name && String(o.name).startsWith('#')
+            ? o.name
+            : (o.order_number
+                ? (String(o.order_number).startsWith('#') ? o.order_number : `#${o.order_number}`)
+                : `#${o.shopify_order_id}`);
+
+        const rawCustId = o.customer?.shopify_customer_id || o.customer?.id;
+        const numCustId = rawCustId ? String(rawCustId).replace(/[^0-9]/g, "") : null;
+        const custAdminUrl = (shopDomainClean && numCustId)
+            ? `https://${shopDomainClean}/admin/customers/${numCustId}`
+            : null;
+
         return (
             <IndexTable.Row
                 id={o.id}
@@ -591,25 +611,57 @@ export default function Orders({
             >
                 <IndexTable.Cell>
                     <Text variant="bodyMd" fontWeight="bold" as="span">
-                        <span style={{ color: "#005bd3" }}>
-                            {o.name && String(o.name).startsWith('#')
-                                ? o.name
-                                : (o.order_number
-                                    ? (String(o.order_number).startsWith('#') ? o.order_number : `#${o.order_number}`)
-                                    : `#${o.shopify_order_id}`)}
-                        </span>
+                        {orderAdminUrl ? (
+                            <a
+                                href={orderAdminUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                onClick={(e) => e.stopPropagation()}
+                                style={{
+                                    color: "#005bd3",
+                                    textDecoration: "none",
+                                }}
+                                onMouseEnter={(e) => (e.currentTarget.style.textDecoration = "underline")}
+                                onMouseLeave={(e) => (e.currentTarget.style.textDecoration = "none")}
+                            >
+                                {orderDisplayName}
+                            </a>
+                        ) : (
+                            <span style={{ color: "#202223" }}>
+                                {orderDisplayName}
+                            </span>
+                        )}
                     </Text>
                 </IndexTable.Cell>
                 <IndexTable.Cell>
                     {o.customer ? (
                         <BlockStack gap="050">
-                            <Text
-                                variant="bodyMd"
-                                fontWeight="semibold"
-                                as="span"
-                            >
-                                {o.customer.first_name} {o.customer.last_name}
-                            </Text>
+                            {custAdminUrl ? (
+                                <a
+                                    href={custAdminUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    onClick={(e) => e.stopPropagation()}
+                                    style={{
+                                        color: "#005bd3",
+                                        fontWeight: 600,
+                                        fontSize: "14px",
+                                        textDecoration: "none",
+                                    }}
+                                    onMouseEnter={(e) => (e.currentTarget.style.textDecoration = "underline")}
+                                    onMouseLeave={(e) => (e.currentTarget.style.textDecoration = "none")}
+                                >
+                                    {o.customer.first_name} {o.customer.last_name}
+                                </a>
+                            ) : (
+                                <Text
+                                    variant="bodyMd"
+                                    fontWeight="semibold"
+                                    as="span"
+                                >
+                                    {o.customer.first_name} {o.customer.last_name}
+                                </Text>
+                            )}
                             <Text variant="bodySm" tone="subdued" as="span">
                                 {o.customer.email}
                             </Text>
