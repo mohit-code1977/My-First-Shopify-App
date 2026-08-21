@@ -731,34 +731,96 @@ class ZohoService
         throw new \Exception("Tax calculation failed for {$orderRef}: The order requires tax ({$taxSummary}), but no valid active Zoho tax mapping or default tax is configured in Settings.");
     }
 
-    private function getShopifyVariantFieldId(): string
+    public function getShopifyVariantFieldId(): string
     {
-        $response = $this->makeRequest(
-            'GET',
-            '/books/v3/settings/fields',
-            [
-                'entity' => 'item',
-                'filter_custom_fields' => 'true',
-                'skip_inactive_fields' => 'true',
-            ]
-        );
+        // 1. Check organization-specific mappings stored on ZohoConnection
+        $connection = $this->getConnection();
+        if ($connection && !empty($connection->custom_field_mappings)) {
+            $mappings = is_array($connection->custom_field_mappings)
+                ? $connection->custom_field_mappings
+                : json_decode((string) $connection->custom_field_mappings, true);
 
-        $fields = $response['fields'] ?? [];
-
-        foreach ($fields as $field) {
-            if (
-                ($field['api_name'] ?? null) ===
-                self::SHOPIFY_VARIANT_FIELD_API_NAME
-            ) {
-                return (string) $field['field_id'];
+            $fieldId = $mappings['item']['cf_shopify_variant_id']['field_id'] ?? null;
+            if ($fieldId) {
+                return (string) $fieldId;
             }
+        }
+
+        // 2. Query fields API as fallback
+        try {
+            $response = $this->makeRequest(
+                'GET',
+                '/books/v3/settings/fields',
+                [
+                    'entity' => 'item',
+                    'filter_custom_fields' => 'true',
+                    'skip_inactive_fields' => 'true',
+                ]
+            );
+
+            $fields = $response['fields'] ?? [];
+
+            foreach ($fields as $field) {
+                if (
+                    ($field['api_name'] ?? null) === self::SHOPIFY_VARIANT_FIELD_API_NAME ||
+                    strcasecmp($field['label_name'] ?? '', 'Shopify Variant ID') === 0
+                ) {
+                    return (string) ($field['field_id'] ?? $field['customfield_id']);
+                }
+            }
+        } catch (\Throwable $e) {
+            Log::warning("ZohoService: Exception while checking item custom fields: " . $e->getMessage());
+        }
+
+        // 3. If missing, attempt automatic preflight resolution
+        try {
+            $preflight = new ZohoPreflightService();
+            $result = $preflight->run($this->shop);
+            $fieldId = $result['custom_field_mappings']['item']['cf_shopify_variant_id']['field_id'] ?? null;
+            if ($fieldId) {
+                return (string) $fieldId;
+            }
+        } catch (\Throwable $preflightEx) {
+            Log::warning("ZohoService: Automatic preflight resolution failed: " . $preflightEx->getMessage());
         }
 
         throw new \Exception(
             'Zoho custom field "' .
             self::SHOPIFY_VARIANT_FIELD_API_NAME .
-            '" was not found.'
+            '" was not found and auto-provisioning was unsuccessful. Please run integration preflight.'
         );
+    }
+
+    public function getShopifyProductFieldId(): ?string
+    {
+        $connection = $this->getConnection();
+        if ($connection && !empty($connection->custom_field_mappings)) {
+            $mappings = is_array($connection->custom_field_mappings)
+                ? $connection->custom_field_mappings
+                : json_decode((string) $connection->custom_field_mappings, true);
+
+            $fieldId = $mappings['item']['cf_shopify_product_id']['field_id'] ?? null;
+            if ($fieldId) {
+                return (string) $fieldId;
+            }
+        }
+        return null;
+    }
+
+    public function getShopifyOrderFieldId(string $entity = 'salesorder'): ?string
+    {
+        $connection = $this->getConnection();
+        if ($connection && !empty($connection->custom_field_mappings)) {
+            $mappings = is_array($connection->custom_field_mappings)
+                ? $connection->custom_field_mappings
+                : json_decode((string) $connection->custom_field_mappings, true);
+
+            $fieldId = $mappings[$entity]['cf_shopify_order_id']['field_id'] ?? null;
+            if ($fieldId) {
+                return (string) $fieldId;
+            }
+        }
+        return null;
     }
 
 

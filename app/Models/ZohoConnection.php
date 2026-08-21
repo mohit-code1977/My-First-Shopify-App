@@ -19,6 +19,10 @@ class ZohoConnection extends Model
         'data_center',
         'scope',
         'inventory_capability',
+        'setup_status',
+        'custom_field_mappings',
+        'setup_summary',
+        'preflight_run_at',
         'expires_at',
         'connected_at',
         'disconnected_at',
@@ -28,6 +32,9 @@ class ZohoConnection extends Model
         'is_active' => 'boolean',
         'access_token' => 'encrypted',
         'refresh_token' => 'encrypted',
+        'custom_field_mappings' => 'array',
+        'setup_summary' => 'array',
+        'preflight_run_at' => 'datetime',
         'expires_at' => 'datetime',
         'connected_at' => 'datetime',
         'disconnected_at' => 'datetime',
@@ -41,5 +48,18 @@ class ZohoConnection extends Model
     public function scopeActive($query)
     {
         return $query->where('is_active', true);
+    }
+
+    public function getReadinessLabelAttribute(): string
+    {
+        if (!$this->is_active) {
+            return 'Disconnected';
+        }
+
+        return match ($this->setup_status) {
+            'ready' => 'Integration Ready',
+            'setup_required' => 'Connected — Setup Required',
+            default => 'Connected',
+        };
     }
 }

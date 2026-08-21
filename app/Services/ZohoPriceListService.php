@@ -103,12 +103,12 @@ class ZohoPriceListService
             'name' => $name,
             'currency_id' => $currencyId,
             'description' => "Managed by Shopify integration. Prices in {$currencyCode}.",
-            'pricebook_type' => 'per_item',
             'sales_or_purchase_type' => 'sales',
             'rounding_type' => 'no_rounding',
         ];
 
         if ($initialItemId && $initialRate !== null) {
+            $payload['pricebook_type'] = 'per_item';
             $payload['pricebook_items'] = [
                 [
                     'item_id' => $initialItemId,
@@ -120,15 +120,23 @@ class ZohoPriceListService
                 $itemsResponse = $this->zohoService->makeRequest('GET', '/books/v3/items', ['per_page' => 1]);
                 $firstItem = $itemsResponse['items'][0] ?? null;
                 if ($firstItem && !empty($firstItem['item_id'])) {
+                    $payload['pricebook_type'] = 'per_item';
                     $payload['pricebook_items'] = [
                         [
                             'item_id' => (string) $firstItem['item_id'],
                             'pricebook_rate' => (float) ($firstItem['rate'] ?? 0.00),
                         ],
                     ];
+                } else {
+                    $payload['pricebook_type'] = 'fixed_percentage';
+                    $payload['percentage'] = 0;
+                    $payload['percentage_type'] = 'markup';
                 }
             } catch (\Throwable $ex) {
                 Log::warning("ZohoPriceListService: Could not fetch initial item for pricebook creation: " . $ex->getMessage());
+                $payload['pricebook_type'] = 'fixed_percentage';
+                $payload['percentage'] = 0;
+                $payload['percentage_type'] = 'markup';
             }
         }
 

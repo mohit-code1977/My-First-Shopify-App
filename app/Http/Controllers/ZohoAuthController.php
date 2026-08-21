@@ -8,6 +8,7 @@ use App\Models\ZohoOauthState;
 use App\Services\ZohoDatacenter;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 
 class ZohoAuthController extends Controller {
     /**
@@ -439,6 +440,15 @@ class ZohoAuthController extends Controller {
                     'expires_at' => now()->addSeconds($tokenData['expires_in'] ?? 3600),
                 ]
             );
+
+            // Run integration preflight setup immediately post-connection
+            try {
+                $preflightService = new \App\Services\ZohoPreflightService();
+                $preflightResult = $preflightService->run($shopModel);
+                Log::info("Zoho OAuth Callback: Preflight setup completed for shop {$shopModel->id}: " . json_encode($preflightResult['summary'] ?? []));
+            } catch (\Throwable $preflightEx) {
+                Log::warning("Zoho OAuth Callback: Preflight setup encountered non-fatal exception for shop {$shopModel->id}: " . $preflightEx->getMessage());
+            }
 
             if ($wantsJson) {
                 return response()->json(['success' => true, 'message' => 'Zoho Books connected successfully.']);

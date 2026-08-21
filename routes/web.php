@@ -67,6 +67,9 @@ Route::middleware(['shopify.auth'])->group(function () {
     Route::get('/api/zoho/sync/history', [ZohoSyncController::class, 'historyData']);
     Route::get('/api/zoho/settings', [ZohoSyncController::class, 'settingsData']);
     Route::get('/api/zoho/dashboard', [ZohoSyncController::class, 'dashboardData']);
+    Route::get('/api/zoho/preflight', [ZohoSyncController::class, 'preflightData']);
+    Route::post('/zoho/preflight', [ZohoSyncController::class, 'runPreflight'])
+        ->name('zoho.preflight');
 
     Route::get('/shopify/products', [ShopifyProductController::class, 'products']);
 

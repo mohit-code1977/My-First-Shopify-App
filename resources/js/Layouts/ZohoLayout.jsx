@@ -10,6 +10,8 @@ export default function ZohoLayout({
     shopDomain: shopDomainProp = "",
     zohoConnected = null,
     connectionStatus = null,
+    readinessLabel = null,
+    setupStatus = null,
     host = "",
     activePage = "products",
     children,
@@ -177,6 +179,57 @@ export default function ZohoLayout({
         }
 
         const isConn = effectiveStatus === "connected";
+        if (!isConn) {
+            return (
+                <div
+                    style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "8px",
+                        padding: "6px 14px",
+                        borderRadius: "20px",
+                        fontSize: "13px",
+                        fontWeight: 600,
+                        backgroundColor: "#f1f2f4",
+                        color: "#616a75",
+                        border: "1px solid #d3d5d8",
+                    }}
+                >
+                    <span
+                        style={{
+                            width: "8px",
+                            height: "8px",
+                            borderRadius: "50%",
+                            backgroundColor: "#8c9196",
+                        }}
+                    />
+                    Not Connected
+                </div>
+            );
+        }
+
+        // Determine badge styling based on readiness state
+        const badgeLabel = readinessLabel || (setupStatus === "ready" ? "Integration Ready" : setupStatus === "setup_required" ? "Connected — Setup Required" : "Connected");
+        const isReady = setupStatus === "ready" || badgeLabel === "Integration Ready";
+        const isSetupRequired = setupStatus === "setup_required" || badgeLabel === "Connected — Setup Required";
+
+        let bgColor = "#eafbdf";
+        let textColor = "#108043";
+        let borderColor = "#b7eb8f";
+        let dotColor = "#108043";
+
+        if (isSetupRequired) {
+            bgColor = "#fff8e6";
+            textColor = "#8c6b00";
+            borderColor = "#ffe58f";
+            dotColor = "#b78103";
+        } else if (isReady) {
+            bgColor = "#e6f4ea";
+            textColor = "#137333";
+            borderColor = "#a8dab5";
+            dotColor = "#137333";
+        }
+
         return (
             <div
                 style={{
@@ -187,9 +240,9 @@ export default function ZohoLayout({
                     borderRadius: "20px",
                     fontSize: "13px",
                     fontWeight: 600,
-                    backgroundColor: isConn ? "#eafbdf" : "#f1f2f4",
-                    color: isConn ? "#108043" : "#616a75",
-                    border: isConn ? "1px solid #b7eb8f" : "1px solid #d3d5d8",
+                    backgroundColor: bgColor,
+                    color: textColor,
+                    border: `1px solid ${borderColor}`,
                 }}
             >
                 <span
@@ -197,10 +250,10 @@ export default function ZohoLayout({
                         width: "8px",
                         height: "8px",
                         borderRadius: "50%",
-                        backgroundColor: isConn ? "#108043" : "#8c9196",
+                        backgroundColor: dotColor,
                     }}
                 />
-                {isConn ? "Connected" : "Not Connected"}
+                {badgeLabel}
             </div>
         );
     };

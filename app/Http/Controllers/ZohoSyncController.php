@@ -289,6 +289,11 @@ class ZohoSyncController extends Controller
                 'is_connected' => $zohoConnection !== null && (bool) $zohoConnection->is_active,
                 'organization_name' => $zohoConnection?->organization_name ?: ($zohoConnection?->organization_id ? "Shopify Zoho Integration Demo" : 'Not Connected'),
                 'organization_id' => $zohoConnection?->organization_id ?: '60082438046',
+                'setup_status' => $zohoConnection?->setup_status ?: 'connected',
+                'readiness_label' => $zohoConnection?->readiness_label ?: ($zohoConnection?->is_active ? 'Connected' : 'Disconnected'),
+                'custom_field_mappings' => $zohoConnection?->custom_field_mappings ?? [],
+                'setup_summary' => $zohoConnection?->setup_summary ?? [],
+                'preflight_run_at' => $zohoConnection?->preflight_run_at?->toIso8601String(),
                 'account_identifier' => 'admin@zoho.com',
                 'region' => $region,
                 'datacenter' => $datacenter,
@@ -2497,6 +2502,55 @@ GRAPHQL;
             'success' => true,
             'message' => 'Zoho disconnected successfully.',
         ]);
+    }
+
+    public function preflightData(Request $request): JsonResponse
+    {
+        $shop = $request->attributes->get('shop') ?? $this->resolveShopModel($request);
+
+        if (!$shop) {
+            return response()->json(['success' => false, 'message' => 'No Shopify shop installed.'], 404);
+        }
+
+        $connection = ZohoConnection::where('shop_id', $shop->id)
+            ->where('is_active', true)
+            ->first();
+
+        return response()->json([
+            'success' => true,
+            'is_connected' => $connection !== null,
+            'setup_status' => $connection?->setup_status ?: 'connected',
+            'readiness_label' => $connection?->readiness_label ?: ($connection ? 'Connected' : 'Disconnected'),
+            'custom_field_mappings' => $connection?->custom_field_mappings ?? [],
+            'setup_summary' => $connection?->setup_summary ?? [],
+            'preflight_run_at' => $connection?->preflight_run_at?->toIso8601String(),
+        ]);
+    }
+
+    public function runPreflight(Request $request): JsonResponse
+    {
+        $shop = $request->attributes->get('shop') ?? $this->resolveShopModel($request);
+
+        if (!$shop) {
+            return response()->json(['success' => false, 'message' => 'No Shopify shop installed.'], 404);
+        }
+
+        try {
+            $preflightService = new \App\Services\ZohoPreflightService();
+            $result = $preflightService->run($shop);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Preflight setup executed successfully.',
+                'result' => $result,
+            ]);
+        } catch (\Throwable $ex) {
+            Log::error("Manual preflight execution failed for shop {$shop->id}: " . $ex->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Preflight setup failed: ' . $ex->getMessage(),
+            ], 500);
+        }
     }
 
     public function syncRefund(Request $request): JsonResponse
