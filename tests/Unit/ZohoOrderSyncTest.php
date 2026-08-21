@@ -842,5 +842,165 @@ class ZohoOrderSyncTest extends TestCase
         $this->assertEquals('4081216000000882200', $targetOrder['invoice']['zoho_invoice_id']);
         $this->assertEquals('INV-00089', $targetOrder['invoice']['invoice_number']);
     }
+
+    public function test_invoiced_sales_order_sync_reconciles_without_sending_immutable_updates_or_error_36567()
+    {
+        $order = Order::create([
+            'shop_id' => $this->shop->id,
+            'customer_id' => $this->customer->id,
+            'shopify_order_id' => 'gid://shopify/Order/99001',
+            'order_number' => '#99001',
+            'zoho_sales_order_id' => 'so_invoiced_99001',
+            'order_date' => now(),
+            'currency' => 'EUR',
+            'subtotal' => '100.00',
+            'total_price' => '100.00',
+            'line_items' => [
+                [
+                    'variant_id' => 'gid://shopify/ProductVariant/4001',
+                    'sku' => 'SKU-ORD-01',
+                    'name' => 'Red / Large',
+                    'quantity' => 1,
+                    'price' => 100.00,
+                ],
+            ],
+        ]);
+
+        Invoice::create([
+            'shop_id' => $this->shop->id,
+            'order_id' => $order->id,
+            'shopify_order_id' => $order->shopify_order_id,
+            'zoho_invoice_id' => 'inv_invoiced_99001',
+            'invoice_number' => 'INV-99001',
+            'status' => 'sent',
+            'amount' => '100.00',
+            'currency' => 'EUR',
+            'sync_status' => 'synced',
+        ]);
+
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/salesorders/so_invoiced_99001*' => Http::response([
+                'code' => 0,
+                'salesorder' => [
+                    'salesorder_id' => 'so_invoiced_99001',
+                    'status' => 'invoiced',
+                    'invoiced_status' => 'invoiced',
+                    'is_invoiced' => true,
+                ],
+            ], 200),
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncOrder($order);
+
+        $this->assertTrue($result['success']);
+        $this->assertTrue($result['reconciled']);
+        $this->assertFalse($result['updated']);
+        $this->assertEquals('so_invoiced_99001', $result['zoho_sales_order_id']);
+
+        // PUT request to update locked Sales Order fields MUST NOT be sent!
+        Http::assertNotSent(function (Request $request) {
+            return $request->method() === 'PUT' && str_contains($request->url(), '/books/v3/salesorders/so_invoiced_99001');
+        });
+    }
+
+    public function test_sync_order_catches_36567_error_from_zoho_and_reconciles_gracefully()
+    {
+        $order = Order::create([
+            'shop_id' => $this->shop->id,
+            'customer_id' => $this->customer->id,
+            'shopify_order_id' => 'gid://shopify/Order/99002',
+            'order_number' => '#99002',
+            'zoho_sales_order_id' => 'so_invoiced_99002',
+            'order_date' => now(),
+            'currency' => 'GBP',
+            'subtotal' => '80.00',
+            'total_price' => '80.00',
+            'line_items' => [
+                [
+                    'variant_id' => 'gid://shopify/ProductVariant/4001',
+                    'sku' => 'SKU-ORD-01',
+                    'name' => 'Red / Large',
+                    'quantity' => 1,
+                    'price' => 80.00,
+                ],
+            ],
+        ]);
+
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/salesorders/so_invoiced_99002*' => function (Request $request) {
+                if ($request->method() === 'GET') {
+                    return Http::response(['code' => 0, 'salesorder' => ['salesorder_id' => 'so_invoiced_99002', 'status' => 'confirmed']], 200);
+                }
+                if ($request->method() === 'PUT') {
+                    return Http::response([
+                        'code' => 36567,
+                        'message' => 'The currency cannot be updated now as the sales order has been invoiced already.',
+                    ], 400);
+                }
+                return Http::response(['code' => 0], 200);
+            },
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncOrder($order);
+
+        $this->assertTrue($result['success']);
+        $this->assertTrue($result['reconciled']);
+        $this->assertEquals('so_invoiced_99002', $result['zoho_sales_order_id']);
+    }
+
+    public function test_sync_invoice_for_already_invoiced_sales_order_reconciles_existing_invoice()
+    {
+        $order = Order::create([
+            'shop_id' => $this->shop->id,
+            'customer_id' => $this->customer->id,
+            'shopify_order_id' => 'gid://shopify/Order/99003',
+            'order_number' => '#99003',
+            'zoho_sales_order_id' => 'so_invoiced_99003',
+            'order_date' => now(),
+            'currency' => 'USD',
+            'subtotal' => '120.00',
+            'total_price' => '120.00',
+            'line_items' => [
+                [
+                    'variant_id' => 'gid://shopify/ProductVariant/4001',
+                    'sku' => 'SKU-ORD-01',
+                    'name' => 'Red / Large',
+                    'quantity' => 1,
+                    'price' => 120.00,
+                ],
+            ],
+        ]);
+
+        Http::fake([
+            'https://www.zohoapis.com/books/v3/invoices/inv_existing_99003*' => Http::response([
+                'code' => 36009,
+                'message' => 'The invoice cannot be updated as payments are associated with it.',
+            ], 400),
+            'https://www.zohoapis.com/books/v3/invoices*' => Http::response([
+                'code' => 0,
+                'invoices' => [
+                    [
+                        'invoice_id' => 'inv_existing_99003',
+                        'invoice_number' => 'INV-99003',
+                        'status' => 'paid',
+                    ],
+                ],
+            ], 200),
+        ]);
+
+        $zohoService = new ZohoService($this->shop);
+        $result = $zohoService->syncInvoice($order);
+
+        $this->assertTrue($result['success']);
+        $this->assertTrue($result['reconciled']);
+        $this->assertEquals('inv_existing_99003', $result['zoho_invoice_id']);
+
+        // POST request to create duplicate invoice from sales order MUST NOT be sent!
+        Http::assertNotSent(function (Request $request) {
+            return $request->method() === 'POST' && str_contains($request->url(), '/books/v3/invoices/fromsalesorder');
+        });
+    }
 }
 

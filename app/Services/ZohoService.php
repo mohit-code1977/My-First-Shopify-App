@@ -2656,6 +2656,52 @@ class ZohoService
     }
 
     /**
+     * Check if a Sales Order is already invoiced in Zoho Books or locally.
+     */
+    public function isSalesOrderInvoiced(?string $zohoSalesOrderId, Order $order): bool
+    {
+        if (Invoice::where('shop_id', $this->shop->id)
+            ->where('order_id', $order->id)
+            ->whereNotNull('zoho_invoice_id')
+            ->where('sync_status', '!=', 'failed')
+            ->exists()) {
+            return true;
+        }
+
+        if (!empty($zohoSalesOrderId)) {
+            try {
+                $soData = $this->getSalesOrder($zohoSalesOrderId);
+                if (!empty($soData)) {
+                    $status = strtolower((string) ($soData['status'] ?? ''));
+                    $invStatus = strtolower((string) ($soData['invoiced_status'] ?? ''));
+                    $isInvoiced = !empty($soData['is_invoiced']);
+                    $hasInvoices = !empty($soData['invoices']) && is_array($soData['invoices']) && count($soData['invoices']) > 0;
+
+                    if (in_array($status, ['invoiced', 'closed'], true) || $isInvoiced || $invStatus === 'invoiced' || $hasInvoices) {
+                        return true;
+                    }
+                }
+            } catch (\Throwable $e) {
+                // Ignore API fetch errors in detection helper
+            }
+        }
+
+        $refNumber = $order->order_number ?? (string) $order->shopify_order_id;
+        if (!empty($refNumber)) {
+            try {
+                $existingInv = $this->findZohoInvoiceByReferenceNumber($refNumber);
+                if (!empty($existingInv['invoice_id'])) {
+                    return true;
+                }
+            } catch (\Throwable $e) {
+                // Ignore lookup errors
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * Create a new Sales Order in Zoho Books.
      */
     public function createSalesOrder(array $payload): array
@@ -2884,23 +2930,51 @@ class ZohoService
         $triggerSubtype = $options['trigger_subtype'] ?? ($trigger === 'automatic' ? 'order_sync' : null);
         $financialStatus = strtolower(trim((string) ($order->financial_status ?? '')));
         $isCancelled = in_array($financialStatus, ['voided', 'cancelled'], true);
+        $refNumber = $order->order_number ?? (string) $order->shopify_order_id;
+        $zohoSalesOrderId = $order->zoho_sales_order_id;
+
+        if (!$zohoSalesOrderId && !empty($refNumber)) {
+            $existing = $this->findZohoSalesOrderByReferenceNumber($refNumber);
+            if ($existing && !empty($existing['salesorder_id'])) {
+                $zohoSalesOrderId = (string) $existing['salesorder_id'];
+                $order->zoho_sales_order_id = $zohoSalesOrderId;
+                $order->zoho_sales_order_number = $existing['salesorder_number'] ?? null;
+                $order->save();
+            }
+        }
+
+        $isAlreadyInvoiced = $this->isSalesOrderInvoiced($zohoSalesOrderId, $order);
 
         if ($isCancelled) {
-            $refNumber = $order->order_number ?? (string) $order->shopify_order_id;
-            $zohoSalesOrderId = $order->zoho_sales_order_id;
-
-            if (!$zohoSalesOrderId && !empty($refNumber)) {
-                $existing = $this->findZohoSalesOrderByReferenceNumber($refNumber);
-                if ($existing && !empty($existing['salesorder_id'])) {
-                    $zohoSalesOrderId = (string) $existing['salesorder_id'];
-                    $order->zoho_sales_order_id = $zohoSalesOrderId;
-                    $order->zoho_sales_order_number = $existing['salesorder_number'] ?? null;
-                    $order->save();
-                }
-            }
-
             if ($zohoSalesOrderId) {
-                $this->voidSalesOrder($zohoSalesOrderId);
+                $voidRes = $this->voidSalesOrder($zohoSalesOrderId);
+                if (($voidRes['status'] ?? '') === 'invoiced_cannot_void') {
+                    $order->zoho_synced_at = now();
+                    $order->save();
+
+                    SyncHistory::create([
+                        'shop_id' => $this->shop->id,
+                        'order_id' => $order->id,
+                        'action' => 'reconcile',
+                        'status' => 'success',
+                        'zoho_item_id' => $zohoSalesOrderId,
+                        'message' => 'Sales Order is invoiced/closed in Zoho Books; preserved for accounting history.',
+                        'synced_at' => now(),
+                    ]);
+
+                    return [
+                        'success' => true,
+                        'created' => false,
+                        'updated' => false,
+                        'reconciled' => true,
+                        'voided' => false,
+                        'zoho_sales_order_id' => $zohoSalesOrderId,
+                        'zoho_sales_order_number' => $order->zoho_sales_order_number,
+                        'order_id' => $order->id,
+                        'message' => 'Sales Order is invoiced/closed in Zoho Books; preserved for accounting history.',
+                    ];
+                }
+
                 $order->zoho_synced_at = now();
                 $order->save();
 
@@ -2932,6 +3006,54 @@ class ZohoService
                 'voided' => false,
                 'order_id' => $order->id,
                 'message' => 'Order is cancelled; no existing Zoho Sales Order to void.',
+            ];
+        }
+
+        if ($isAlreadyInvoiced && $zohoSalesOrderId) {
+            Log::info("syncOrder: Sales Order {$zohoSalesOrderId} is already invoiced in Zoho Books. Reconciling existing Sales Order.");
+            $hash = hash('sha256', json_encode([
+                'order_number' => $order->order_number,
+                'subtotal' => $order->subtotal,
+                'discount' => $order->discount_total,
+                'shipping' => $order->shipping_total,
+                'tax' => $order->tax_total,
+                'total' => $order->total_price,
+                'line_items' => $order->line_items,
+            ]));
+
+            $order->zoho_sync_hash = $hash;
+            $order->zoho_synced_at = now();
+            $order->save();
+
+            SyncLogger::record([
+                'shop_id' => $this->shop->id,
+                'order_id' => $order->id,
+                'entity' => 'order',
+                'action' => 'RECONCILE',
+                'trigger' => $trigger,
+                'trigger_subtype' => $triggerSubtype,
+                'status' => 'SUCCESS',
+                'shopify_id' => $order->shopify_order_id,
+                'zoho_id' => $zohoSalesOrderId,
+                'message' => 'Sales Order is already invoiced in Zoho Books; reconciled existing Sales Order.',
+                'metadata' => [
+                    'order_number' => $order->order_number ? "#{$order->order_number}" : null,
+                    'amount' => (float) $order->total_price,
+                    'currency' => $order->currency ?? 'USD',
+                    'zoho_sales_order_id' => $zohoSalesOrderId,
+                    'zoho_sales_order_number' => $order->zoho_sales_order_number,
+                ],
+            ]);
+
+            return [
+                'success' => true,
+                'created' => false,
+                'updated' => false,
+                'reconciled' => true,
+                'zoho_sales_order_id' => $zohoSalesOrderId,
+                'zoho_sales_order_number' => $order->zoho_sales_order_number,
+                'order_id' => $order->id,
+                'message' => "Sales Order reconciled successfully — Shopify Order #{$order->order_number} is already invoiced in Zoho Books.",
             ];
         }
 
@@ -3088,6 +3210,38 @@ class ZohoService
                 $updated = true;
                 Log::info("syncOrder: Updated Zoho Sales Order ID {$zohoSalesOrderId} for order ID {$order->id}.");
             } catch (\Throwable $e) {
+                $msg = strtolower($e->getMessage());
+                $code = $e->getCode();
+                if ($code == 36567 || str_contains($msg, '36567') || str_contains($msg, 'invoiced already') || str_contains($msg, 'cannot be updated now')) {
+                    Log::info("syncOrder: Sales Order {$zohoSalesOrderId} is already invoiced in Zoho Books (Error 36567). Reconciling existing record.");
+                    $order->zoho_synced_at = now();
+                    $order->save();
+
+                    SyncLogger::record([
+                        'shop_id' => $this->shop->id,
+                        'order_id' => $order->id,
+                        'entity' => 'order',
+                        'action' => 'RECONCILE',
+                        'trigger' => $trigger,
+                        'trigger_subtype' => $triggerSubtype,
+                        'status' => 'SUCCESS',
+                        'shopify_id' => $order->shopify_order_id,
+                        'zoho_id' => $zohoSalesOrderId,
+                        'message' => 'Sales Order is already invoiced in Zoho Books; reconciled existing Sales Order.',
+                    ]);
+
+                    return [
+                        'success' => true,
+                        'created' => false,
+                        'updated' => false,
+                        'reconciled' => true,
+                        'zoho_sales_order_id' => $zohoSalesOrderId,
+                        'zoho_sales_order_number' => $order->zoho_sales_order_number,
+                        'order_id' => $order->id,
+                        'message' => "Sales Order reconciled successfully — Shopify Order #{$order->order_number} is already invoiced in Zoho Books.",
+                    ];
+                }
+
                 if ($this->isItemNotFoundException($e)) {
                     Log::warning("syncOrder: Zoho Sales Order ID {$zohoSalesOrderId} not found on update. Re-creating Sales Order.");
                     $zohoSalesOrderId = null;
@@ -3473,13 +3627,28 @@ class ZohoService
             ->first();
 
         $zohoInvoiceId = $localInvoice->zoho_invoice_id ?? null;
+        $existingZohoInv = null;
         $created = false;
         $updated = false;
+        $reconciled = false;
 
         if (empty($zohoInvoiceId) && !empty($order->order_number)) {
             $existingZohoInv = $this->findZohoInvoiceByReferenceNumber($order->order_number);
             if ($existingZohoInv && !empty($existingZohoInv['invoice_id'])) {
-                $zohoInvoiceId = $existingZohoInv['invoice_id'];
+                $zohoInvoiceId = (string) $existingZohoInv['invoice_id'];
+            }
+        }
+
+        if (empty($zohoInvoiceId) && !empty($order->zoho_sales_order_id)) {
+            try {
+                $invListRes = $this->makeRequest('GET', "/books/v3/invoices?salesorder_id={$order->zoho_sales_order_id}");
+                $invList = $invListRes['invoices'] ?? [];
+                if (!empty($invList[0]['invoice_id'])) {
+                    $existingZohoInv = $invList[0];
+                    $zohoInvoiceId = (string) $existingZohoInv['invoice_id'];
+                }
+            } catch (\Throwable $e) {
+                // Ignore lookup errors
             }
         }
 
@@ -3492,7 +3661,7 @@ class ZohoService
                         'shopify_order_id' => $order->shopify_order_id,
                         'zoho_invoice_id' => $zohoInvoiceId,
                         'invoice_number' => $existingZohoInv['invoice_number'] ?? null,
-                        'status' => $existingZohoInv['status'] ?? 'created',
+                        'status' => $existingZohoInv['status'] ?? 'sent',
                         'invoice_date' => $order->order_date,
                         'amount' => $order->total_price,
                         'currency' => $order->currency ?? 'USD',
@@ -3501,18 +3670,27 @@ class ZohoService
                     ]);
                 }
 
-                $zohoData = $this->updateInvoice($localInvoice, $order, $invoicePayload);
-                $updated = true;
+                try {
+                    $zohoData = $this->updateInvoice($localInvoice, $order, $invoicePayload);
+                    $updated = true;
+                } catch (\Throwable $updateEx) {
+                    Log::info("syncInvoice: Zoho Invoice {$zohoInvoiceId} cannot be updated directly ({$updateEx->getMessage()}). Reconciling existing invoice.");
+                    $zohoData = [
+                        'invoice_id' => $zohoInvoiceId,
+                        'invoice_number' => $localInvoice->invoice_number ?? ($existingZohoInv['invoice_number'] ?? null),
+                        'status' => $localInvoice->status ?? ($existingZohoInv['status'] ?? 'sent'),
+                    ];
+                    $reconciled = true;
+                }
             } else {
                 try {
                     $zohoData = $this->createInvoiceFromSalesOrder($order->zoho_sales_order_id);
-                    $zohoInvoiceId = $zohoData['invoice_id'] ?? null;
+                    $zohoInvoiceId = (string) ($zohoData['invoice_id'] ?? null);
                     $created = true;
                 } catch (\Throwable $invEx) {
                     $invCode = $invEx->getCode();
                     $invMsg = strtolower($invEx->getMessage());
 
-                    // Zoho code 36026 or "no items in this sales order to be invoiced" means the Sales Order is already invoiced in Zoho Books
                     if ($invCode == 36026 || str_contains($invMsg, 'no items in this sales order to be invoiced') || str_contains($invMsg, 'already invoiced')) {
                         Log::info("syncInvoice: Sales Order {$order->zoho_sales_order_id} is already invoiced in Zoho. Reconciling existing invoice for order #{$order->order_number}.");
                         $existingZohoInv = $this->findZohoInvoiceByReferenceNumber($order->order_number);
@@ -3531,6 +3709,7 @@ class ZohoService
                         if ($existingZohoInv && !empty($existingZohoInv['invoice_id'])) {
                             $zohoInvoiceId = (string) $existingZohoInv['invoice_id'];
                             $zohoData = $existingZohoInv;
+                            $reconciled = true;
                         } else {
                             throw $invEx;
                         }
@@ -3583,14 +3762,14 @@ class ZohoService
             'order_id' => $order->id,
             'invoice_id' => $invoice->id,
             'entity' => 'invoice',
-            'action' => $created ? 'CREATE' : 'UPDATE',
+            'action' => $created ? 'CREATE' : ($updated ? 'UPDATE' : 'RECONCILE'),
             'trigger' => $trigger,
             'trigger_subtype' => $triggerSubtype,
             'status' => 'SUCCESS',
             'shopify_id' => $order->shopify_order_id,
             'zoho_id' => $zohoInvoiceId,
             'zoho_invoice_id' => $zohoInvoiceId,
-            'message' => $created ? 'Invoice created in Zoho Books.' : 'Invoice updated in Zoho Books.',
+            'message' => $created ? 'Invoice created in Zoho Books.' : ($updated ? 'Invoice updated in Zoho Books.' : 'Invoice reconciled in Zoho Books.'),
             'metadata' => [
                 'order_number' => $order->order_number ? "#{$order->order_number}" : null,
                 'invoice_number' => $invoice->invoice_number,
@@ -3602,13 +3781,14 @@ class ZohoService
 
         $invRef = $invoice->invoice_number ?: ($zohoInvoiceId ? "INV-{$zohoInvoiceId}" : '');
         $orderRef = $order->order_number ? "#{$order->order_number}" : "Order #{$order->id}";
-        $msgAction = $created ? 'created' : 'synced';
+        $msgAction = $created ? 'created' : ($reconciled ? 'reconciled' : 'synced');
         $invMsg = "Invoice {$msgAction} successfully — Shopify Order {$orderRef}" . ($invRef ? " → Zoho {$invRef}" : "") . ".";
 
         return [
             'success' => true,
             'created' => $created,
             'updated' => $updated,
+            'reconciled' => $reconciled,
             'zoho_invoice_id' => $zohoInvoiceId,
             'invoice_number' => $invoice->invoice_number,
             'order_id' => $order->id,
